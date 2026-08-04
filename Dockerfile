@@ -13,7 +13,7 @@ COPY crates/agent-gateway/web ./
 RUN pnpm build
 
 # 2. Go 后端编译阶段 (x86 宿主机交叉编译)
-FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS gateway-builder
+FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS gateway-builder
 
 # Buildx 自动注入参数，保持为空，勿设置默认值
 ARG TARGETOS
