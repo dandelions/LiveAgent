@@ -1,13 +1,13 @@
+import type { ScrollFollowHandle } from "@liveagent/ui/lib/chat-scroll/useScrollFollow";
+import type { GitClient } from "@liveagent/ui/lib/git/types";
 import type { MutableRefObject } from "react";
-
+import type { ChatFileLink } from "../../../lib/chat/chatFileLinks";
 import type {
   HistoryMessageRef,
   RenderTimelineItem,
 } from "../../../lib/chat/conversation/conversationState";
 import type { LiveTranscriptStore } from "../../../lib/chat/conversation/liveTranscriptStore";
 import type { PendingUploadedFile } from "../../../lib/chat/messages/uploadedFiles";
-import type { ScrollFollowHandle } from "../../../lib/chat-scroll/useScrollFollow";
-import type { GitClient } from "../../../lib/git/types";
 import type { SectionId } from "../../settings/types";
 
 export type ChatTranscriptProps = {
@@ -19,6 +19,8 @@ export type ChatTranscriptProps = {
   followRef: MutableRefObject<ScrollFollowHandle | null>;
   hasModels: boolean;
   historyItems: RenderTimelineItem[];
+  hasMoreHistory: boolean;
+  onLoadEarlierHistory: () => Promise<void>;
   isHistorySwitching: boolean;
   isSending: boolean;
   isAgentMode: boolean;
@@ -29,6 +31,7 @@ export type ChatTranscriptProps = {
   bottomReservePx?: number;
   contentWidth: number;
   onContentWidthChange: (width: number) => void;
+  onOpenFileLink?: (link: ChatFileLink) => void;
   onResendFromEdit: (
     messageRef: HistoryMessageRef,
     text: string,

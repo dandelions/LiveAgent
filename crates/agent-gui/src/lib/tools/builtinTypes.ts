@@ -4,7 +4,7 @@ import type {
   SubagentBatchDetails,
   SubagentCardDetails,
   SubagentMessageDetails,
-} from "../subagents/protocol";
+} from "@liveagent/ui/lib/subagents/protocol";
 import type { SubagentScheduler } from "../subagents/scheduler";
 
 export type BuiltinToolGroupId =
@@ -29,6 +29,8 @@ export type BuiltinToolMetadata = {
   kind: string;
   isReadOnly: boolean;
   displayCategory: BuiltinToolDisplayCategory;
+  /** MCP 工具所属 server 的 id(仅 MCP 工具有);用于按 server 解析审批策略。 */
+  serverId?: string;
 };
 
 export type BuiltinToolExecutionContext = {

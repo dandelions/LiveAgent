@@ -1,13 +1,8 @@
+import type { MentionComposerDraft } from "@liveagent/ui/components/chat/MentionComposer";
 import type { MutableRefObject } from "react";
-import type { MentionComposerDraft } from "../../../components/chat/MentionComposer";
 import type { HistoryMessageRef } from "../../../lib/chat/conversation/conversationState";
 import type { PendingUploadedFile } from "../../../lib/chat/messages/uploadedFiles";
-import type {
-  ChatRuntimeControls,
-  ExecutionMode,
-  ProviderId,
-  SystemToolId,
-} from "../../../lib/settings";
+import type { ChatRuntimeControls, ExecutionMode, ProviderId } from "../../../lib/settings";
 import type { ConversationRuntimeEntry } from "../runtime/chatPageRuntime";
 
 export type GatewaySelectedModelEvent = {
@@ -32,7 +27,6 @@ export type GatewayChatRequestEvent = {
   runtimeControls?: GatewayChatRuntimeControlsEvent;
   executionMode?: string;
   workdir?: string;
-  selectedSystemTools?: string[];
   uploadedFiles?: PendingUploadedFile[];
   queuePolicy?: "auto" | "append" | "interrupt" | string;
 };
@@ -54,7 +48,6 @@ export type GatewayChatRequestReadyEvent = {
 
 export type EnsureGatewayBridgeConversationReadyOptions = {
   rebased?: boolean;
-  baseMessageRef?: HistoryMessageRef;
 };
 
 export type GatewayChatCancelEvent = {
@@ -72,7 +65,6 @@ export type ActiveGatewayBridgeRequest = {
   runtimeControlsOverride?: ChatRuntimeControls;
   executionModeOverride?: ExecutionMode;
   workdirOverride?: string;
-  selectedSystemToolIdsOverride?: SystemToolId[];
 };
 
 export type SendChatAction = (overrides?: {
@@ -82,15 +74,14 @@ export type SendChatAction = (overrides?: {
   conversationIdOverride?: string;
   executionModeOverride?: ExecutionMode;
   workdirOverride?: string;
-  selectedSystemToolIdsOverride?: SystemToolId[];
   runtimeControlsOverride?: ChatRuntimeControls;
   gatewayBridgeRequestOverride?: ActiveGatewayBridgeRequest | null;
   preserveComposerOnStart?: boolean;
   beforeRuntimeStart?: () => Promise<void>;
   afterInitialHistoryPersist?: () => Promise<void>;
-  // Edit-resend: the edited (truncation-base) user message. Forwarded on the
-  // mirrored user_message event so the gateway can broadcast the truncation
-  // (`rebased`) to every other connected client.
+  // Edit-resend atomically replaces this user message and its following
+  // history before the model runtime starts, then forwards the same anchor
+  // so other connected clients can apply the rebase.
   editResendBaseMessageRef?: HistoryMessageRef;
 }) => Promise<boolean>;
 

@@ -281,6 +281,18 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
         String(args?.workdir ?? ""),
         String(args?.path ?? ""),
       )) as T;
+    case "open_chat_file_link":
+      return (await getGatewayWebSocketClient(loadToken().trim()).openChatFile({
+        conversationId: String(args?.conversation_id ?? ""),
+        workdir: String(args?.workdir ?? ""),
+        path: String(args?.path ?? ""),
+        source: String(args?.source ?? ""),
+        line: typeof args?.line === "number" ? args.line : undefined,
+        endLine: typeof args?.end_line === "number" ? args.end_line : undefined,
+        column: typeof args?.column === "number" ? args.column : undefined,
+        openInFileManager:
+          typeof args?.open_in_file_manager === "boolean" ? args.open_in_file_manager : undefined,
+      })) as T;
     case "fs_create_dir":
       return (await getGatewayWebSocketClient(loadToken().trim()).createDir(
         String(args?.workdir ?? ""),
@@ -361,14 +373,6 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
         String(args?.session_id ?? ""),
         typeof args?.project_path_key === "string" ? args.project_path_key : undefined,
       )) as T;
-    case "system_http_get_test":
-      return {
-        url: `${window.location.origin}/api/status`,
-        status: 200,
-        ok: true,
-        body: "WebUI shim placeholder",
-        content_type: "text/plain",
-      } as T;
     default:
       throw new Error(`WebUI shim does not implement invoke("${command}")`);
   }

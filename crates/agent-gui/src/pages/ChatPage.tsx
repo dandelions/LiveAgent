@@ -1,4 +1,46 @@
 import type { Context } from "@earendil-works/pi-ai";
+import { ApplicationView } from "@liveagent/ui/application/ApplicationView";
+import {
+  type ChangedFilesActions,
+  ChangedFilesActionsProvider,
+} from "@liveagent/ui/components/chat/ChangedFilesCard";
+import { HistoryShareModal } from "@liveagent/ui/components/chat/HistoryShareModal";
+import type { MentionComposerHandle } from "@liveagent/ui/components/chat/MentionComposer";
+import { NotifyToast } from "@liveagent/ui/components/chat/NotifyToast";
+import { SharedHistoryManagerModal } from "@liveagent/ui/components/chat/SharedHistoryManagerModal";
+import { TaskProgressIndicator } from "@liveagent/ui/components/chat/TaskProgressIndicator";
+import { ToolApprovalBar } from "@liveagent/ui/components/chat/ToolApprovalBar";
+import { useSequencedTaskProgress } from "@liveagent/ui/components/chat/useSequencedTaskProgress";
+import { WorkspaceCloneModal } from "@liveagent/ui/components/chat/WorkspaceCloneModal";
+import { WorkspaceResourceSettingsDrawer } from "@liveagent/ui/components/chat/WorkspaceResourceSettingsDrawer";
+import type {
+  GitCommitContextPayload,
+  GitFileContextPayload,
+} from "@liveagent/ui/components/project-tools/git-review/index";
+import type { GitReviewFocusRequest } from "@liveagent/ui/components/project-tools/RightDockContext";
+import { RightDockPanel } from "@liveagent/ui/components/project-tools/RightDockPanel";
+import { expandedPathsForFileTreePath } from "@liveagent/ui/components/project-tools/rightDockModel";
+import { Button } from "@liveagent/ui/components/ui/button";
+import { useConfirmDialog } from "@liveagent/ui/components/ui/confirm-dialog";
+import { useLocale } from "@liveagent/ui/i18n/index";
+import { getAutomationState, useAutomation } from "@liveagent/ui/lib/automation/index";
+import { openChatFileLink } from "@liveagent/ui/lib/chat/openChatFileLink";
+import { selectTodoProgressUpdates } from "@liveagent/ui/lib/chat/taskProgress";
+import type { ScrollFollowHandle } from "@liveagent/ui/lib/chat-scroll/useScrollFollow";
+import { setPreferredMonacoNlsLocale } from "@liveagent/ui/lib/monacoNls";
+import {
+  type ConversationOpenState,
+  createConversationOpenController,
+} from "@liveagent/ui/lib/sidebar/openController";
+import { conversationMatchesScope } from "@liveagent/ui/lib/sidebar/scope";
+import {
+  selectConversations,
+  selectRunningConversationIds,
+} from "@liveagent/ui/lib/sidebar/selectors";
+import { createSidebarStore } from "@liveagent/ui/lib/sidebar/store";
+import { useSidebarSelector } from "@liveagent/ui/lib/sidebar/useSidebarSelector";
+import { terminalSessionBelongsToProject } from "@liveagent/ui/lib/terminal/sessionStore";
+import type { LocalTunnelClient } from "@liveagent/ui/lib/tunnels/constants";
 import { listen } from "@tauri-apps/api/event";
 import {
   type CSSProperties,
@@ -8,29 +50,14 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
-import {
-  type ChangedFilesActions,
-  ChangedFilesActionsProvider,
-} from "../components/chat/ChangedFilesCard";
-import { HistoryShareModal } from "../components/chat/HistoryShareModal";
-import type { MentionComposerHandle } from "../components/chat/MentionComposer";
-import { NotifyToast } from "../components/chat/NotifyToast";
-import { SharedHistoryManagerModal } from "../components/chat/SharedHistoryManagerModal";
+import { loadComposerUploadedImagePreview } from "../agent-ui-adapters/composerImagePreview";
+import { WorkspaceCloneTaskOverlayAdapter } from "../agent-ui-adapters/workspaceCloneTasks";
 import { PanelRightClose, PanelRightOpen } from "../components/icons";
 import { MacOsTitleBarToggle } from "../components/MacOsTitleBarSpacer";
-import type {
-  GitCommitContextPayload,
-  GitFileContextPayload,
-} from "../components/project-tools/git-review";
-import type { GitReviewFocusRequest } from "../components/project-tools/RightDockContext";
-import { RightDockPanel } from "../components/project-tools/RightDockPanel";
-import { expandedPathsForFileTreePath } from "../components/project-tools/rightDockModel";
-import { Button } from "../components/ui/button";
-import { useConfirmDialog } from "../components/ui/confirm-dialog";
-import { useLocale } from "../i18n";
 import type { AppUpdateController } from "../lib/appUpdates";
-import { getAutomationState, useAutomation } from "../lib/automation";
+import type { ChatFileLink } from "../lib/chat/chatFileLinks";
 import type { CompactionStatus } from "../lib/chat/compaction/types";
 import {
   buildRequestContext,
@@ -38,6 +65,7 @@ import {
   createConversationStateFromContext,
   type RenderTimelineItem,
 } from "../lib/chat/conversation/conversationState";
+import type { LiveTranscriptStore } from "../lib/chat/conversation/liveTranscriptStore";
 import type { ChatHistorySummary } from "../lib/chat/history/chatHistory";
 import { memoryExtraction } from "../lib/chat/memory/extractionController";
 import type { CodeMentionReference } from "../lib/chat/messages/mentionReferences";
@@ -47,9 +75,7 @@ import {
   createPendingHistoryItem,
   getFirstUserMessageText,
 } from "../lib/chat/page/chatPageHelpers";
-import type { ScrollFollowHandle } from "../lib/chat-scroll/useScrollFollow";
 import { tauriGitClient } from "../lib/git/tauriGitClient";
-import { setPreferredMonacoNlsLocale } from "../lib/monacoNls";
 import {
   type AppSettings,
   getRightDockFileTreeState,
@@ -64,6 +90,7 @@ import {
   type RightDockFileTreeStatePatch,
   type RightDockProjectState,
   resolveEffectiveTheme,
+  resolveWorkspaceResources,
   type SelectedModel,
   updateChatTranscriptWidth,
   updateRightDockFileTreeState,
@@ -72,44 +99,38 @@ import {
   updateSkills,
   updateSshProjectHostIds,
   updateSystem,
+  updateWorkspaceResourceSettings,
+  type WorkspaceProject,
   workspaceProjectPathKey,
 } from "../lib/settings";
-import { cn } from "../lib/shared/utils";
 import { createGuiSidebarBackend } from "../lib/sidebar/guiSidebarBackend";
-import {
-  type ConversationOpenState,
-  createConversationOpenController,
-} from "../lib/sidebar/openController";
-import { conversationMatchesScope } from "../lib/sidebar/scope";
-import { selectConversations, selectRunningConversationIds } from "../lib/sidebar/selectors";
-import { createSidebarStore } from "../lib/sidebar/store";
-import { useSidebarSelector } from "../lib/sidebar/useSidebarSelector";
-import { mergeAlwaysEnabledSkillNames } from "../lib/skills";
 import { createSubagentStoreManager } from "../lib/subagents";
-import { terminalSessionBelongsToProject } from "../lib/terminal/sessionStore";
 import { tauriTerminalClient } from "../lib/terminal/tauriTerminalClient";
 import { cancelPendingAskUserQuestionsForConversation } from "../lib/tools/askUserQuestionTools";
 import { disposeTodoToolState } from "../lib/tools/todoTools";
+import {
+  answerToolApproval,
+  cancelPendingToolApprovalsForConversation,
+  getToolApprovalVersion,
+  listPendingToolApprovalsForConversation,
+  subscribeToolApprovals,
+} from "../lib/tools/toolApproval";
 import { buildTrayMenuModel, syncTrayMenu } from "../lib/tray/trayMenu";
 import { useTrayPrefs } from "../lib/tray/trayPrefs";
-import type { LocalTunnelClient } from "../lib/tunnels/constants";
 import { createTauriTunnelClient } from "../lib/tunnels/tauriTunnelClient";
 import { tauriWorkspaceActivityClient } from "../lib/workspace-activity/tauriWorkspaceActivityClient";
 import {
   ChatComposerBar,
-  ChatHeader,
   ChatTranscript,
   createChatRuntimeHost,
   type EnsureGatewayBridgeConversationReadyOptions,
   MAX_UPLOAD_FILES,
   pruneIdleConversationRuntimeCaches,
   type SendChatAction,
-  scheduleIdleHydration,
   useChatPageRuntimeStore,
   useChatSkills,
   useConversationHistoryActions,
   useEditResend,
-  useGatewayBridgeBatcher,
   useGatewayBridgeListeners,
   useLiveTranscriptController,
   usePendingUploads,
@@ -119,7 +140,7 @@ import { ChatFileDropOverlay } from "./chat/components/ChatFileDropOverlay";
 import { WorkspaceOverlayHost } from "./chat/components/WorkspaceOverlayHost";
 import { useComposerDraftCache } from "./chat/composer/useComposerDraftCache";
 import { useGatewayBridgeReadiness } from "./chat/gateway/useGatewayBridgeReadiness";
-import { useGatewayRuntimeSnapshots } from "./chat/gateway/useGatewayRuntimeSnapshots";
+import { useGatewayRunMirrorCoordinator } from "./chat/gateway/useGatewayRunMirrorCoordinator";
 import { useGatewayStatus } from "./chat/gateway/useGatewayStatus";
 import { useBranchConversation } from "./chat/history/useBranchConversation";
 import { useSharedHistory } from "./chat/history/useSharedHistory";
@@ -137,29 +158,76 @@ import { useProjectTerminals } from "./chat/workspace/useProjectTerminals";
 import { useWorkspaceOverlays } from "./chat/workspace/useWorkspaceOverlays";
 import { useWorkspaceProjectRemoval } from "./chat/workspace/useWorkspaceProjectRemoval";
 import { useWorkspaceProjects } from "./chat/workspace/useWorkspaceProjects";
-import { WorkspaceCloneModal } from "./chat/workspace/WorkspaceCloneModal";
-import { WorkspaceCloneTaskOverlay } from "./chat/workspace/WorkspaceCloneTaskOverlay";
-import { McpHubPage } from "./mcp-hub/McpHubPage";
 import type { SectionId } from "./settings/types";
-import { SkillsHubPage } from "./skills-hub/SkillsHubPage";
 
 type ChatPageProps = {
   settings: AppSettings;
   setSettings: (updater: (prev: AppSettings) => AppSettings) => void;
   /** Reads the authoritative settingsRef (not render-time state) so tools never see a stale snapshot. */
   getMcpSettings: () => AppSettings["mcp"];
+  /** Live read of tool approval policies (same settingsRef rationale as getMcpSettings). */
+  getToolPolicies: () => AppSettings["system"]["toolPolicies"];
   context: Context;
   setContext: (next: Context) => void;
-  onOpenSettings: (section?: SectionId) => void;
+  onOpenSettings: (section?: SectionId, providerId?: string) => void;
   onToggleTheme: () => void;
   appUpdate?: AppUpdateController;
 };
+
+function CurrentTaskProgress(props: {
+  historyItems: readonly RenderTimelineItem[];
+  liveTranscriptStore: LiveTranscriptStore;
+  isConversationRunning: boolean;
+}) {
+  const { historyItems, liveTranscriptStore, isConversationRunning } = props;
+  const { t } = useLocale();
+  const getLiveRoundsSnapshot = useCallback(
+    () => liveTranscriptStore.getSnapshot().liveRounds,
+    [liveTranscriptStore],
+  );
+  const liveRounds = useSyncExternalStore(
+    liveTranscriptStore.subscribe,
+    getLiveRoundsSnapshot,
+    getLiveRoundsSnapshot,
+  );
+  const updates = useMemo(
+    () => selectTodoProgressUpdates(historyItems, liveRounds),
+    [historyItems, liveRounds],
+  );
+  const snapshot = useSequencedTaskProgress(updates, isConversationRunning);
+  const labels = useMemo(() => {
+    if (!snapshot) return null;
+    return {
+      title: t("chat.taskProgress.title"),
+      step: t("chat.taskProgress.step")
+        .replace("{current}", String(snapshot.currentStep))
+        .replace("{total}", String(snapshot.totalCount)),
+      completedCount: `${snapshot.completedCount}/${snapshot.totalCount} ${t(
+        "chat.taskProgress.completedCount",
+      )}`,
+      running: t("chat.taskProgress.running"),
+      pending: t("chat.taskProgress.pending"),
+      paused: t("chat.taskProgress.paused"),
+      completed: t("chat.taskProgress.completed"),
+    };
+  }, [snapshot, t]);
+
+  if (!snapshot || !labels) return null;
+  return (
+    <TaskProgressIndicator
+      snapshot={snapshot}
+      isConversationRunning={isConversationRunning}
+      labels={labels}
+    />
+  );
+}
 
 export function ChatPage(props: ChatPageProps) {
   const {
     settings,
     setSettings,
     getMcpSettings,
+    getToolPolicies,
     context,
     setContext,
     onOpenSettings,
@@ -211,19 +279,13 @@ export function ChatPage(props: ChatPageProps) {
 
   const isAgentMode = isAgentExecutionMode(settings.system.executionMode);
   const isAgentDevExecutionMode = isAgentDevMode(settings.system.executionMode);
-  const skillsConfigured = settings.skills.enabled;
-  const skillsEnabled = skillsConfigured && isAgentMode;
+  const workdir = settings.system.workdir.trim();
   const activeAgentPrompt = useMemo(() => {
     const activeTemplate = settings.agents.find(
       (template) => template.enabled && template.prompt.trim(),
     );
     return activeTemplate?.prompt.trim() ?? "";
   }, [settings.agents]);
-  const selectedSkillNames = useMemo(
-    () => (skillsEnabled ? mergeAlwaysEnabledSkillNames(settings.skills.selected) : []),
-    [skillsEnabled, settings.skills.selected],
-  );
-  const workdir = settings.system.workdir.trim();
   // The sidebar store owns all sidebar domain state (conversation list,
   // workdirs, running set); ChatPage only issues imperative calls and keeps a
   // few narrow selector subscriptions.
@@ -239,6 +301,9 @@ export function ChatPage(props: ChatPageProps) {
   );
   const prepareComposerForConversationChangeActionRef = useRef<() => void>(() => undefined);
   const [activeView, setActiveView] = useState<"chat" | "skills-hub" | "mcp-hub">("chat");
+  const [resourceSettingsProject, setResourceSettingsProject] = useState<WorkspaceProject | null>(
+    null,
+  );
   const [rightDockOpen, setRightDockOpen] = useState(false);
   const {
     workspaceProjects,
@@ -331,40 +396,24 @@ export function ChatPage(props: ChatPageProps) {
   });
 
   const { availableSkills, skillsRootDir, refreshSkills } = useChatSkills({
-    skillsEnabled,
-    selectedSkillNames,
+    skillsEnabled: settings.skills.enabled && isAgentMode,
+    selectedSkillNames: settings.skills.selected,
     setSettings,
   });
-  const enabledComposerSkills = useMemo(() => {
-    if (!skillsEnabled || selectedSkillNames.length === 0 || availableSkills.length === 0) {
-      return [];
-    }
-    const byName = new Map(availableSkills.map((skill) => [skill.name, skill]));
-    return selectedSkillNames
-      .map((name) => byName.get(name))
-      .filter((skill): skill is (typeof availableSkills)[number] => Boolean(skill));
-  }, [availableSkills, selectedSkillNames, skillsEnabled]);
-  const codeReviewSkill = useMemo(
-    () =>
-      availableSkills.find(
-        (skill) => skill.name === "liveagent-code-review" && skill.builtIn === true,
-      ),
-    [availableSkills],
-  );
 
-  const historyRenderItems = useMemo<RenderTimelineItem[]>(
-    () => conversationState.historyRenderItems,
+  const transcriptItems = useMemo<RenderTimelineItem[]>(
+    () => conversationState.transcript.items,
     [conversationState],
   );
   // Sent-prompt history for the composer's ↑/↓ recall. Read lazily through a
   // ref so the memoized composer bar never re-renders on transcript growth.
-  const historyRenderItemsRef = useRef<RenderTimelineItem[]>(historyRenderItems);
+  const transcriptItemsRef = useRef<RenderTimelineItem[]>(transcriptItems);
   useEffect(() => {
-    historyRenderItemsRef.current = historyRenderItems;
-  }, [historyRenderItems]);
+    transcriptItemsRef.current = transcriptItems;
+  }, [transcriptItems]);
   const loadComposerHistoryPrompts = useCallback(() => {
     const prompts: string[] = [];
-    for (const item of historyRenderItemsRef.current) {
+    for (const item of transcriptItemsRef.current) {
       if (item.kind === "user" && item.text.trim()) prompts.push(item.text);
     }
     return prompts;
@@ -394,17 +443,12 @@ export function ChatPage(props: ChatPageProps) {
   const openInitialActionRef = useRef<(id: string) => Promise<"cache-hit" | "painted">>(
     async () => "painted",
   );
-  const hydrateFullActionRef = useRef<(id: string) => Promise<void>>(async () => undefined);
+  const loadEarlierHistoryActionRef = useRef<(id: string) => Promise<void>>(async () => undefined);
   const cleanupDeletedConversationActionRef = useRef<(id: string) => void>(() => undefined);
-  // Two-phase conversation open: paint the active segment fast, hydrate the
-  // full transcript at idle. The overlay appears only after 150ms of
-  // still-opening — no minimum overlay duration.
   const openController = useMemo(
     () =>
       createConversationOpenController({
         openInitial: (conversationId) => openInitialActionRef.current(conversationId),
-        hydrateFull: (conversationId) => hydrateFullActionRef.current(conversationId),
-        scheduleIdle: scheduleIdleHydration,
         onStateChange: setConversationOpenState,
       }),
     [],
@@ -445,12 +489,16 @@ export function ChatPage(props: ChatPageProps) {
   } = useLiveTranscriptController({
     currentConversationId,
   });
-  const { queueGatewayBridgeEventForRequest, flushGatewayBridgeEventsForRequest } =
-    useGatewayBridgeBatcher();
+  const {
+    queueGatewayBridgeEventForRequest,
+    flushGatewayBridgeEventsForRequest,
+    registerGatewayRunMirror,
+    finishGatewayRunMirror,
+  } = useGatewayRunMirrorCoordinator();
   const {
     currentConversationIdRef,
     conversationRuntimeCacheRef,
-    persistedConversationStateRef,
+    conversationPersistenceCursorRef,
     buildRuntimeEntryFromVisibleState,
     syncVisibleConversationRuntime,
     updateConversationRuntimeEntry,
@@ -487,6 +535,10 @@ export function ChatPage(props: ChatPageProps) {
     setCurrentConversationSelectedModel,
     setRunningConversationIds,
   });
+  const handleLoadEarlierHistory = useCallback(
+    () => loadEarlierHistoryActionRef.current(currentConversationIdRef.current),
+    [currentConversationIdRef],
+  );
 
   const {
     modelOptions,
@@ -513,13 +565,36 @@ export function ChatPage(props: ChatPageProps) {
     updateConversationRuntimeEntry,
   });
 
-  function cancelConversationHydration() {
+  function cancelConversationLoad() {
     conversationLoadSequenceRef.current += 1;
     setHydratingConversationId(null);
     setHydrationFailedConversationId(null);
   }
 
   const isDraftConversation = !historyItems.some((item) => item.id === currentConversationId);
+
+  // 当前会话的待审批工具:订阅审批服务版本,pending 表变更即重取。用于输入框上方
+  // 的集中审批栏(取代埋在每个折叠项里的分散卡片)。
+  useSyncExternalStore(subscribeToolApprovals, getToolApprovalVersion, getToolApprovalVersion);
+  const pendingToolApprovals = listPendingToolApprovalsForConversation(currentConversationId);
+  const approvalBar =
+    pendingToolApprovals.length > 0 ? (
+      <ToolApprovalBar
+        pending={pendingToolApprovals}
+        onDecide={(toolCallId, decision) =>
+          Promise.resolve(
+            answerToolApproval(toolCallId, decision, { conversationId: currentConversationId }),
+          )
+        }
+        onDecideAll={async (decision) => {
+          for (const item of pendingToolApprovals) {
+            answerToolApproval(item.toolCallId, decision, {
+              conversationId: currentConversationId,
+            });
+          }
+        }}
+      />
+    ) : null;
   const currentConversationPersistedCwd =
     historyItems.find((item) => item.id === currentConversationId)?.cwd?.trim() || "";
   const currentConversationRuntimeWorkdir =
@@ -528,6 +603,31 @@ export function ChatPage(props: ChatPageProps) {
     currentConversationPersistedCwd ||
     currentConversationRuntimeWorkdir ||
     (isAgentMode ? activeWorkspaceProjectPath || workdir : "");
+  const activeWorkspaceResources = useMemo(
+    () => resolveWorkspaceResources(settings, displayedConversationWorkdir),
+    [displayedConversationWorkdir, settings],
+  );
+  const skillsEnabled = activeWorkspaceResources.skillsEnabled && isAgentMode;
+  const selectedSkillNames = useMemo(
+    () => (skillsEnabled ? activeWorkspaceResources.skillNames : []),
+    [activeWorkspaceResources.skillNames, skillsEnabled],
+  );
+  const enabledComposerSkills = useMemo(() => {
+    if (!skillsEnabled || selectedSkillNames.length === 0 || availableSkills.length === 0) {
+      return [];
+    }
+    const byName = new Map(availableSkills.map((skill) => [skill.name, skill]));
+    return selectedSkillNames
+      .map((name) => byName.get(name))
+      .filter((skill): skill is (typeof availableSkills)[number] => Boolean(skill));
+  }, [availableSkills, selectedSkillNames, skillsEnabled]);
+  const codeReviewSkill = useMemo(
+    () =>
+      availableSkills.find(
+        (skill) => skill.name === "liveagent-code-review" && skill.builtIn === true,
+      ),
+    [availableSkills],
+  );
   const terminalProjectPath = isAgentMode ? activeWorkspaceProjectPath.trim() : "";
   const terminalProjectPathKey = terminalProjectPath
     ? workspaceProjectPathKey(terminalProjectPath)
@@ -666,7 +766,12 @@ export function ChatPage(props: ChatPageProps) {
     terminalProjectPathKey,
     rightDockFileTreeOpen,
   });
-  const { handleOpenWorkspaceFile, handleOpenSshTerminal } = workspaceOverlays;
+  const {
+    handleOpenWorkspaceFile,
+    handleOpenSshTerminal,
+    openWorkspaceEditorFile,
+    openWorkspaceFilePreview,
+  } = workspaceOverlays;
   // ── 回复末尾「已编辑文件」卡的三个动作 ────────────────────────────────
   const gitReviewFocusNonceRef = useRef(0);
   const [gitReviewFocusRequest, setGitReviewFocusRequest] = useState<GitReviewFocusRequest | null>(
@@ -748,6 +853,84 @@ export function ChatPage(props: ChatPageProps) {
     hookWarning,
     compactionStatus,
   });
+
+  const handleOpenChatFileLink = useCallback(
+    (link: ChatFileLink) => {
+      const conversationId = currentConversationId;
+      const conversationWorkdir = displayedConversationWorkdir.trim();
+      if (!conversationWorkdir) {
+        addNotify("error", "The conversation working directory is unavailable.");
+        return;
+      }
+      const request = { ...link, conversationId, workdir: conversationWorkdir };
+      void openChatFileLink(request)
+        .then(async (result) => {
+          if (result.action === "opened" || result.action === "revealed") return;
+          const resultWorkdir = result.workdir?.trim() ?? "";
+          const resultPath = result.path?.trim() ?? "";
+          if (!resultWorkdir || !resultPath) {
+            addNotify("error", "The linked file could not be opened.");
+            return;
+          }
+          if (result.action === "directory") {
+            if (workspaceProjectPathKey(resultWorkdir) === terminalProjectPathKey) {
+              handleChangedFileReveal(resultPath);
+              return;
+            }
+            const fallback = await openChatFileLink({ ...request, openInFileManager: true });
+            if (fallback.action !== "opened") {
+              addNotify("error", "The linked directory could not be opened.");
+            }
+            return;
+          }
+          const workspaceRequest = {
+            projectPathKey: workspaceProjectPathKey(resultWorkdir),
+            workdir: resultWorkdir,
+            path: resultPath,
+          };
+          if (
+            !result.outsideWorkspace &&
+            workspaceRequest.projectPathKey === terminalProjectPathKey
+          ) {
+            handleChangedFileReveal(resultPath);
+          }
+          if (result.action === "preview") {
+            openWorkspaceFilePreview(workspaceRequest);
+            return;
+          }
+          openWorkspaceEditorFile({
+            ...workspaceRequest,
+            line: result.line,
+            endLine: result.endLine,
+            column: result.column,
+          });
+        })
+        .catch((error: unknown) => {
+          const message =
+            error && typeof error === "object" && "message" in error
+              ? String((error as { message?: unknown }).message ?? "")
+              : String(error ?? "");
+          const normalized = message.toLowerCase();
+          addNotify(
+            "error",
+            normalized.includes("timed out") ||
+              normalized.includes("offline") ||
+              normalized.includes("not connected")
+              ? "The device that owns this conversation is offline or did not respond."
+              : message || "The linked file could not be opened.",
+          );
+        });
+    },
+    [
+      addNotify,
+      currentConversationId,
+      displayedConversationWorkdir,
+      handleChangedFileReveal,
+      openWorkspaceEditorFile,
+      openWorkspaceFilePreview,
+      terminalProjectPathKey,
+    ],
+  );
 
   const {
     isUploadingFiles,
@@ -839,20 +1022,20 @@ export function ChatPage(props: ChatPageProps) {
     sendActionRef,
   });
 
-  const {
-    activeGatewayRuntimeRunsRef,
-    queueGatewayRuntimeSnapshot,
-    queueGatewayRuntimeSnapshotForRun,
-    registerActiveGatewayRuntimeRun,
-    finishActiveGatewayRuntimeRun,
-  } = useGatewayRuntimeSnapshots({
-    canShareHistory,
-    remoteRuntimeStatus,
-    currentConversationIdRef,
-    queuedChatTurnsRef,
-    publishChatQueueSnapshots,
-    collectChatQueueSnapshotConversationIds,
-  });
+  // Queue snapshots publish on queue mutation only; after a gateway
+  // reconnect (new session) the gateway's in-memory queue view is empty, so
+  // republish the current queue for every conversation that has one.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: connection identity intentionally drives the republish
+  useEffect(() => {
+    if (!canShareHistory) {
+      return;
+    }
+    publishChatQueueSnapshots(
+      collectChatQueueSnapshotConversationIds(queuedChatTurnsRef.current, [
+        currentConversationIdRef.current,
+      ]),
+    );
+  }, [canShareHistory, remoteRuntimeStatus.connectedSince, remoteRuntimeStatus.sessionId]);
 
   const deleteConversationLocalCaches = useCallback(
     (conversationId: string) => {
@@ -874,7 +1057,7 @@ export function ChatPage(props: ChatPageProps) {
       const queuedConversationIds = getQueuedConversationIds(queuedChatTurnsRef.current);
       pruneIdleConversationRuntimeCaches({
         runtimeCache: conversationRuntimeCacheRef.current,
-        persistedStateCache: persistedConversationStateRef.current,
+        persistenceCursors: conversationPersistenceCursorRef.current,
         keepConversationIds: [
           currentConversationIdRef.current,
           ...extraKeepIds,
@@ -886,6 +1069,7 @@ export function ChatPage(props: ChatPageProps) {
           subagentStoresRef.current.dispose(conversationId);
           disposeTodoToolState(conversationId);
           cancelPendingAskUserQuestionsForConversation(conversationId);
+          cancelPendingToolApprovalsForConversation(conversationId);
         },
       });
     },
@@ -894,7 +1078,7 @@ export function ChatPage(props: ChatPageProps) {
       currentConversationIdRef,
       deleteConversationLocalCaches,
       isConversationRunning,
-      persistedConversationStateRef,
+      conversationPersistenceCursorRef,
     ],
   );
 
@@ -931,14 +1115,15 @@ export function ChatPage(props: ChatPageProps) {
   const {
     startNewConversation,
     openInitial: openConversationInitial,
-    hydrateFull: hydrateConversationFull,
+    loadEarlier: loadEarlierConversationHistory,
+    replaceConversationAtMessage,
     cleanupDeletedConversation,
     persistConversation,
   } = useConversationHistoryActions({
     conversationState,
     currentConversationIdRef,
     conversationRuntimeCacheRef,
-    persistedConversationStateRef,
+    conversationPersistenceCursorRef,
     markLocalHistorySnapshotSynced,
     isConversationRunning,
     conversationLoadSequenceRef,
@@ -948,7 +1133,7 @@ export function ChatPage(props: ChatPageProps) {
     buildRuntimeEntryFromVisibleState,
     syncVisibleConversationRuntime,
     updateConversationRuntimeEntry,
-    cancelConversationHydration,
+    cancelConversationLoad,
     resetVisibleTransientState,
     deleteConversationArtifacts: deleteConversationLocalCaches,
     disposeSubagentsForConversation: (conversationId) => {
@@ -966,7 +1151,7 @@ export function ChatPage(props: ChatPageProps) {
 
   startNewConversationActionRef.current = startNewConversation;
   openInitialActionRef.current = openConversationInitial;
-  hydrateFullActionRef.current = hydrateConversationFull;
+  loadEarlierHistoryActionRef.current = loadEarlierConversationHistory;
   cleanupDeletedConversationActionRef.current = cleanupDeletedConversation;
 
   const {
@@ -990,7 +1175,7 @@ export function ChatPage(props: ChatPageProps) {
     isConversationRunning,
     currentConversationIdRef,
     conversationRuntimeCacheRef,
-    persistedConversationStateRef,
+    conversationPersistenceCursorRef,
     locallySyncedHistoryUpdatedAtRef,
     deleteConversationLocalCaches,
     disposeSubagentsForConversation: (conversationId) => {
@@ -1016,7 +1201,7 @@ export function ChatPage(props: ChatPageProps) {
     if (conversationState.meta.totalMessageCount > 0 || pendingUploadedFiles.length > 0) {
       return;
     }
-    if (persistedConversationStateRef.current.has(conversationId)) {
+    if (conversationPersistenceCursorRef.current.has(conversationId)) {
       return;
     }
     const historyItem = sidebarStore.peek(conversationId);
@@ -1076,8 +1261,7 @@ export function ChatPage(props: ChatPageProps) {
     conversationState,
     currentConversationIdRef,
     conversationRuntimeCacheRef,
-    persistedConversationStateRef,
-    buildRuntimeEntryFromVisibleState,
+    conversationPersistenceCursorRef,
     syncVisibleConversationRuntime,
     isConversationRunning,
     sidebarStore,
@@ -1086,7 +1270,6 @@ export function ChatPage(props: ChatPageProps) {
     hydrationFailedConversationIdRef,
     setHydratingConversationId,
     setHydrationFailedConversationId,
-    subagentStoresRef,
   });
 
   ensureGatewayBridgeConversationReadyRef.current = ensureGatewayBridgeConversationReady;
@@ -1253,6 +1436,7 @@ export function ChatPage(props: ChatPageProps) {
     settings,
     setSettings,
     getMcpSettings,
+    getToolPolicies,
     t,
     setErrorMessage,
     sidebarStore,
@@ -1294,20 +1478,17 @@ export function ChatPage(props: ChatPageProps) {
     updateRetryAttempts,
     queueGatewayBridgeEventForRequest,
     flushGatewayBridgeEventsForRequest,
-    activeGatewayRuntimeRunsRef,
-    queueGatewayRuntimeSnapshot,
-    queueGatewayRuntimeSnapshotForRun,
-    registerActiveGatewayRuntimeRun,
-    finishActiveGatewayRuntimeRun,
+    registerGatewayRunMirror,
+    finishGatewayRunMirror,
     gatewayBridgeHistorySummaryRef,
     availableSkills,
     skillsRootDir,
     refreshSkills,
-    selectedSkillNames,
     activeAgentPrompt,
     ensureTunnelToolTab,
     ensureSshTunnelToolTab,
     persistConversation,
+    replaceConversationAtMessage,
     pruneIdleConversationCaches,
     requestQueuedChatTurnProcessing,
   });
@@ -1606,9 +1787,9 @@ export function ChatPage(props: ChatPageProps) {
   const composerPlaceholder = isCompactionRunning
     ? t("chat.compactingContextWait")
     : isConversationHydrating
-      ? "正在补全完整历史，请稍候..."
+      ? "正在加载会话，请稍候..."
       : isConversationHydrationFailed
-        ? "当前会话完整历史加载失败，请重新打开会话..."
+        ? "当前会话加载失败，请重新打开会话..."
         : enabledComposerSkills.length > 0
           ? t("chat.inputHintWithSkills")
           : t("chat.inputHint");
@@ -1639,16 +1820,12 @@ export function ChatPage(props: ChatPageProps) {
   });
 
   const { handleResendFromEdit } = useEditResend({
-    conversationState,
     isSending,
     isConversationHydrating,
     isConversationHydrationFailed,
     currentConversationIdRef,
-    composerRef,
-    setPendingUploadsForConversation,
-    updateConversationRuntimeEntry,
-    invalidateSubagentsForConversation: (conversationId) => {
-      subagentStoresRef.current.invalidate(conversationId);
+    onError: (error) => {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
     },
     sendActionRef,
   });
@@ -1695,6 +1872,7 @@ export function ChatPage(props: ChatPageProps) {
           onNewConversationForProject={handleNewConversationForProject}
           onBrowseProjectInFileTree={handleBrowseWorkspaceProjectInFileTree}
           onBrowseProjectInSystemFileManager={handleBrowseWorkspaceProjectInSystemFileManager}
+          onConfigureProjectResources={setResourceSettingsProject}
           onStartRenamingProject={handleStartRenamingWorkspaceProject}
           onProjectRenameDraftChange={setProjectRenameDraft}
           onCommitProjectRename={handleCommitWorkspaceProjectRename}
@@ -1744,7 +1922,7 @@ export function ChatPage(props: ChatPageProps) {
             onLoadBranches={handleLoadWorkspaceRemoteBranches}
           />
         ) : null}
-        <WorkspaceCloneTaskOverlay onOpenWorkspace={handleOpenClonedWorkspace} />
+        <WorkspaceCloneTaskOverlayAdapter onOpenWorkspace={handleOpenClonedWorkspace} />
 
         {shareConversation ? (
           <HistoryShareModal
@@ -1783,177 +1961,171 @@ export function ChatPage(props: ChatPageProps) {
         {/* ---- Main content ----
             字体缩放仅作用于聊天视图：Skills/MCP Hub 页面存在大量未迁移的固定
             像素字号，整列缩放会造成混排（聊天区设置也只应影响聊天区）。 */}
-        <div
-          className={cn(
-            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background",
-            activeView === "chat" && "zone-font-scale",
-          )}
-          style={
-            activeView === "chat"
-              ? ({
-                  "--zone-font-scale": settings.customSettings.fontScale.chat,
-                } as CSSProperties)
-              : undefined
+        <ApplicationView
+          activeView={activeView}
+          settings={settings}
+          setSettings={setSettings}
+          isAgentMode={isAgentMode}
+          sidebarOpen={sidebarOpen}
+          onOpenSidebar={handleOpenSidebar}
+          initialSkills={availableSkills}
+          initialSkillsRootDir={skillsRootDir}
+          className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background"
+          chatClassName="zone-font-scale"
+          chatStyle={
+            {
+              "--zone-font-scale": settings.customSettings.fontScale.chat,
+            } as CSSProperties
           }
-        >
-          {activeView === "skills-hub" ? (
-            <SkillsHubPage
-              settings={settings}
-              setSettings={setSettings}
-              initialSkills={availableSkills}
-              initialRootDir={skillsRootDir}
-              isAgentMode={isAgentMode}
-              sidebarOpen={sidebarOpen}
-              onOpenSidebar={handleOpenSidebar}
-            />
-          ) : activeView === "mcp-hub" ? (
-            <McpHubPage
-              settings={settings}
-              setSettings={setSettings}
-              isAgentMode={isAgentMode}
-              sidebarOpen={sidebarOpen}
-              onOpenSidebar={handleOpenSidebar}
-            />
-          ) : (
-            <>
-              <div className="relative z-20">
-                <ChatHeader
-                  settings={settings}
-                  onSelectExecutionMode={(mode) =>
-                    setSettings((prev) => {
-                      const current = prev.system.executionMode;
-                      if (mode === "text") {
-                        return current === "text"
-                          ? prev
-                          : updateSystem(prev, { executionMode: "text" });
-                      }
-                      // 切回 Agent：仅从 Chat 切换；agent-dev 视为 Agent，保持不降级。
-                      return current === "text"
-                        ? updateSystem(prev, { executionMode: "tools" })
-                        : prev;
-                    })
-                  }
-                  hasModels={hasModels}
-                  currentModelLabel={currentModelLabel}
-                  modelOptions={modelOptions}
-                  selectedValue={selectedValue}
-                  sidebarOpen={sidebarOpen}
-                  onSelectModel={handleSelectModel}
-                  onOpenSettings={onOpenSettings}
-                  onToggleTheme={onToggleTheme}
-                  onOpenSidebar={handleOpenSidebar}
-                  trailingActions={
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => setRightDockOpen((open) => !open)}
-                      disabled={Boolean(terminalDisabledMessage) && !rightDockOpen}
-                      aria-expanded={rightDockOpen}
-                      title={
-                        rightDockOpen
-                          ? "Collapse project tools panel"
-                          : (terminalDisabledMessage ?? "Expand project tools panel")
-                      }
-                      className={`relative h-8 w-8 rounded-lg text-muted-foreground transition-[background-color,color,transform] duration-150 hover:text-foreground active:scale-95 ${
-                        rightDockOpen ? "bg-muted text-foreground" : ""
-                      }`}
-                    >
-                      {rightDockOpen ? (
-                        <PanelRightClose className="h-4 w-4" />
-                      ) : (
-                        <PanelRightOpen className="h-4 w-4" />
-                      )}
-                      {projectTerminalSessions.length > 0 ? (
-                        <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[calc(10px*var(--zone-font-scale,1))] font-semibold leading-none text-white">
-                          {projectTerminalSessions.length}
-                        </span>
-                      ) : null}
-                    </Button>
-                  }
-                />
-                <NotifyToast items={notifyItems} onDismiss={dismissNotify} />
-              </div>
+          chat={{
+            onSelectExecutionMode: (mode) =>
+              setSettings((prev) => {
+                const current = prev.system.executionMode;
+                if (mode === "text") {
+                  return current === "text" ? prev : updateSystem(prev, { executionMode: "text" });
+                }
+                // 切回 Agent：仅从 Chat 切换；agent-dev 视为 Agent，保持不降级。
+                return current === "text" ? updateSystem(prev, { executionMode: "tools" }) : prev;
+              }),
+            hasModels,
+            currentModelLabel,
+            modelOptions,
+            selectedValue,
+            sidebarOpen,
+            onSelectModel: handleSelectModel,
+            onOpenSettings,
+            onToggleTheme,
+            onOpenSidebar: handleOpenSidebar,
+            trailingActions: (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setRightDockOpen((open) => !open)}
+                disabled={Boolean(terminalDisabledMessage) && !rightDockOpen}
+                aria-expanded={rightDockOpen}
+                title={
+                  rightDockOpen
+                    ? "Collapse project tools panel"
+                    : (terminalDisabledMessage ?? "Expand project tools panel")
+                }
+                className={`relative h-8 w-8 rounded-lg text-muted-foreground transition-[background-color,color,transform] duration-150 hover:text-foreground active:scale-95 ${
+                  rightDockOpen ? "bg-muted text-foreground" : ""
+                }`}
+              >
+                {rightDockOpen ? (
+                  <PanelRightClose className="h-4 w-4" />
+                ) : (
+                  <PanelRightOpen className="h-4 w-4" />
+                )}
+                {projectTerminalSessions.length > 0 ? (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-emerald-500 px-1 text-[calc(10px*var(--zone-font-scale,1))] font-semibold leading-none text-white">
+                    {projectTerminalSessions.length}
+                  </span>
+                ) : null}
+              </Button>
+            ),
+            headerClassName: "relative z-20",
+            headerOverlay: <NotifyToast items={notifyItems} onDismiss={dismissNotify} />,
+            content: (
+              <>
+                <ChangedFilesActionsProvider value={changedFilesActions}>
+                  <ChatTranscript
+                    conversationId={currentConversationId}
+                    workspaceRoot={currentConversationWorkspaceRoot}
+                    gitClient={tauriGitClient}
+                    followRef={scrollFollowRef}
+                    hasModels={hasModels}
+                    historyItems={transcriptItems}
+                    hasMoreHistory={conversationState.transcript.hasMoreBefore}
+                    onLoadEarlierHistory={handleLoadEarlierHistory}
+                    isHistorySwitching={conversationOpenState.showOverlay}
+                    isSending={isSending}
+                    isAgentMode={isAgentMode}
+                    showUsage={isAgentDevExecutionMode}
+                    usageContextWindow={currentModelContextWindow}
+                    liveTranscriptStore={liveTranscriptStore}
+                    isCompactionRunning={isCompactionRunning}
+                    bottomReservePx={composerOverlayHeight}
+                    contentWidth={settings.customSettings.chatTranscript.width}
+                    onContentWidthChange={handleChatTranscriptWidthChange}
+                    onOpenFileLink={handleOpenChatFileLink}
+                    onResendFromEdit={handleResendFromEdit}
+                    onBranchConversation={
+                      // 会话加载中或加载失败时直接不传操作，展示明确的禁用态。
+                      isConversationHydrating || isConversationHydrationFailed
+                        ? undefined
+                        : handleBranchConversation
+                    }
+                    branchPendingMessageId={branchPendingMessageId}
+                    onOpenSettings={onOpenSettings}
+                    onSuggestionSelect={handleEmptyStateSuggestion}
+                    suggestionsDisabled={isSuggestionTyping}
+                  />
+                </ChangedFilesActionsProvider>
 
-              <ChangedFilesActionsProvider value={changedFilesActions}>
-                <ChatTranscript
-                  conversationId={currentConversationId}
-                  workspaceRoot={currentConversationWorkspaceRoot}
-                  gitClient={tauriGitClient}
-                  followRef={scrollFollowRef}
-                  hasModels={hasModels}
-                  historyItems={historyRenderItems}
-                  isHistorySwitching={conversationOpenState.showOverlay}
+                <ChatComposerBar
+                  surface="desktop"
+                  composerRef={composerRef}
                   isSending={isSending}
+                  isUploadingFiles={isUploadingFiles}
+                  isInputDisabled={isComposerInputDisabled}
+                  inputPlaceholder={composerPlaceholder}
+                  workdir={displayedConversationWorkdir}
+                  enabledSkills={enabledComposerSkills}
                   isAgentMode={isAgentMode}
-                  showUsage={isAgentDevExecutionMode}
-                  usageContextWindow={currentModelContextWindow}
-                  liveTranscriptStore={liveTranscriptStore}
-                  isCompactionRunning={isCompactionRunning}
-                  bottomReservePx={composerOverlayHeight}
-                  contentWidth={settings.customSettings.chatTranscript.width}
-                  onContentWidthChange={handleChatTranscriptWidthChange}
-                  onResendFromEdit={handleResendFromEdit}
-                  onBranchConversation={
-                    // 水合中/水合失败时 handler 只会静默 return——直接不传，
-                    // 让 AssistantRow 的 disabled 分支给出可见的禁用态。
-                    isConversationHydrating || isConversationHydrationFailed
-                      ? undefined
-                      : handleBranchConversation
+                  chatRuntimeControls={chatRuntimeControlsForCurrentProvider}
+                  reasoningOptions={chatRuntimeReasoningOptions}
+                  thinkingAlwaysOn={chatRuntimeThinkingAlwaysOn}
+                  gitClient={tauriGitClient}
+                  workspaceActivityClient={tauriWorkspaceActivityClient}
+                  onSend={handleSend}
+                  onStop={handleStopSending}
+                  onComposerBusyChange={handleComposerBusyChange}
+                  onChatRuntimeControlsChange={handleChatRuntimeControlsChange}
+                  onPickReadableFiles={pickReadableFiles}
+                  onPasteFiles={importReadableFiles}
+                  onLoadUploadedImagePreview={loadComposerUploadedImagePreview}
+                  loadHistoryPrompts={loadComposerHistoryPrompts}
+                  pendingUploadedFiles={pendingUploadedFiles}
+                  onRemovePendingUpload={removePendingUpload}
+                  queuedTurns={queuedChatTurnsForCurrentConversation}
+                  onRunQueuedTurnNow={runQueuedTurnNow}
+                  onMoveQueuedTurnUp={moveQueuedTurnUp}
+                  onEditQueuedTurn={editQueuedTurn}
+                  onRemoveQueuedTurn={removeQueuedTurn}
+                  onHeightChange={setComposerOverlayHeight}
+                  taskProgressBar={
+                    <CurrentTaskProgress
+                      key={currentConversationId}
+                      historyItems={transcriptItems}
+                      liveTranscriptStore={liveTranscriptStore}
+                      isConversationRunning={
+                        isSending || isConversationRunning(currentConversationId)
+                      }
+                    />
                   }
-                  branchPendingMessageId={branchPendingMessageId}
-                  onOpenSettings={onOpenSettings}
-                  onSuggestionSelect={handleEmptyStateSuggestion}
-                  suggestionsDisabled={isSuggestionTyping}
+                  approvalBar={approvalBar}
                 />
-              </ChangedFilesActionsProvider>
-
-              <ChatComposerBar
-                composerRef={composerRef}
-                isSending={isSending}
-                isUploadingFiles={isUploadingFiles}
-                isInputDisabled={isComposerInputDisabled}
-                inputPlaceholder={composerPlaceholder}
-                workdir={displayedConversationWorkdir}
-                enabledSkills={enabledComposerSkills}
-                isAgentMode={isAgentMode}
-                chatRuntimeControls={chatRuntimeControlsForCurrentProvider}
-                reasoningOptions={chatRuntimeReasoningOptions}
-                thinkingAlwaysOn={chatRuntimeThinkingAlwaysOn}
-                gitClient={tauriGitClient}
-                workspaceActivityClient={tauriWorkspaceActivityClient}
-                onSend={handleSend}
-                onStop={handleStopSending}
-                onComposerBusyChange={handleComposerBusyChange}
-                onChatRuntimeControlsChange={handleChatRuntimeControlsChange}
-                onPickReadableFiles={pickReadableFiles}
-                onPasteFiles={importReadableFiles}
-                loadHistoryPrompts={loadComposerHistoryPrompts}
-                pendingUploadedFiles={pendingUploadedFiles}
-                onRemovePendingUpload={removePendingUpload}
-                queuedTurns={queuedChatTurnsForCurrentConversation}
-                onRunQueuedTurnNow={runQueuedTurnNow}
-                onMoveQueuedTurnUp={moveQueuedTurnUp}
-                onEditQueuedTurn={editQueuedTurn}
-                onRemoveQueuedTurn={removeQueuedTurn}
-                onHeightChange={setComposerOverlayHeight}
-              />
-              {isFileDropActive ? (
-                <ChatFileDropOverlay
-                  canDropUpload={canDropUpload}
-                  title={fileDropTitle}
-                  description={fileDropDescription}
-                  limitHint={fileDropLimitHint}
-                />
-              ) : null}
-            </>
-          )}
-        </div>
-        <WorkspaceOverlayHost
-          overlays={workspaceOverlays}
-          theme={effectiveTheme}
-          terminalProjectPathKey={terminalProjectPathKey}
-          terminalSessions={terminalSessions}
-          onInsertCodeMention={handleInsertCodeMention}
+                {isFileDropActive ? (
+                  <ChatFileDropOverlay
+                    canDropUpload={canDropUpload}
+                    title={fileDropTitle}
+                    description={fileDropDescription}
+                    limitHint={fileDropLimitHint}
+                  />
+                ) : null}
+              </>
+            ),
+          }}
+          workspaceOverlays={
+            <WorkspaceOverlayHost
+              overlays={workspaceOverlays}
+              theme={effectiveTheme}
+              terminalProjectPathKey={terminalProjectPathKey}
+              terminalSessions={terminalSessions}
+              onInsertCodeMention={handleInsertCodeMention}
+            />
+          }
         />
       </div>
       <RightDockPanel
@@ -1993,6 +2165,20 @@ export function ChatPage(props: ChatPageProps) {
         onInsertCommitMention={handleRightDockInsertCommitMention}
         onInsertGitFileMention={handleRightDockInsertGitFileMention}
       />
+      {resourceSettingsProject ? (
+        <WorkspaceResourceSettingsDrawer
+          project={resourceSettingsProject}
+          settings={settings}
+          skills={availableSkills}
+          onClose={() => setResourceSettingsProject(null)}
+          onSave={(draft) => {
+            setSettings((prev) =>
+              updateWorkspaceResourceSettings(prev, resourceSettingsProject.path, draft),
+            );
+            setResourceSettingsProject(null);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

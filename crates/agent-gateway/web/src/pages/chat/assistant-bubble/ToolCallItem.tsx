@@ -1,16 +1,22 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { AskUserQuestionCard } from "../../../components/chat/AskUserQuestionCard";
-import { FileChangeBadge } from "../../../components/chat/FileChangeBadge";
-import { ChevronRight } from "../../../components/icons";
-import { useLocale } from "../../../i18n";
-import type { ToolResultMessage } from "../../../lib/agentTypes";
+import { AskUserQuestionCard } from "@liveagent/ui/components/chat/AskUserQuestionCard";
+import { AssistantStatus } from "@liveagent/ui/components/chat/AssistantStatus";
+import { FileChangeBadge } from "@liveagent/ui/components/chat/FileChangeBadge";
+import { LazyCollapse } from "@liveagent/ui/components/chat/LazyCollapse";
+import { sanitizeTodoItems } from "@liveagent/ui/components/chat/TodoListView";
+import { ToolScrollablePre, ToolSection } from "@liveagent/ui/components/chat/ToolSurfaces";
+import { useLocale } from "@liveagent/ui/i18n/index";
 import {
   ASK_USER_QUESTION_TOOL_NAME,
   type AskUserQuestionAnswer,
   parseAskUserQuestionResultDetails,
   readAskUserQuestionDeadlineAt,
   sanitizeAskUserQuestionItems,
-} from "../../../lib/chat/askUserQuestion";
+} from "@liveagent/ui/lib/chat/askUserQuestion";
+import { readToolApprovalPending } from "@liveagent/ui/lib/chat/toolApprovalArgs";
+import { cn } from "@liveagent/ui/lib/shared/utils";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { ChevronRight } from "../../../components/icons";
+import type { ToolResultMessage } from "../../../lib/agentTypes";
 import { submitAskUserQuestionAnswer } from "../../../lib/chat/askUserQuestionBridge";
 import { deriveFileChangeStats } from "../../../lib/chat/fileChangeStats";
 import { FILE_TOOL_TEXT_FIELDS } from "../../../lib/chat/toolPreview";
@@ -20,9 +26,6 @@ import {
   type ToolTraceItem,
   toolResultMessageToText,
 } from "../../../lib/chat/uiMessages";
-import { cn } from "../../../lib/shared/utils";
-import { sanitizeTodoItems } from "../TodoListView";
-import { ToolScrollablePre, ToolSection } from "../ToolSurfaces";
 import {
   areStableValuesEqual,
   getBuiltinResultKind,
@@ -33,8 +36,6 @@ import {
   isBuiltinShareToolName,
   isSubagentCardToolCall,
 } from "./assistantBubbleUtils";
-import { LazyCollapse } from "./LazyCollapse";
-import { AssistantStatus } from "./StatusText";
 import { ToolArgsDisplay, ToolResultDisplay } from "./ToolResultDisplay";
 
 function ToolCallItem({
@@ -91,6 +92,17 @@ function ToolCallItem({
     (answers: AskUserQuestionAnswer[]) => submitAskUserQuestionAnswer(item.toolCall.id, answers),
     [item.toolCall.id],
   );
+  // 工具审批:桌面端在待审批时把 __toolApprovalPending 标记盖到同步的工具参数上
+  // (见 gatewayToolPreview 的重发)。带标记且尚无结果
+  // → 渲染审批卡片;审批消解后重发的快照不再带标记,卡片隐藏。
+  // 注意:审批在 beforeToolCall 处挂起,此时工具尚未开始执行、并不处于 isRunning
+  // 状态(不同于 AskUserQuestion 是工具自身执行时挂起),故不能用 isRunning 作门,
+  // 标记本身即权威的"待审批"信号。
+  const isApprovalPending =
+    !readOnly &&
+    !isRedactedToolContent &&
+    !result &&
+    readToolApprovalPending(item.toolCall.arguments);
   const shouldAutoOpen =
     !isRedactedToolContent &&
     (item.toolCall.name === "Image" ||
@@ -145,17 +157,19 @@ function ToolCallItem({
   const statusLabel =
     isTodo && hasIncompleteTodo && isAborted
       ? t("chat.tool.aborted")
-      : isRunning
-        ? isAskUser
-          ? askQuestions.length > 0
-            ? t("chat.askUser.waiting")
-            : t("chat.askUser.preparing")
-          : t("chat.tool.running")
-        : result
-          ? result.isError
-            ? t("chat.tool.failed")
-            : t("chat.tool.success")
-          : t("chat.tool.waiting");
+      : isApprovalPending
+        ? t("chat.toolApproval.waitingStatus")
+        : isRunning
+          ? isAskUser
+            ? askQuestions.length > 0
+              ? t("chat.askUser.waiting")
+              : t("chat.askUser.preparing")
+            : t("chat.tool.running")
+          : result
+            ? result.isError
+              ? t("chat.tool.failed")
+              : t("chat.tool.success")
+            : t("chat.tool.waiting");
 
   const statusTextClass = result?.isError
     ? "text-[hsl(var(--chat-error))]"

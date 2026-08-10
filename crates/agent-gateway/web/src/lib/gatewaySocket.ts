@@ -1,17 +1,7 @@
-import type { HistoryMessageRef } from "@/lib/chat/conversationState";
-import { ConversationStreamClient } from "@/lib/chat/stream/conversationStreamClient";
-import type {
-  ChatCommandAccepted,
-  ChatCommandUpdate,
-  ConversationActivityEvent,
-  ConversationStreamHandlers,
-} from "@/lib/chat/stream/streamTypes";
-import { normalizeActivityEvent, normalizeCommandUpdate } from "@/lib/chat/stream/streamTypes";
-import type { PendingUploadedFile } from "@/lib/chat/uploadedFiles";
 import type {
   GatewaySettingsSyncPayload,
   GatewaySettingsSyncUpdatePayload,
-} from "@/lib/settings/sync";
+} from "@liveagent/ui/lib/settings/sync";
 import type {
   SftpActionResponse,
   SftpEntry,
@@ -20,9 +10,8 @@ import type {
   SftpTransfer,
   SftpTransferEvent,
   SftpTransferResponse,
-} from "@/lib/sftp/types";
-import { createUuid } from "@/lib/shared/id";
-import { BrowserGatewayTerminalStreamClient } from "@/lib/terminal/gatewayTerminalStreamClient";
+} from "@liveagent/ui/lib/sftp/types";
+import { createUuid } from "@liveagent/ui/lib/shared/id";
 import type {
   RawSshLocalForwardAction,
   RawSshLocalForwardEvent,
@@ -30,12 +19,12 @@ import type {
   SshLocalForwardAction,
   SshLocalForwardEvent,
   SshLocalForwardSnapshot,
-} from "@/lib/terminal/sshLocalForwardTypes";
+} from "@liveagent/ui/lib/terminal/sshLocalForwardTypes";
 import {
   normalizeSshLocalForwardAction,
   normalizeSshLocalForwardEvent,
   normalizeSshLocalForwardSnapshot,
-} from "@/lib/terminal/sshLocalForwardTypes";
+} from "@liveagent/ui/lib/terminal/sshLocalForwardTypes";
 import type {
   SshTerminalTab,
   SshTerminalTabKind,
@@ -49,18 +38,29 @@ import type {
   TerminalSshMetadata,
   TerminalSshPrompt,
   TerminalStreamClient,
-} from "@/lib/terminal/types";
+} from "@liveagent/ui/lib/terminal/types";
 import type {
   TunnelCreateInput,
   TunnelHealth,
   TunnelStateSnapshot,
   TunnelStatus,
   TunnelUpdateInput,
-} from "@/lib/tunnels/constants";
+} from "@liveagent/ui/lib/tunnels/constants";
 import type {
   WorkspaceActivity,
   WorkspaceActivityEventPayload,
-} from "@/lib/workspace-activity/types";
+} from "@liveagent/ui/lib/workspace-activity/types";
+import type { HistoryMessageRef } from "@/lib/chat/conversationState";
+import { ConversationStreamClient } from "@/lib/chat/stream/conversationStreamClient";
+import type {
+  ChatCommandAccepted,
+  ChatCommandUpdate,
+  ConversationActivityEvent,
+  ConversationStreamHandlers,
+} from "@/lib/chat/stream/streamTypes";
+import { normalizeActivityEvent, normalizeCommandUpdate } from "@/lib/chat/stream/streamTypes";
+import type { PendingUploadedFile } from "@/lib/chat/uploadedFiles";
+import { BrowserGatewayTerminalStreamClient } from "@/lib/terminal/gatewayTerminalStreamClient";
 import type { DecodedServerFrame } from "./gatewaySocketV2/adapters";
 import {
   decodeServerFrame,
@@ -118,7 +118,6 @@ type GatewayRequestOptions = {
 type GatewayChatSystemSettings = {
   executionMode?: string;
   workdir?: string;
-  selectedSystemTools?: string[];
 };
 
 export type GatewayChatCommandInput = {
@@ -205,6 +204,17 @@ type FsReadWorkspaceImageResponse = {
   contentHash: string;
 };
 
+export type ChatFileOpenResponse = {
+  action: "directory" | "editor" | "opened" | "preview" | "revealed";
+  kind: "directory" | "file";
+  workdir?: string;
+  path?: string;
+  line?: number;
+  endLine?: number;
+  column?: number;
+  outsideWorkspace: boolean;
+};
+
 type FsCreateDirResponse = {
   path: string;
   kind: "dir";
@@ -234,7 +244,7 @@ export type {
   TunnelStatus,
   TunnelTtlSeconds,
   TunnelUpdateInput,
-} from "@/lib/tunnels/constants";
+} from "@liveagent/ui/lib/tunnels/constants";
 
 type TunnelStateListener = (snapshot: TunnelStateSnapshot) => void;
 
@@ -595,8 +605,6 @@ function buildChatCommandPayload(input: GatewayChatCommandInput) {
       client_request_id: clientRequestId,
       execution_mode: systemSettings?.executionMode?.trim() || "text",
       workdir: systemSettings?.workdir?.trim() || "",
-      selected_system_tools:
-        systemSettings?.selectedSystemTools?.map((item) => item.trim()).filter(Boolean) ?? [],
       uploaded_files:
         input.uploadedFiles?.map((file) => ({
           relative_path: file.relativePath,
@@ -1823,6 +1831,21 @@ export class GatewayWebSocketClient {
     );
   }
 
+  /** 提交对桌面端挂起工具审批的决定：item_id 为 toolCallId，request_json 为 {"decision":...}。 */
+  async chatQueueToolApproval(
+    conversationId: string,
+    toolCallId: string,
+    decisionJson: string,
+  ): Promise<ChatQueueResponse> {
+    return normalizeChatQueueResponse(
+      await this.requestWithRecovery<RawChatQueueResponse>("chat_queue.tool_approval", {
+        conversation_id: conversationId,
+        item_id: toolCallId,
+        request_json: decisionJson,
+      }),
+    );
+  }
+
   // Submit a chat command. Streaming does not hang off the command: the
   // conversation subscription (persistent, run-agnostic) carries the reply.
   async chatCommand(input: GatewayChatCommandInput): Promise<ChatCommandAccepted> {
@@ -2648,6 +2671,28 @@ export class GatewayWebSocketClient {
     return this.request<FsReadWorkspaceImageResponse>("fs.read_workspace_image", {
       workdir,
       path,
+    });
+  }
+
+  async openChatFile(params: {
+    conversationId: string;
+    workdir: string;
+    path: string;
+    source: string;
+    line?: number;
+    endLine?: number;
+    column?: number;
+    openInFileManager?: boolean;
+  }): Promise<ChatFileOpenResponse> {
+    return this.request<ChatFileOpenResponse>("chat.file_open", {
+      conversation_id: params.conversationId,
+      workdir: params.workdir,
+      path: params.path,
+      source: params.source,
+      line: params.line,
+      end_line: params.endLine,
+      column: params.column,
+      open_in_file_manager: params.openInFileManager,
     });
   }
 
@@ -3811,6 +3856,16 @@ export type GatewayWebSocketClientLike = {
   }): Promise<FsWriteTextResponse>;
   readEditableTextFile(workdir: string, path: string): Promise<FsReadEditableTextResponse>;
   readWorkspaceImageFile(workdir: string, path: string): Promise<FsReadWorkspaceImageResponse>;
+  openChatFile(params: {
+    conversationId: string;
+    workdir: string;
+    path: string;
+    source: string;
+    line?: number;
+    endLine?: number;
+    column?: number;
+    openInFileManager?: boolean;
+  }): Promise<ChatFileOpenResponse>;
   createDir(workdir: string, path: string): Promise<FsCreateDirResponse>;
   renamePath(workdir: string, fromPath: string, toPath: string): Promise<FsRenameResponse>;
   deletePath(workdir: string, path: string): Promise<FsDeleteResponse>;

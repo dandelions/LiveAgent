@@ -29,6 +29,7 @@ import {
   upsertHostedSearchToRound,
 } from "../../../lib/chat/messages/uiMessages";
 import { isAbortLikeError } from "../../../lib/chat/page/chatPageHelpers";
+import type { AgentRunnerFailoverParams } from "../../../lib/chat/runner/agentRunner";
 import {
   createDeferredProviderNativeWebSearchStatus,
   resolveProviderNativeWebSearchStatus,
@@ -36,10 +37,7 @@ import {
 import type { StreamDebugLogger } from "../../../lib/debug/agentDebug";
 import { assistantMessageToText, streamAssistantMessage } from "../../../lib/providers/llm";
 import type { ProviderId } from "../../../lib/settings";
-import {
-  buildPartialAssistantMessage,
-  type ConversationRuntimeEntry,
-} from "../runtime/chatPageRuntime";
+import { buildPartialAssistantMessage } from "../runtime/chatPageRuntime";
 
 export type RuntimeModel = {
   api: AssistantMessage["api"];
@@ -63,6 +61,7 @@ export type RunTextConversationTurnParams = {
   providerId: ProviderId;
   model: string;
   runtime: ProviderRuntimeConfig;
+  failover?: AgentRunnerFailoverParams;
   runtimeModel: RuntimeModel;
   selectedModel: {
     customProviderId: string;
@@ -98,10 +97,7 @@ export type RunTextConversationTurnParams = {
   updateGatewayBridgeToolStatus: (status: string | null, isCompaction?: boolean) => void;
   updateRetryAttempts: (attempts: RetryAttemptRecord[], store: LiveTranscriptStore) => void;
   commitVisibleAbortedConversation: () => boolean;
-  updateConversationRuntimeEntry: (
-    conversationId: string,
-    updater: (prev: ConversationRuntimeEntry) => ConversationRuntimeEntry,
-  ) => ConversationRuntimeEntry;
+  freezeGatewayFinalProjection: (state: ConversationViewState, contentComplete?: boolean) => void;
   persistConversationWithHistorySync: (params: PersistConversationParams) => Promise<boolean>;
   memoryExtractionModel?: MemoryExtractionModelConfig;
   onMemoryExtractionModelFailure?: (model: MemoryExtractionModelConfig) => void;
@@ -113,6 +109,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     providerId,
     model,
     runtime,
+    failover,
     runtimeModel,
     selectedModel,
     sessionId,
@@ -138,7 +135,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     updateGatewayBridgeToolStatus,
     updateRetryAttempts,
     commitVisibleAbortedConversation,
-    updateConversationRuntimeEntry,
+    freezeGatewayFinalProjection,
     persistConversationWithHistorySync,
     memoryExtractionModel,
     onMemoryExtractionModelFailure,
@@ -154,6 +151,9 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
   let pendingTextContext: Context | null = null;
   let textRound = 1;
   let protectionCompactionDisabled = false;
+  // A failover status stays visible until the winning attempt streams content;
+  // the status channel has no other owner between switch and first delta.
+  let failoverStatusVisible = false;
 
   function commitAssistantRoundMeta(assistant: AssistantMessage, round: number) {
     gatewayBridgeEvents.queueToken("", {
@@ -274,11 +274,31 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
           providerId,
           model,
           runtime,
+          failover: failover
+            ? {
+                config: failover.config,
+                primary: failover.primary,
+                fallbacks: failover.fallbacks,
+                onSwitched: ({ target, errorMessage }) => {
+                  failover.onSwitched?.({ target, round: textRound, errorMessage });
+                },
+                onFailover: ({ fromLabel, toLabel }) => {
+                  failoverStatusVisible = true;
+                  updateGatewayBridgeToolStatus(
+                    `第 ${textRound} 轮：${fromLabel} 不可用，正在切换到 ${toLabel}...`,
+                  );
+                },
+              }
+            : undefined,
           context: contextWithSkills,
           workdir: conversationCwd,
           sessionId,
           nativeWebSearch: nativeWebSearchEnabled,
           onTextDelta: (delta) => {
+            if (failoverStatusVisible) {
+              failoverStatusVisible = false;
+              updateGatewayBridgeToolStatus(null);
+            }
             nativeWebSearchStatusController.noteVisibleActivity();
             gatewayBridgeEvents.queueToken(delta, { round: textRound });
             if (textModeUsesLiveRounds) {
@@ -395,11 +415,9 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
   const shouldRunMemoryExtraction =
     finalAssistant.stopReason !== "error" && finalAssistant.stopReason !== "aborted";
   commitAssistantRoundMeta(finalAssistant, textRound);
+  applyConversationState(finalState);
+  freezeGatewayFinalProjection(finalState, true);
   settleLiveTranscript(transcriptStore);
-  updateConversationRuntimeEntry(conversationId, (prev) => ({
-    ...prev,
-    state: finalState,
-  }));
   hookLifecycle.ensureMessageEnded();
   hookLifecycle.endAgent();
   await persistConversationWithHistorySync({
@@ -413,11 +431,6 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     createdAt,
     titlePromise,
   });
-  gatewayBridgeEvents.queueEvent({
-    type: "done",
-    conversation_id: conversationId,
-  });
-  await gatewayBridgeEvents.close();
   if (shouldRunMemoryExtraction) {
     const currentMemoryExtractionModel: MemoryExtractionModelConfig = {
       providerId,

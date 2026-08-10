@@ -1,11 +1,10 @@
 import type { AssistantMessage, Message, ToolResultMessage } from "@earendil-works/pi-ai";
-
+import { createUuid } from "@liveagent/ui/lib/shared/id";
 import {
   appendMessagesToConversation,
   normalizeConversationState,
 } from "../chat/conversation/conversationState";
-import { persistConversationState } from "../chat/history/chatHistory";
-import { createUuid } from "../shared/id";
+import { persistConversationRuntime } from "../chat/history/chatHistory";
 
 // Dev-only transcript stress fixture: builds a large conversation with the
 // content shapes that dominate real rendering cost (long prose, big code
@@ -225,7 +224,7 @@ export async function seedLongConversation(options: SeedLongConversationOptions 
     }
   }
 
-  await persistConversationState({
+  await persistConversationRuntime({
     conversationId,
     providerId: "seed",
     model: "seed-model",
@@ -234,8 +233,8 @@ export async function seedLongConversation(options: SeedLongConversationOptions 
     createdAt: startedAt,
     updatedAt: Date.now(),
     state,
-    getPreviousState: () => null,
-    commitPersistedState: () => {},
+    getPersistenceCursor: () => null,
+    commitPersistenceCursor: () => {},
   });
 
   console.info(

@@ -5,13 +5,15 @@ import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
 
-const { buildGatewayRuntimeSnapshotEntries } = loader.loadModule(
+const { buildGatewayFinalProjectionEntries, buildGatewayRuntimeSnapshotEntries } = loader.loadModule(
   "src/pages/chat/gateway/chatRuntimeSnapshot.ts",
 );
 const { buildGatewayToolCallPreviewArguments } = loader.loadModule(
   "src/pages/chat/turns/gatewayToolPreview.ts",
 );
 const toolPreview = loader.loadModule("src/lib/chat/messages/toolPreview.ts");
+const askTools = loader.loadModule("src/lib/tools/askUserQuestionTools.ts");
+const askShared = loader.loadModule("@liveagent/ui/lib/chat/askUserQuestion.ts");
 
 test("gateway runtime snapshot projects live rounds into chat entries", () => {
   const entries = buildGatewayRuntimeSnapshotEntries({
@@ -103,6 +105,66 @@ test("gateway runtime snapshot carries the same tool preview shape as bridge del
   assert.equal(metadata.fields.content.chars, content.length);
 });
 
+test("gateway runtime snapshots preserve an AskUserQuestion deadline across reconnects", async () => {
+  const toolCall = {
+    type: "toolCall",
+    id: "tool-ask-snapshot",
+    name: "AskUserQuestion",
+    arguments: {
+      questions: [
+        {
+          id: "choice",
+          prompt: "Choose one",
+          options: [{ label: "First" }, { label: "Second" }],
+        },
+      ],
+    },
+  };
+  const liveTranscript = {
+    draftAssistantText: "",
+    toolStatus: null,
+    liveRounds: [
+      {
+        key: "round-1",
+        round: 1,
+        runningToolCallIds: [toolCall.id],
+        thinkingOpen: false,
+        blocks: [{ kind: "tool", item: { toolCall } }],
+      },
+    ],
+  };
+
+  const first = buildGatewayRuntimeSnapshotEntries({ userMessage: null, liveTranscript });
+  const firstToolCall = first.find((entry) => entry.kind === "tool_call");
+  assert.ok(firstToolCall);
+  const deadlineAt =
+    firstToolCall.toolCall.arguments[askShared.ASK_USER_QUESTION_DEADLINE_ARG];
+  assert.ok(deadlineAt > Date.now());
+
+  const reconnected = buildGatewayRuntimeSnapshotEntries({ userMessage: null, liveTranscript });
+  const reconnectedToolCalls = reconnected.filter((entry) => entry.kind === "tool_call");
+  assert.equal(reconnectedToolCalls.length, 1);
+  assert.equal(
+    reconnectedToolCalls[0].toolCall.arguments[askShared.ASK_USER_QUESTION_DEADLINE_ARG],
+    deadlineAt,
+  );
+  assert.equal(askTools.getAskUserQuestionDeadlineAt(toolCall.id), deadlineAt);
+
+  // Consume the preset through the real pending lifecycle and clean it up.
+  const bundle = askTools.createAskUserQuestionTools({ conversationId: "conv-snapshot" });
+  const resultPromise = bundle.executeToolCall(toolCall);
+  assert.equal(askTools.hasPendingAskUserQuestion(toolCall.id), true);
+  assert.equal(
+    askTools.answerAskUserQuestion(toolCall.id, [
+      { questionId: "choice", selectedLabel: "Second" },
+    ]).ok,
+    true,
+  );
+  const result = await resultPromise;
+  assert.equal(result.details.answers[0].selectedLabel, "Second");
+  assert.equal(askTools.getAskUserQuestionDeadlineAt(toolCall.id), null);
+});
+
 test("gateway runtime snapshot falls back to draft assistant text", () => {
   const entries = buildGatewayRuntimeSnapshotEntries({
     userMessage: {
@@ -123,4 +185,66 @@ test("gateway runtime snapshot falls back to draft assistant text", () => {
   );
   assert.equal(entries[1].text, "streaming text");
   assert.equal(entries[0].messageId, "user-2");
+});
+
+test("gateway final projection is frozen from the persisted conversation state", () => {
+  const userMessage = {
+    role: "user",
+    id: "user-final",
+    content: "Inspect the project",
+  };
+  const entries = buildGatewayFinalProjectionEntries({
+    runId: "run-final",
+    userMessage,
+    state: {
+      meta: {},
+      segments: [],
+      activeSegmentIndex: 0,
+      transcript: {
+        items: [
+          {
+            kind: "user",
+            key: "user-row",
+            messageRef: { messageId: "user-final" },
+            text: "Inspect the project",
+            attachments: [],
+          },
+          {
+            kind: "assistant",
+            key: "assistant-row",
+            rounds: [
+              {
+                key: "round-1",
+                round: 1,
+                runningToolCallIds: [],
+                blocks: [
+                  { kind: "thinking", text: "Checking files" },
+                  { kind: "text", text: "The project is healthy." },
+                ],
+              },
+            ],
+          },
+          {
+            kind: "user",
+            key: "next-user",
+            messageRef: { messageId: "user-next" },
+            text: "Next prompt",
+            attachments: [],
+          },
+        ],
+        segmentWindows: [],
+        oldestMessageOffset: 0,
+        hasMoreBefore: false,
+        revision: null,
+      },
+    },
+  });
+
+  assert.deepEqual(
+    entries.map((entry) => entry.kind),
+    ["user", "thinking", "assistant"],
+  );
+  assert.equal(entries[1].text, "Checking files");
+  assert.equal(entries[2].text, "The project is healthy.");
+  assert.equal(entries.some((entry) => entry.kind === "user" && entry.text === "Next prompt"), false);
 });

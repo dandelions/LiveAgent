@@ -1,16 +1,20 @@
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
-
-import { AskUserQuestionCard } from "../../../../components/chat/AskUserQuestionCard";
-import { FileChangeBadge } from "../../../../components/chat/FileChangeBadge";
-import { ChevronRight, Search } from "../../../../components/icons";
-import { useLocale } from "../../../../i18n";
+import { AskUserQuestionCard } from "@liveagent/ui/components/chat/AskUserQuestionCard";
+import { AssistantStatus } from "@liveagent/ui/components/chat/AssistantStatus";
+import { FileChangeBadge } from "@liveagent/ui/components/chat/FileChangeBadge";
+import { FileToolArgsDisplay } from "@liveagent/ui/components/chat/FileToolArgs";
+import { LazyCollapse } from "@liveagent/ui/components/chat/LazyCollapse";
+import { sanitizeTodoItems, TodoListView } from "@liveagent/ui/components/chat/TodoListView";
+import { useLocale } from "@liveagent/ui/i18n/index";
 import {
   ASK_USER_QUESTION_TOOL_NAME,
   type AskUserQuestionAnswer,
   parseAskUserQuestionResultDetails,
   sanitizeAskUserQuestionItems,
-} from "../../../../lib/chat/askUserQuestion";
+} from "@liveagent/ui/lib/chat/askUserQuestion";
+import { cn } from "@liveagent/ui/lib/shared/utils";
+import { memo, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { ChevronRight, Search } from "../../../../components/icons";
 import { deriveFileChangeStats } from "../../../../lib/chat/messages/fileChangeStats";
 import {
   deriveFileToolPreview,
@@ -24,12 +28,16 @@ import {
   toolCallArgsForDisplay,
   toolResultMessageToText,
 } from "../../../../lib/chat/messages/uiMessages";
-import { cn } from "../../../../lib/shared/utils";
 import { isSubagentCardToolCall } from "../../../../lib/subagents/card";
 import {
   answerAskUserQuestion,
   getAskUserQuestionDeadlineAt,
 } from "../../../../lib/tools/askUserQuestionTools";
+import {
+  getPendingToolApproval,
+  getToolApprovalVersion,
+  subscribeToolApprovals,
+} from "../../../../lib/tools/toolApproval";
 import {
   areStableValuesEqual,
   displayString,
@@ -39,10 +47,6 @@ import {
   getToolMeta,
   type MetaTag,
 } from "./assistantBubbleUtils";
-import { FileToolArgsDisplay } from "./FileToolArgs";
-import { LazyCollapse } from "./LazyCollapse";
-import { AssistantStatus } from "./StatusText";
-import { sanitizeTodoItems, TodoListView } from "./TodoListView";
 import {
   MetaTags,
   PathDisplay,
@@ -368,6 +372,10 @@ function ToolCallItem({
       Promise.resolve(answerAskUserQuestion(item.toolCall.id, answers)),
     [item.toolCall.id],
   );
+  // 工具审批挂起是响应式的:被审批的工具调用早已在转录中,挂起在 beforeToolCall
+  // 处出现/消失,故订阅审批服务版本号触发重渲染(memo 化组件内 hook 照常重跑)。
+  useSyncExternalStore(subscribeToolApprovals, getToolApprovalVersion, getToolApprovalVersion);
+  const pendingApproval = getPendingToolApproval(item.toolCall.id);
   const shouldAutoOpen =
     item.toolCall.name === "Image" ||
     builtinResultKind === "display_image" ||
@@ -413,17 +421,19 @@ function ToolCallItem({
   const statusLabel =
     isTodo && hasIncompleteTodo && isAborted
       ? t("chat.tool.aborted")
-      : isRunning
-        ? isAskUser
-          ? askQuestions.length > 0
-            ? t("chat.askUser.waiting")
-            : t("chat.askUser.preparing")
-          : t("chat.tool.running")
-        : result
-          ? result.isError
-            ? t("chat.tool.failed")
-            : t("chat.tool.success")
-          : t("chat.tool.waiting");
+      : pendingApproval
+        ? t("chat.toolApproval.waitingStatus")
+        : isRunning
+          ? isAskUser
+            ? askQuestions.length > 0
+              ? t("chat.askUser.waiting")
+              : t("chat.askUser.preparing")
+            : t("chat.tool.running")
+          : result
+            ? result.isError
+              ? t("chat.tool.failed")
+              : t("chat.tool.success")
+            : t("chat.tool.waiting");
 
   const statusTextClass = result?.isError
     ? "text-[hsl(var(--chat-error))]"
@@ -523,7 +533,7 @@ function ToolCallItem({
         </div>
       </button>
 
-      <LazyCollapse open={open && canExpand}>
+      <LazyCollapse open={open && canExpand} retainWhileClosed={Boolean(isRunning)}>
         {() => (
           <div className="space-y-3 pb-2 pl-[22px] pt-1">
             {shouldShowArgs ? (

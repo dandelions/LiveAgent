@@ -1,3 +1,14 @@
+import { ChatEmptyState } from "@liveagent/ui/components/chat/ChatEmptyState";
+import { useLocale } from "@liveagent/ui/i18n/index";
+import { buildFloorEntries } from "@liveagent/ui/lib/chat-floor-nav/floorModel";
+import { BOTTOM_REATTACH_ZONE_PX } from "@liveagent/ui/lib/chat-scroll/scrollFollowCore";
+import { useScrollFollow } from "@liveagent/ui/lib/chat-scroll/useScrollFollow";
+import { cn } from "@liveagent/ui/lib/shared/utils";
+import { FloorNavRail } from "@liveagent/ui/pages/chat/transcript/FloorNavRail";
+import {
+  CHAT_TRANSCRIPT_WIDTH_CSS_VAR,
+  TranscriptWidthControls,
+} from "@liveagent/ui/pages/chat/transcript/TranscriptWidthControls";
 import {
   type CSSProperties,
   memo,
@@ -10,21 +21,11 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-
 import { ChevronDown, Copy } from "../../../components/icons";
-import { ScrollArea } from "../../../components/ui/scroll-area";
-import { useLocale } from "../../../i18n";
-import { buildFloorEntries } from "../../../lib/chat-floor-nav/floorModel";
-import { BOTTOM_REATTACH_ZONE_PX } from "../../../lib/chat-scroll/scrollFollowCore";
-import { useScrollFollow } from "../../../lib/chat-scroll/useScrollFollow";
 import { useMenuExitPresence } from "../../../lib/shared/menuMotion";
-import { cn } from "../../../lib/shared/utils";
-import { ChatEmptyState } from "./ChatEmptyState";
-import { FloorNavRail } from "./FloorNavRail";
 import { RowInteractionProvider, useRowInteractionStore } from "./rowInteraction";
 import { TranscriptList, type TranscriptNavHandle } from "./TranscriptList";
 import { HistorySwitchLoadingOverlay } from "./TranscriptLoadingStates";
-import { CHAT_TRANSCRIPT_WIDTH_CSS_VAR, TranscriptWidthControls } from "./TranscriptWidthControls";
 import type { ChatTranscriptProps } from "./transcriptTypes";
 import {
   clampTranscriptContextMenuPosition,
@@ -43,6 +44,8 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
     followRef,
     hasModels,
     historyItems,
+    hasMoreHistory,
+    onLoadEarlierHistory,
     isHistorySwitching,
     isSending,
     isAgentMode,
@@ -53,6 +56,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
     bottomReservePx = 0,
     contentWidth,
     onContentWidthChange,
+    onOpenFileLink,
     onResendFromEdit,
     onBranchConversation,
     branchPendingMessageId,
@@ -70,11 +74,11 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
   const transcriptBottomReservePx = shouldReserveTranscriptBottomSpace
     ? Math.max(BOTTOM_REATTACH_ZONE_PX, Math.ceil(bottomReservePx) + 12)
     : 0;
-  // Both elements arrive via callback refs → state so the scroll-follow hook
-  // re-binds on element identity change and can never keep listeners on a
-  // dead node (the old querySelector retry loop's silent failure mode).
+  // The native viewport arrives via a callback ref → state so scroll-follow
+  // and the virtualizer re-bind on identity changes. Keeping the transcript
+  // off Base UI's custom ScrollArea also removes its per-scroll geometry,
+  // computed-style and inherited CSS-variable work from WebKit's hot path.
   const [scrollViewport, setScrollViewport] = useState<HTMLDivElement | null>(null);
-  const [scrollAreaRoot, setScrollAreaRoot] = useState<HTMLDivElement | null>(null);
   const transcriptRootRef = useRef<HTMLDivElement | null>(null);
   const transcriptContextMenuRef = useRef<HTMLDivElement | null>(null);
   const [transcriptContextMenu, setTranscriptContextMenu] =
@@ -86,10 +90,52 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
 
   const { handle: scrollFollowHandle, following } = useScrollFollow({
     viewport: scrollViewport,
-    listenerRoot: scrollAreaRoot,
+    listenerRoot: scrollViewport,
     trackKeys: true,
     config: { reattachZonePx: BOTTOM_REATTACH_ZONE_PX },
   });
+
+  const prependAnchorRef = useRef<{
+    firstItemKey: string | undefined;
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
+  const loadingEarlierRef = useRef(false);
+  const firstHistoryItemKey = historyItems[0]?.key;
+
+  useLayoutEffect(() => {
+    const anchor = prependAnchorRef.current;
+    if (!anchor || !scrollViewport || anchor.firstItemKey === firstHistoryItemKey) return;
+    scrollViewport.scrollTop =
+      anchor.scrollTop + Math.max(0, scrollViewport.scrollHeight - anchor.scrollHeight);
+    prependAnchorRef.current = null;
+  }, [firstHistoryItemKey, scrollViewport]);
+
+  useEffect(() => {
+    if (!scrollViewport || !hasMoreHistory || isHistorySwitching) return;
+    const loadAtTop = () => {
+      if (scrollViewport.scrollTop > 480 || loadingEarlierRef.current) return;
+      loadingEarlierRef.current = true;
+      prependAnchorRef.current = {
+        firstItemKey: historyItems[0]?.key,
+        scrollHeight: scrollViewport.scrollHeight,
+        scrollTop: scrollViewport.scrollTop,
+      };
+      void onLoadEarlierHistory()
+        .catch(() => undefined)
+        .finally(() => {
+          loadingEarlierRef.current = false;
+          requestAnimationFrame(() => {
+            const anchor = prependAnchorRef.current;
+            if (anchor?.firstItemKey === historyItems[0]?.key) {
+              prependAnchorRef.current = null;
+            }
+          });
+        });
+    };
+    scrollViewport.addEventListener("scroll", loadAtTop, { passive: true });
+    return () => scrollViewport.removeEventListener("scroll", loadAtTop);
+  }, [hasMoreHistory, historyItems, isHistorySwitching, onLoadEarlierHistory, scrollViewport]);
 
   // 楼层导航：从时间线派生用户消息楼层；当前楼层由 TranscriptList 上报。
   // 不在此处按 conversationId 重置——TranscriptList 按会话重挂载后其挂载
@@ -237,8 +283,12 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
       }
       onContextMenu={handleTranscriptContextMenu}
     >
-      <ScrollArea ref={setScrollAreaRoot} viewportRef={setScrollViewport} className="h-full">
-        <div className="mx-auto w-full max-w-[var(--chat-transcript-content-width)] px-5 py-4">
+      <div
+        ref={setScrollViewport}
+        data-scroll-viewport
+        className="h-full w-full overflow-y-auto [overflow-anchor:none]"
+      >
+        <div className="mx-auto w-full max-w-[var(--chat-transcript-content-width)] px-5 py-4 [overflow-anchor:none]">
           {showNoModelsState || showStartChatState ? (
             <div className="flex min-h-[calc(100vh-220px)] flex-col items-center justify-center">
               {/* Keyed per conversation so the hero entrance replays when
@@ -269,12 +319,14 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
                 scrollViewport={scrollViewport}
                 layoutWidth={contentWidth}
                 isViewportFollowing={scrollFollowHandle.isFollowing}
+                viewportFollowing={following}
                 isSending={isSending}
                 isAgentMode={isAgentMode}
                 isCompactionRunning={isCompactionRunning}
                 showUsage={showUsage}
                 usageContextWindow={usageContextWindow}
                 workspaceRoot={workspaceRoot}
+                onOpenFileLink={onOpenFileLink}
                 gitClient={gitClient}
                 navRef={transcriptNavRef}
                 onAnchorUserRowChange={setActiveFloorKey}
@@ -287,7 +339,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
 
           <div style={{ height: transcriptBottomReservePx }} />
         </div>
-      </ScrollArea>
+      </div>
       <TranscriptWidthControls
         hostRef={transcriptRootRef}
         width={contentWidth}

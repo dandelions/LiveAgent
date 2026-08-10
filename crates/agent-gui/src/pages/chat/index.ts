@@ -1,16 +1,14 @@
-export { ChatComposerBar, type ChatQueueTurnPreview } from "./components/ChatComposerBar";
-export { ChatHeader } from "./components/ChatHeader";
+export {
+  ChatComposerBar,
+  type ChatQueueTurnPreview,
+} from "@liveagent/ui/pages/chat/ChatComposerBar";
 export type {
   ActiveGatewayBridgeRequest,
   EnsureGatewayBridgeConversationReadyOptions,
   SendChatAction,
 } from "./gateway/gatewayBridgeTypes";
-export { useGatewayBridgeBatcher } from "./gateway/useGatewayBridgeBatcher";
 export { useGatewayBridgeListeners } from "./gateway/useGatewayBridgeListeners";
-export {
-  scheduleIdleHydration,
-  useConversationHistoryActions,
-} from "./history/useConversationHistoryActions";
+export { useConversationHistoryActions } from "./history/useConversationHistoryActions";
 export { useChatPageRuntimeStore } from "./hooks/useChatPageRuntimeStore";
 export { useChatSkills } from "./hooks/useChatSkills";
 export { useEditResend } from "./hooks/useEditResend";
