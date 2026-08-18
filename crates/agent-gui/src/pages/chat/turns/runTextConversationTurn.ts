@@ -1,4 +1,5 @@
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
+import type { HostedSearchBlock } from "@liveagent/ui/lib/chat/hostedSearch";
 import type { CompactionController } from "../../../lib/chat/compaction/controller";
 import { estimateTextTokenUnits } from "../../../lib/chat/compaction/tokenLedger";
 import type { ProviderRuntimeConfig } from "../../../lib/chat/compaction/types";
@@ -20,7 +21,6 @@ import type {
   MemoryExtractionModelConfig,
   MemoryExtractionStatusText,
 } from "../../../lib/chat/memory/extractionEngine";
-import type { HostedSearchBlock } from "../../../lib/chat/messages/hostedSearch";
 import {
   appendTextDeltaToRound,
   collapseThinking,
@@ -83,7 +83,11 @@ export type RunTextConversationTurnParams = {
   buildPreparedContext: (
     state: ConversationViewState,
     tools?: Context["tools"],
-    options?: { includeAbortedMessages?: boolean; includeUploadedFilesMetadata?: boolean },
+    options?: {
+      includeAbortedMessages?: boolean;
+      includeUploadedFilesMetadata?: boolean;
+      includeMemoryTurnUpdates?: boolean;
+    },
   ) => Context;
   compaction: CompactionController;
   cancellation: TurnCancellation;
@@ -156,6 +160,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
   let failoverStatusVisible = false;
 
   function commitAssistantRoundMeta(assistant: AssistantMessage, round: number) {
+    const contextUsageTokens = compaction.observeContextMessages([assistant]);
     gatewayBridgeEvents.queueToken("", {
       round,
       provider: assistant.provider,
@@ -163,6 +168,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
       api: assistant.api,
       stopReason: assistant.stopReason,
       usage: assistant.usage,
+      contextUsageTokens,
     });
     batchLiveRoundsUpdate(
       (prev) =>
@@ -175,6 +181,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
             stopReason: String(assistant.stopReason ?? ""),
             usage: assistant.usage,
             usageTotalTokens: assistant.usage?.totalTokens,
+            contextUsageTokens,
           },
         })),
       transcriptStore,
@@ -244,6 +251,10 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
       });
     pendingTextContext = null;
     compaction.beginRequest(contextWithSkills, getNextConversationState());
+    gatewayBridgeEvents.queueToken("", {
+      round: textRound,
+      contextUsageTokens: compaction.contextUsageTokens,
+    });
     hookLifecycle.startTurn(textRound);
     textModeUsesLiveRounds = false;
 
@@ -420,7 +431,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
   settleLiveTranscript(transcriptStore);
   hookLifecycle.ensureMessageEnded();
   hookLifecycle.endAgent();
-  await persistConversationWithHistorySync({
+  const historyPersisted = await persistConversationWithHistorySync({
     conversationId,
     sessionId,
     providerId,
@@ -431,7 +442,10 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     createdAt,
     titlePromise,
   });
-  if (shouldRunMemoryExtraction) {
+  // Only extract memory after durable history lands; otherwise memory can
+  // retain the answer while a failed final persist leaves chat history on the
+  // user-only snapshot.
+  if (historyPersisted && shouldRunMemoryExtraction) {
     const currentMemoryExtractionModel: MemoryExtractionModelConfig = {
       providerId,
       model,
@@ -447,7 +461,10 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
       sessionId,
       conversationId,
       workdir: conversationCwd,
-      messages: buildPreparedContext(finalState).messages,
+      // 抽取子模型看到的必须是用户真正说的话:memory 增量块只服务主模型的缓存,
+      // 混进来会把索引行当成用户发言,既撑破短消息门控又诱发重复写入。
+      messages: buildPreparedContext(finalState, undefined, { includeMemoryTurnUpdates: false })
+        .messages,
       statusText: memoryExtractionStatusText,
       signal: cancellation.userStop.signal,
       debugLogger: conversationDebugLogger,

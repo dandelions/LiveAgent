@@ -33,6 +33,7 @@ const SYSTEM_WORKDIR_KEY: &str = "workdir";
 // 保存白名单,导致重启后设置丢失;补入本键持久化。
 const SYSTEM_TOOL_POLICIES_KEY: &str = "toolPolicies";
 const SYSTEM_WORKSPACE_PROJECTS_KEY: &str = "workspaceProjects";
+const SYSTEM_WORKSPACE_PROJECT_GROUPS_KEY: &str = "workspaceProjectGroups";
 const SYSTEM_ACTIVE_WORKSPACE_PROJECT_ID_KEY: &str = "activeWorkspaceProjectId";
 const SYSTEM_HIDDEN_WORKSPACE_PROJECT_PATHS_KEY: &str = "hiddenWorkspaceProjectPaths";
 const SYSTEM_MISSING_WORKSPACE_PROJECT_PATHS_KEY: &str = "missingWorkspaceProjectPaths";
@@ -47,7 +48,6 @@ pub(crate) const PROVIDER_USAGE_QUERY_SECRET_UPDATES_FIELD: &str =
 pub(crate) const SYSTEM_PROXY_PASSWORD_UPDATE_FIELD: &str = "systemProxyPasswordUpdate";
 pub(crate) const SSH_SECRET_UPDATES_FIELD: &str = "sshSecretUpdates";
 pub(crate) const SSH_PATCH_FIELD: &str = "sshPatch";
-const SSH_SYNC_CONFLICT_MESSAGE: &str = "SSH 设置已在另一端更新，已刷新为最新状态，请重新提交。";
 
 const PROVIDER_SETTINGS_SELECT_SQL: &str = "
     SELECT provider_id, payload_json

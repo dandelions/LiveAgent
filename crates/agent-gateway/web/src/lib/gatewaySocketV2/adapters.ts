@@ -39,6 +39,8 @@ import {
   ChatRuntimeControlsSchema,
   ChatSelectedModelSchema,
   ChatUploadedFileSchema,
+  CheckpointExpectedEntrySchema,
+  CheckpointRequestSchema,
   CronManageRequestSchema,
   FileMentionListRequestSchema,
   FsCreateDirRequestSchema,
@@ -60,6 +62,7 @@ import {
   HistoryPinRequestSchema,
   HistoryPrefixRequestSchema,
   HistoryRenameRequestSchema,
+  HistorySetCwdRequestSchema,
   HistoryShareGetRequestSchema,
   HistoryShareSetRequestSchema,
   HistoryWorkdirsRequestSchema,
@@ -80,6 +83,8 @@ import {
   TerminalStreamFrameSchema,
   TunnelMutationSchema,
   UploadedImagePreviewRequestSchema,
+  WorkspaceRootGrantDraftSchema,
+  WorkspaceRootGrantsRequestSchema,
 } from "@/lib/proto/gen/proto/v2/gateway_pb";
 import type {
   ChatActivityEvent,
@@ -433,6 +438,13 @@ function agentRequestPayload(type: string, body: J): GatewayEnvelope["payload"] 
         targetPath: str(body.target_path),
         recursive: bool(body.recursive),
         overwrite: bool(body.overwrite),
+        content: str(body.content),
+        offset: toI64(body.offset),
+        maxBytes: toI64(body.max_bytes),
+        strictUtf8: bool(body.strict_utf8),
+        expectedMtime: toI64(body.expected_mtime),
+        expectedSizeBytes: toI64(body.expected_size_bytes),
+        createParentDirs: bool(body.create_parent_dirs),
       }),
     };
   }
@@ -542,6 +554,14 @@ function agentRequestPayload(type: string, body: J): GatewayEnvelope["payload"] 
           isPinned: bool(body.is_pinned),
         }),
       };
+    case "history.set_cwd":
+      return {
+        case: "historySetCwd",
+        value: create(HistorySetCwdRequestSchema, {
+          conversationId: trimStr(body.conversation_id),
+          cwd: trimStr(body.cwd),
+        }),
+      };
     case "history.share.get":
       return {
         case: "historyShareGet",
@@ -575,6 +595,9 @@ function agentRequestPayload(type: string, body: J): GatewayEnvelope["payload"] 
           baseUrl: trimStr(body.base_url),
           apiKey: trimStr(body.api_key),
           useSystemProxy: bool(body.use_system_proxy),
+          modelsUrl: trimStr(body.models_url),
+          providerId: trimStr(body.provider_id),
+          isFullUrl: typeof body.is_full_url === "boolean" ? body.is_full_url : undefined,
         }),
       };
     case "provider.usage.query":
@@ -659,6 +682,43 @@ function agentRequestPayload(type: string, body: J): GatewayEnvelope["payload"] 
       };
     case "fs.roots":
       return { case: "fsRoots", value: create(FsRootsRequestSchema, {}) };
+    case "workspace_root_grants.list":
+      return {
+        case: "workspaceRootGrants",
+        value: create(WorkspaceRootGrantsRequestSchema, {
+          action: "list",
+          projectId: trimStr(body.project_id),
+          projectPath: trimStr(body.project_path),
+        }),
+      };
+    case "workspace_root_grants.apply": {
+      const drafts = Array.isArray(body.grants) ? body.grants : [];
+      return {
+        case: "workspaceRootGrants",
+        value: create(WorkspaceRootGrantsRequestSchema, {
+          action: "apply",
+          projectId: trimStr(body.project_id),
+          projectPath: trimStr(body.project_path),
+          grants: drafts.map((value) => {
+            const grant = rec(value);
+            return create(WorkspaceRootGrantDraftSchema, {
+              id: typeof grant.id === "string" ? grant.id.trim() : undefined,
+              alias: trimStr(grant.alias),
+              displayPath: trimStr(grant.display_path),
+              access: trimStr(grant.access),
+            });
+          }),
+        }),
+      };
+    }
+    case "workspace_root_grants.revoke":
+      return {
+        case: "workspaceRootGrants",
+        value: create(WorkspaceRootGrantsRequestSchema, {
+          action: "revoke",
+          projectId: trimStr(body.project_id),
+        }),
+      };
     case "fs.list_dirs":
       return {
         case: "fsListDirs",
@@ -756,6 +816,29 @@ function agentRequestPayload(type: string, body: J): GatewayEnvelope["payload"] 
           openInFileManager: bool(body.open_in_file_manager),
         }),
       };
+    case "checkpoint.list":
+    case "checkpoint.diff":
+    case "checkpoint.rewind": {
+      const expected = Array.isArray(body.expected) ? body.expected : [];
+      return {
+        case: "checkpoint",
+        value: create(CheckpointRequestSchema, {
+          action: type.slice("checkpoint.".length),
+          conversationId: trimStr(body.conversation_id),
+          turnSeq: toI64(body.turn_seq),
+          authorizedRoots: Array.isArray(body.authorized_roots)
+            ? body.authorized_roots.filter((root): root is string => typeof root === "string")
+            : [],
+          expected: expected.map((entry) => {
+            const value = rec(entry);
+            return create(CheckpointExpectedEntrySchema, {
+              key: trimStr(value.key),
+              currentHash: trimStr(value.current_hash),
+            });
+          }),
+        }),
+      };
+    }
     default:
       throw new Error(`unsupported gateway request type: ${type}`);
   }
@@ -1010,6 +1093,7 @@ function decodeAgentResponse(envelope: AgentEnvelope, options: { agentOnline: bo
     case "historyRenameResp":
     case "historyBranchResp":
     case "historyPinResp":
+    case "historySetCwdResp":
       if (!payload.value.conversation) {
         frameError("unexpected agent response");
       }
@@ -1116,6 +1200,23 @@ function decodeAgentResponse(envelope: AgentEnvelope, options: { agentOnline: bo
           label: root.label,
         })),
       };
+    case "workspaceRootGrantsResp":
+      return {
+        grants: payload.value.grants.map((grant) => ({
+          id: grant.id,
+          projectId: grant.projectId,
+          projectPathKey: grant.projectPathKey,
+          alias: grant.alias,
+          displayPath: grant.displayPath,
+          canonicalPath: grant.canonicalPath,
+          access: grant.access,
+          state: grant.state,
+          createdAt: num(grant.createdAt),
+          updatedAt: num(grant.updatedAt),
+        })),
+      };
+    case "checkpointResp":
+      return unmarshalJsonPayload(payload.value.resultJson);
     case "fsListDirsResp":
       return {
         path: payload.value.path.trim(),
@@ -1639,6 +1740,13 @@ function sftpResponsePayload(resp: SftpResponse): J {
     path: resp.path,
     exists: resp.exists,
     entries: resp.entries.map(sftpEntryPayload),
+    content: resp.content,
+    offset: num(resp.offset),
+    bytesRead: num(resp.bytesRead),
+    bytes_read: num(resp.bytesRead),
+    sizeBytes: num(resp.sizeBytes),
+    size_bytes: num(resp.sizeBytes),
+    truncated: resp.truncated,
   };
   if (resp.entry) payload.entry = sftpEntryPayload(resp.entry);
   if (resp.transfer) payload.transfer = sftpTransferPayload(resp.transfer);
