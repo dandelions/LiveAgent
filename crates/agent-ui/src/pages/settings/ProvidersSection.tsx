@@ -7,6 +7,7 @@ import {
 } from "@liveagent/app/lib/providers/usageQuery";
 import {
   type CustomProvider,
+  hasProviderFailoverConfiguration,
   MODEL_FAILOVER_QUEUE_LIMIT,
   type ProviderFailoverSettings,
   type ProviderId,
@@ -30,13 +31,6 @@ import {
 import { Button } from "@liveagent/ui/components/ui/button";
 import { Label } from "@liveagent/ui/components/ui/label";
 import { NumberInput } from "@liveagent/ui/components/ui/number-input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@liveagent/ui/components/ui/select";
 import { Sheet, SheetContent, SheetTitle } from "@liveagent/ui/components/ui/sheet";
 import { useVerticalListReorder } from "@liveagent/ui/components/ui/useVerticalListReorder";
 import { useLocale } from "@liveagent/ui/i18n/index";
@@ -114,8 +108,40 @@ function FailoverSettingsCard(props: SettingsSectionProps & { providerType: Prov
 
   const queueValues = useMemo(() => new Set(failover.queue), [failover.queue]);
   const addableProviders = useMemo(
-    () => vendorProviders.filter((provider) => !queueValues.has(provider.id)),
+    () =>
+      vendorProviders.filter(
+        (provider) => !queueValues.has(provider.id) && hasProviderFailoverConfiguration(provider),
+      ),
     [vendorProviders, queueValues],
+  );
+  const unavailableProviderCount = useMemo(
+    () =>
+      vendorProviders.filter(
+        (provider) => !queueValues.has(provider.id) && !hasProviderFailoverConfiguration(provider),
+      ).length,
+    [vendorProviders, queueValues],
+  );
+  const unavailableQueuedProviderCount = useMemo(
+    () =>
+      failover.queue.filter((providerId) => {
+        const provider = settings.customProviders.find((item) => item.id === providerId);
+        return provider ? !hasProviderFailoverConfiguration(provider) : false;
+      }).length,
+    [failover.queue, settings.customProviders],
+  );
+  const addableProviderOptions = useMemo<ModelPickerOption[]>(
+    () =>
+      addableProviders.map((provider) => ({
+        value: provider.id,
+        label: provider.name,
+        description: provider.baseUrl,
+        // Keep all queue entries under the current vendor group, matching the
+        // grouping used by the title/commit model picker.
+        providerId: providerType,
+        providerName: getProviderLabel(providerType),
+        providerType,
+      })),
+    [addableProviders, providerType],
   );
 
   function patchFailover(patch: Partial<ProviderFailoverSettings>) {
@@ -245,28 +271,33 @@ function FailoverSettingsCard(props: SettingsSectionProps & { providerType: Prov
           </div>
         )}
         {failover.queue.length < MODEL_FAILOVER_QUEUE_LIMIT && addableProviders.length > 0 ? (
-          <Select value="" onValueChange={addQueueEntry}>
-            <SelectTrigger
-              aria-label={t("settings.failoverQueueAdd")}
-              className="h-9 w-full rounded-lg border-foreground/10 bg-white/70 text-[13px] shadow-sm dark:bg-background/40"
-            >
-              <SelectValue>
-                <span className="text-muted-foreground">{t("settings.failoverQueueAdd")}</span>
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              {addableProviders.map((provider) => (
-                <SelectItem key={provider.id} value={provider.id}>
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate">{provider.name}</span>
-                    <span className="truncate text-[11px] text-muted-foreground/70">
-                      {provider.baseUrl}
-                    </span>
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <ModelPicker
+            options={addableProviderOptions}
+            value=""
+            onChange={addQueueEntry}
+            placeholder={t("settings.failoverQueueAdd")}
+            ariaLabel={t("settings.failoverQueueAdd")}
+            collapsibleGroups={false}
+            searchPlaceholder={t("settings.failoverQueueSearch")}
+            emptyLabel={t("settings.failoverQueueNoMatch")}
+            triggerClassName="h-9 rounded-lg border-foreground/10 bg-white/70 text-[13px] shadow-sm dark:bg-background/40"
+          />
+        ) : null}
+        {unavailableProviderCount > 0 ? (
+          <p className="text-[11px] leading-relaxed text-amber-700/90 dark:text-amber-300/90">
+            {t("settings.failoverQueueUnavailableCandidates").replace(
+              "{count}",
+              String(unavailableProviderCount),
+            )}
+          </p>
+        ) : null}
+        {unavailableQueuedProviderCount > 0 ? (
+          <p className="text-[11px] leading-relaxed text-amber-700/90 dark:text-amber-300/90">
+            {t("settings.failoverQueueUnavailableExisting").replace(
+              "{count}",
+              String(unavailableQueuedProviderCount),
+            )}
+          </p>
         ) : null}
       </div>
 
@@ -364,11 +395,11 @@ function CustomSettingsDrawer(
     <Sheet open onOpenChange={(open) => !open && onClose()}>
       <SheetContent
         variant="inset"
-        className="max-w-none border-border bg-background sm:max-w-[440px]"
+        className="settings-provider-custom-sheet max-w-none border-border bg-background sm:max-w-[440px]"
         closeLabel={t("settings.closeCustomSettings")}
         showCloseButton={false}
       >
-        <div className="relative flex items-start gap-3 px-6 pb-4 pt-[22px]">
+        <div className="settings-provider-custom-sheet-header relative flex items-start gap-3 px-6 pb-4 pt-[22px]">
           <div className="min-w-0 flex-1 max-[720px]:basis-[calc(100%-3rem)]">
             <SheetTitle className="text-[17px] leading-tight tracking-tight text-foreground/95">
               {t("settings.customSettings")}
@@ -390,7 +421,7 @@ function CustomSettingsDrawer(
           className="relative mx-6 h-px bg-gradient-to-r from-transparent via-foreground/[0.08] to-transparent"
         />
 
-        <div className="relative min-h-0 flex-1 overflow-y-auto px-6 pb-6">
+        <div className="settings-provider-custom-sheet-body relative min-h-0 flex-1 overflow-y-auto px-6 pb-6">
           <div className="divide-y divide-foreground/[0.08]">
             <CustomSettingsModelField
               label={t("settings.conversationTitleModel")}
@@ -424,6 +455,66 @@ function CustomSettingsDrawer(
         </div>
       </SheetContent>
     </Sheet>
+  );
+}
+
+const PROVIDER_ACTION_CLASS =
+  "settings-provider-action h-full min-w-0 gap-1.5 rounded-md px-2.5 text-[12.5px] font-medium shadow-none";
+
+function ProviderActionGroup(props: {
+  activeTab: ProviderId;
+  settings: SettingsSectionProps["settings"];
+  setSettings: SettingsSectionProps["setSettings"];
+  customSettingsOpen: boolean;
+  onAdd: () => void;
+  onOpenCustomSettings: () => void;
+}) {
+  const { t } = useLocale();
+  const { activeTab, settings, setSettings, customSettingsOpen, onAdd, onOpenCustomSettings } =
+    props;
+
+  return (
+    <div
+      className="settings-provider-action-group"
+      role="group"
+      aria-label={t("settings.providerActionGroup")}
+    >
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className={cn(PROVIDER_ACTION_CLASS, "settings-provider-action--primary")}
+        onClick={onAdd}
+        title={t("settings.addProvider")}
+        aria-label={t("settings.addProvider")}
+      >
+        <Plus className="h-3.5 w-3.5" />
+        <span className="settings-provider-action-label">{t("settings.addProviderShort")}</span>
+      </Button>
+      <ProviderSettingsExtension
+        activeTab={activeTab}
+        settings={settings}
+        setSettings={setSettings}
+        triggerClassName={PROVIDER_ACTION_CLASS}
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className={cn(
+          PROVIDER_ACTION_CLASS,
+          customSettingsOpen && "settings-provider-action-active",
+        )}
+        onClick={onOpenCustomSettings}
+        title={t("settings.openCustomSettings")}
+        aria-label={t("settings.openCustomSettings")}
+      >
+        <Settings className="h-3.5 w-3.5" />
+        <span className="settings-provider-action-label">
+          {t("settings.providerActionSettings")}
+        </span>
+      </Button>
+    </div>
   );
 }
 
@@ -484,31 +575,32 @@ function ProviderList(props: {
 
   return (
     <div className="settings-provider-list flex h-full min-h-0 flex-col gap-4">
-      <div className="settings-section-heading-row flex shrink-0 items-center justify-between gap-3">
-        <div className="text-sm text-muted-foreground">
-          {filtered.length === 0
-            ? t("settings.noProviders")
-            : `${filtered.length} ${t("settings.navProviders")}`}
+      {filtered.length > 0 ? (
+        <div className="shrink-0 text-sm text-muted-foreground">
+          {`${filtered.length} ${t("settings.navProviders")}`}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="settings-section-action gap-1.5"
-          onClick={onAdd}
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {t("settings.addProvider")}
-        </Button>
-      </div>
+      ) : null}
 
-      <div ref={providerScrollContainerRef} className="min-h-0 flex-1 overflow-y-auto pr-1">
+      <div
+        ref={providerScrollContainerRef}
+        className="settings-provider-list-scroll min-h-0 flex-1 overflow-y-auto pr-1"
+      >
         {filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-12 text-center">
+          <div className="settings-provider-empty flex flex-col items-center justify-center rounded-xl border border-dashed py-12 text-center">
             <div className="mb-3 flex items-center justify-center text-3xl text-foreground">
               <ProviderBrandIcon type={type} />
             </div>
             <p className="text-sm font-medium">{t("settings.noProvidersHint")}</p>
             <p className="mt-1 text-xs text-muted-foreground">{t("settings.noProvidersAdd")}</p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="settings-provider-empty-add mt-4 gap-1.5"
+              onClick={onAdd}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              {t("settings.addProvider")}
+            </Button>
           </div>
         ) : (
           <div className="space-y-2 pb-1">
@@ -532,7 +624,7 @@ function ProviderList(props: {
                     key={provider.id}
                     {...getProviderReorderProps(provider.id)}
                     className={cn(
-                      "settings-card-row group flex items-center gap-3 rounded-xl border bg-card px-4 py-3 transition-colors hover:bg-accent/30",
+                      "settings-card-row settings-provider-card-row group flex items-center gap-3 rounded-xl border bg-card px-4 py-3 transition-colors hover:bg-accent/30",
                       draggingProviderId === provider.id && "bg-accent shadow-lg",
                     )}
                   >
@@ -540,7 +632,7 @@ function ProviderList(props: {
                     <div className="flex w-5 shrink-0 items-center justify-center text-lg text-foreground">
                       <ProviderBrandIcon type={type} />
                     </div>
-                    <div className="min-w-0 flex-1 max-[720px]:basis-[calc(100%-3rem)]">
+                    <div className="settings-provider-card-main min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-sm font-medium">{provider.name}</span>
                         {provider.useSystemProxy ? (
@@ -655,7 +747,6 @@ export function ProvidersSection(
   },
 ) {
   const { settings, setSettings, initialProviderId, onInitialProviderHandled } = props;
-  const { t } = useLocale();
 
   const [activeTab, setActiveTab] = useState<ProviderId>("claude_code");
   const [modalOpen, setModalOpen] = useState(false);
@@ -741,70 +832,62 @@ export function ProvidersSection(
 
   return (
     <>
-      <div className="settings-provider-tabs-wrap mb-4 flex shrink-0 items-center justify-between gap-3">
-        <div className="settings-provider-tabs inline-flex h-9 items-center rounded-lg bg-muted p-1 text-muted-foreground">
-          {PROVIDER_TABS.map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => setActiveTab(tab)}
-              className={cn(
-                "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all",
-                activeTab === tab
-                  ? "bg-background text-foreground shadow"
-                  : "hover:text-foreground/80",
-              )}
-            >
-              <ProviderBrandIcon type={tab} />
-              {getProviderLabel(tab)}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-1">
-          <ProviderSettingsExtension
+      <div className="settings-provider-section flex min-h-0 flex-1 flex-col">
+        <div className="settings-provider-tabs-wrap mb-4 flex shrink-0 items-center justify-between gap-3">
+          <div className="settings-provider-tabs inline-flex h-9 min-w-0 items-center overflow-x-auto rounded-lg bg-muted p-1 text-muted-foreground">
+            {PROVIDER_TABS.map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setActiveTab(tab)}
+                className={cn(
+                  "settings-provider-tab inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all",
+                  activeTab === tab
+                    ? "bg-background text-foreground shadow"
+                    : "hover:text-foreground/80",
+                )}
+              >
+                <ProviderBrandIcon type={tab} />
+                {getProviderLabel(tab)}
+              </button>
+            ))}
+          </div>
+          <ProviderActionGroup
             activeTab={activeTab}
             settings={settings}
             setSettings={setSettings}
+            customSettingsOpen={customSettingsOpen}
+            onAdd={openAdd}
+            onOpenCustomSettings={() => setCustomSettingsOpen(true)}
           />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
-            onClick={() => setCustomSettingsOpen(true)}
-            title={t("settings.openCustomSettings")}
-            aria-label={t("settings.openCustomSettings")}
-          >
-            <Settings className="h-4 w-4" />
-          </Button>
         </div>
-      </div>
 
-      <div className="min-h-0 flex-1 overflow-hidden">
-        <div
-          className="flex h-full transition-transform duration-300 ease-in-out"
-          style={{ transform: `translateX(-${activeTabIndex * 100}%)` }}
-        >
-          {PROVIDER_TABS.map((tab) => (
-            <div
-              key={tab}
-              className="w-full shrink-0 overflow-hidden"
-              aria-hidden={activeTab !== tab}
-              inert={activeTab !== tab}
-            >
-              <ProviderList
-                type={tab}
-                providers={settings.customProviders}
-                onAdd={openAdd}
-                onEdit={openEdit}
-                onDelete={handleDelete}
-                onReorder={handleProviderReorder}
-                usageByProvider={usageByProvider}
-                refreshingProviderIds={refreshingProviderIds}
-                onRefreshUsage={(providerId) => void refreshProvider(providerId)}
-              />
-            </div>
-          ))}
+        <div className="settings-provider-panels min-h-0 flex-1 overflow-hidden">
+          <div
+            className="flex h-full transition-transform duration-300 ease-in-out"
+            style={{ transform: `translateX(-${activeTabIndex * 100}%)` }}
+          >
+            {PROVIDER_TABS.map((tab) => (
+              <div
+                key={tab}
+                className="w-full shrink-0 overflow-hidden"
+                aria-hidden={activeTab !== tab}
+                inert={activeTab !== tab}
+              >
+                <ProviderList
+                  type={tab}
+                  providers={settings.customProviders}
+                  onAdd={openAdd}
+                  onEdit={openEdit}
+                  onDelete={handleDelete}
+                  onReorder={handleProviderReorder}
+                  usageByProvider={usageByProvider}
+                  refreshingProviderIds={refreshingProviderIds}
+                  onRefreshUsage={(providerId) => void refreshProvider(providerId)}
+                />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 

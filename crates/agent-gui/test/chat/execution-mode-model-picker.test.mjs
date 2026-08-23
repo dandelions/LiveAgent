@@ -16,6 +16,10 @@ const composerSource = readFileSync(
   new URL("../../../agent-ui/src/pages/chat/ChatComposerBar.tsx", import.meta.url),
   "utf8",
 );
+const composerControlStylesSource = readFileSync(
+  new URL("../../../agent-ui/src/lib/chat/composerControlStyles.ts", import.meta.url),
+  "utf8",
+);
 const branchSelectorSource = readFileSync(
   new URL("../../../agent-ui/src/components/git/GitBranchSelector.tsx", import.meta.url),
   "utf8",
@@ -63,7 +67,7 @@ test("execution mode switchers expose a native radio group", () => {
   }
 });
 
-test("popover interactions preserve mode and model changes until an outside dismissal", () => {
+test("model selection closes the popover while group controls keep it open", () => {
   for (const source of pickerSources) {
     assert.match(source, /onClick=\{\(\) => toggleGroup\(group\.id\)\}/);
     assert.match(source, /const \[expandedGroupId, setExpandedGroupId\] = useState/);
@@ -74,8 +78,7 @@ test("popover interactions preserve mode and model changes until an outside dism
       source,
       /<Popover open=\{isModelPickerOpen\} onOpenChange=\{setIsModelPickerOpen\}>/,
     );
-    assert.match(source, /onSelectModel\(parsed\);/);
-    assert.doesNotMatch(source, /onSelectModel\(parsed\);\s+setIsModelPickerOpen\(false\);/);
+    assert.match(source, /onSelectModel\(parsed\);\s+setIsModelPickerOpen\(false\);/);
   }
 });
 
@@ -133,10 +136,19 @@ test("branch selector reuses the model trigger visual language", () => {
   assert.doesNotMatch(branchSelectorSource, /border-emerald|bg-emerald/);
 });
 
+test("compact composer controls remain equal-width centered icon buttons", () => {
+  assert.match(composerSource, /composer-glass-card @container/);
+  assert.match(composerControlStylesSource, /@max-\[480px\]:w-8/);
+  assert.match(composerControlStylesSource, /@max-\[480px\]:justify-center/);
+  assert.match(composerControlStylesSource, /@max-\[480px\]:gap-0/);
+  assert.match(composerControlStylesSource, /@max-\[480px\]:px-0/);
+  assert.match(composerControlStylesSource, /@max-\[480px\]:hidden/);
+});
+
 test("composer dropdown portals stay above the composer surface", () => {
   assert.match(popoverSource, /className="layer-popover isolate"/);
   assert.match(selectSource, /className="layer-popover"/);
-  assert.match(baseStylesSource, /--layer-popover: 9999;/);
+  assert.match(baseStylesSource, /--layer-popover: 10000;/);
   assert.match(baseStylesSource, /--layer-modal: 10000;/);
 });
 

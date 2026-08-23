@@ -1,11 +1,14 @@
 import {
   type ChatRuntimeControls,
+  type CommandSafetyMode,
   type ExecutionMode,
   isAgentExecutionMode,
   type ProviderId,
   type ReasoningLevel,
   type SelectedModel,
+  type SttProviderId,
 } from "@liveagent/app/lib/settings";
+import { CommandSafetyModeSelector } from "@liveagent/ui/components/chat/CommandSafetyModeSelector";
 import { ComposerAttachmentCard } from "@liveagent/ui/components/chat/ComposerAttachmentCard";
 import { ComposerModelControls } from "@liveagent/ui/components/chat/ComposerModelControls";
 import { ContextUsageRing } from "@liveagent/ui/components/chat/ContextUsageRing";
@@ -22,6 +25,7 @@ import {
   Clock3,
   Loader2,
   Maximize2,
+  Mic,
   Minimize2,
   Paperclip,
   Play,
@@ -36,6 +40,7 @@ import { useLocale } from "@liveagent/ui/i18n/index";
 import type { GitClient } from "@liveagent/ui/lib/git/types";
 import type { SharedModelOption } from "@liveagent/ui/lib/models/modelOptions";
 import { cn } from "@liveagent/ui/lib/shared/utils";
+import type { SttTransport } from "@liveagent/ui/lib/stt/types";
 import type { WorkspaceActivityClient } from "@liveagent/ui/lib/workspace-activity/types";
 import {
   type MutableRefObject,
@@ -56,6 +61,7 @@ import {
   type UploadedImagePreviewLoader,
 } from "../../lib/chat/uploadedImagePreview";
 import type { PendingUploadedFile } from "../../lib/chat/uploadTypes";
+import { useComposerStt } from "./useComposerStt";
 
 function useComposerUploadedImagePreview(
   file: PendingUploadedFile,
@@ -212,10 +218,23 @@ function prefersReducedMotion() {
 
 export type ChatComposerBarProps = {
   surface: "desktop" | "web";
+  conversationId: string;
   composerRef: MutableRefObject<MentionComposerHandle | null>;
   isSending: boolean;
   isUploadingFiles: boolean;
   isInputDisabled: boolean;
+  sttProvider?: SttProviderId | null;
+  sttProviderConfigured?: boolean;
+  sttTransport?: SttTransport;
+  /** 当前会话身份；切换会话时取消进行中的语音识别。 */
+  sttSessionKey?: string;
+  /** STT 失败（麦克风不可用、连接超时等）上报给宿主以 toast 形式提示。 */
+  onSttError?: (message: string) => void;
+  /**
+   * 只读视图（如轨迹页）挂起输入区：整体 display:none 但保持挂载，
+   * 半打的草稿与队列状态在切回聊天页时原样恢复。
+   */
+  hidden?: boolean;
   inputPlaceholder: string;
   workdir: string;
   enabledSkills: MentionComposerSkill[];
@@ -225,6 +244,9 @@ export type ChatComposerBarProps = {
   modelOptions: SharedModelOption<ProviderId>[];
   selectedValue?: string;
   chatRuntimeControls: ChatRuntimeControls;
+  /** 命令执行方式(ask/auto/sandbox/sandboxOffline);缺省不渲染选择器。 */
+  commandSafetyMode?: CommandSafetyMode;
+  onCommandSafetyModeChange?: (mode: CommandSafetyMode) => void;
   reasoningOptions: ReasoningLevel[];
   thinkingAlwaysOn: boolean;
   gitClient?: GitClient | null;
@@ -279,10 +301,17 @@ export type ChatComposerBarProps = {
 export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposerBarProps) {
   const {
     surface,
+    conversationId,
     composerRef,
     isSending,
     isUploadingFiles,
     isInputDisabled,
+    sttProvider = null,
+    sttProviderConfigured,
+    sttTransport,
+    sttSessionKey,
+    onSttError,
+    hidden = false,
     inputPlaceholder,
     workdir,
     enabledSkills,
@@ -292,6 +321,8 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     modelOptions,
     selectedValue,
     chatRuntimeControls,
+    commandSafetyMode,
+    onCommandSafetyModeChange,
     reasoningOptions,
     thinkingAlwaysOn,
     gitClient,
@@ -331,6 +362,16 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
   } = props;
   const { t } = useLocale();
   const [composerIsEmpty, setComposerIsEmpty] = useState(true);
+  const stt = useComposerStt({
+    composerRef,
+    provider: sttProvider,
+    providerConfigured: sttProviderConfigured,
+    transport: sttTransport,
+    disabled: isInputDisabled,
+    sessionKey: sttSessionKey,
+    hidden,
+    onError: onSttError,
+  });
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const isComposerExpandedRef = useRef(false);
   const glassCardRef = useRef<HTMLDivElement | null>(null);
@@ -355,10 +396,11 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     DEFAULT_QUEUE_SCROLLBAR_STATE,
   );
   const isAgentMode = isAgentExecutionMode(executionMode);
-  const uploadDisabled = isInputDisabled || isUploadingFiles || !isAgentMode || !workdir;
-  const controlsDisabled = isInputDisabled;
+  const uploadDisabled =
+    isInputDisabled || stt.active || isUploadingFiles || !isAgentMode || !workdir;
+  const controlsDisabled = isInputDisabled || stt.active;
   const hasSendableDraft = !composerIsEmpty || pendingUploadedFiles.length > 0;
-  const sendDisabled = isInputDisabled || isUploadingFiles || !hasSendableDraft;
+  const sendDisabled = isInputDisabled || stt.active || isUploadingFiles || !hasSendableDraft;
   const canQueueDraftWhileSending = isSending && !sendDisabled;
   const primaryActionTitle = canQueueDraftWhileSending
     ? t("chat.queue.addToQueue")
@@ -660,6 +702,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
           ? "pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-4"
           : "gateway-composer-layer pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center",
         isComposerExpanded && (surface === "desktop" ? "top-14" : "top-0 pt-3"),
+        hidden && "hidden",
       )}
     >
       {surface === "desktop" ? (
@@ -824,6 +867,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
         <div
           ref={glassCardRef}
           data-file-upload-drop-zone=""
+          data-file-upload-conversation-id={conversationId}
           onKeyDown={
             isComposerExpanded
               ? (event) => {
@@ -839,7 +883,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
             // 展开态切换 flex-grow 时会被一并动画，导致卡片先跳顶再长满的闪动。
             // 常驻 flex-col：FLIP 动画把卡片钳在中间高度时，flex-1 的编辑器
             // 区吸收多余空间，工具栏才能始终贴住卡片底边。
-            "composer-glass-card relative flex flex-col overflow-hidden rounded-3xl border border-black/[0.055] bg-white/70 shadow-[0_12px_40px_-14px_rgba(15,23,42,0.22),0_2px_6px_-2px_rgba(15,23,42,0.08),inset_0_1px_0_rgba(255,255,255,0.74)] backdrop-blur-2xl backdrop-saturate-[165%] transition-[background-color,border-color,box-shadow] focus-within:border-black/[0.075] focus-within:bg-white/74 focus-within:shadow-[0_16px_46px_-14px_rgba(15,23,42,0.26),0_4px_12px_-4px_rgba(15,23,42,0.10),inset_0_1px_0_rgba(255,255,255,0.78)] dark:border-white/[0.10] dark:bg-white/[0.06] dark:shadow-[0_12px_40px_-14px_rgba(0,0,0,0.72),0_2px_6px_-2px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.08)] dark:focus-within:border-white/[0.15] dark:focus-within:bg-white/[0.08]",
+            "composer-glass-card @container relative flex flex-col overflow-hidden rounded-3xl border border-black/[0.055] bg-white/70 shadow-[0_12px_40px_-14px_rgba(15,23,42,0.22),0_2px_6px_-2px_rgba(15,23,42,0.08),inset_0_1px_0_rgba(255,255,255,0.74)] backdrop-blur-2xl backdrop-saturate-[165%] transition-[background-color,border-color,box-shadow] focus-within:border-black/[0.075] focus-within:bg-white/74 focus-within:shadow-[0_16px_46px_-14px_rgba(15,23,42,0.26),0_4px_12px_-4px_rgba(15,23,42,0.10),inset_0_1px_0_rgba(255,255,255,0.78)] dark:border-white/[0.10] dark:bg-white/[0.06] dark:shadow-[0_12px_40px_-14px_rgba(0,0,0,0.72),0_2px_6px_-2px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.08)] dark:focus-within:border-white/[0.15] dark:focus-within:bg-white/[0.08]",
             surface === "desktop" && "z-10",
             isComposerExpanded && "min-h-0 flex-1",
           )}
@@ -865,7 +909,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                   key={`${file.relativePath}-${file.absolutePath ?? file.fileName}`}
                   file={file}
                   workdir={workdir}
-                  disabled={isInputDisabled}
+                  disabled={controlsDisabled}
                   removeLabel={t("chat.upload.removeFile")}
                   previewLabel={t("chat.upload.previewImage")}
                   closePreviewLabel={t("chat.upload.closePreview")}
@@ -928,7 +972,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
               onPasteFiles={onPasteFiles}
               loadHistoryPrompts={loadHistoryPrompts}
               placeholder={inputPlaceholder}
-              disabled={isInputDisabled}
+              disabled={isInputDisabled || stt.active}
               workdir={workdir}
               enabledSkills={enabledSkills}
               className={cn(
@@ -981,6 +1025,35 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                 </button>
               </RuntimeControlTooltip>
 
+              {stt.available ? (
+                <RuntimeControlTooltip label={stt.active ? "停止语音输入" : "开始语音输入"}>
+                  <button
+                    type="button"
+                    disabled={isInputDisabled}
+                    onClick={stt.toggle}
+                    aria-label={stt.active ? "停止语音输入" : "开始语音输入"}
+                    aria-pressed={stt.active}
+                    className={cn(
+                      "composer-toolbar-action inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full outline-hidden transition-colors hover:bg-muted/60 focus-visible:bg-muted/60",
+                      "disabled:pointer-events-none disabled:opacity-40",
+                      stt.active
+                        ? "bg-red-500/10 text-red-600"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {stt.state === "requesting-permission" ||
+                    stt.state === "buffering" ||
+                    stt.state === "stopping" ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : stt.active ? (
+                      <Square className="h-3.5 w-3.5 fill-current" />
+                    ) : (
+                      <Mic className="h-4 w-4" />
+                    )}
+                  </button>
+                </RuntimeControlTooltip>
+              ) : null}
+
               <ComposerModelControls
                 executionMode={executionMode}
                 hasModels={hasModels}
@@ -996,6 +1069,14 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                 onOpenSettings={onOpenSettings}
                 onChatRuntimeControlsChange={onChatRuntimeControlsChange}
               />
+
+              {isAgentMode && commandSafetyMode && onCommandSafetyModeChange ? (
+                <CommandSafetyModeSelector
+                  value={commandSafetyMode}
+                  disabled={controlsDisabled}
+                  onChange={onCommandSafetyModeChange}
+                />
+              ) : null}
 
               <GitBranchSelector
                 workdir={workdir}

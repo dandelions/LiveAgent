@@ -33,6 +33,7 @@ import {
   type ConversationViewState,
   clearTaskListState,
   findHistoryMessageRefByMessageId,
+  getActiveSegment,
   type HistoryMessageRef,
   setTaskListState,
 } from "../../../lib/chat/conversation/conversationState";
@@ -43,7 +44,6 @@ import {
 import { createTurnCancellation } from "../../../lib/chat/conversation/turnCancellation";
 import type { ChatHistorySummary } from "../../../lib/chat/history/chatHistory";
 import type { MemoryExtractionStatusKey } from "../../../lib/chat/memory/extractionEngine";
-import { memoryTurnInjection } from "../../../lib/chat/memory/injectionController";
 import {
   BRANCH_CONVERSATION_DEFAULT_TITLE,
   buildFallbackConversationTitle,
@@ -53,12 +53,12 @@ import {
 } from "../../../lib/chat/page/chatPageHelpers";
 import { skillMentionInjection } from "../../../lib/chat/skills/mentionInjection";
 import { createStreamDebugLogger } from "../../../lib/debug/agentDebug";
-import { buildMemoryOverviewSection } from "../../../lib/memory/prompts/injection";
 import { createModelFromConfig, createProviderRuntimeConfig } from "../../../lib/providers/llm";
 import {
   type AppSettings,
   applyMcpOpsToAppSettings,
   type ChatRuntimeControls,
+  type CommandSafetyMode,
   type ExecutionMode,
   filterMcpSettingsForWorkspace,
   getSshProjectHostIds,
@@ -67,6 +67,7 @@ import {
   removeWorkspaceResourceReferences,
   resolveWorkspaceResources,
   type SelectedModel,
+  strictestCommandSafetyMode,
   updateMemorySettings,
   updateSkills,
   type WorkspaceProject,
@@ -80,12 +81,24 @@ import {
 import type { AdditionalProjectRoot } from "../../../lib/tools/additionalProjectRoots";
 import type { SkillAccessPolicy } from "../../../lib/tools/skillAccessPolicy";
 import type { TaskStateStore } from "../../../lib/tools/taskTools";
+import {
+  clearLocalTrajectory,
+  invalidateDesktopTrajectory,
+} from "../../../lib/trajectory/liveTrajectory";
+import {
+  acquireTrajectoryRecorder,
+  releaseTrajectoryRecorder,
+  resolveTrajectoryTurnNumber,
+  trajectorySlotCapture,
+  updateTrajectoryRecorderSegment,
+} from "../../../lib/trajectory/recorderRegistry";
 import { listWorkspaceRootGrants } from "../../../lib/workspaceRootGrants";
 import { asErrorMessage } from "../chatPageUtils";
 import {
   buildTextFromComposerDraft,
   importPastedTextsAsFiles,
 } from "../composer/composerDraftText";
+import type { ConversationHydrationStore } from "../conversations/conversationHydrationStore";
 import {
   buildGatewayFinalProjectionEntries,
   buildGatewayRuntimeSnapshotEntries,
@@ -153,8 +166,7 @@ type UseSendChatTurnParams = {
   isImportingPastedTextRef: MutableRefObject<boolean>;
   setIsImportingPastedText: Dispatch<SetStateAction<boolean>>;
   setErrorMessage: Dispatch<SetStateAction<string | null>>;
-  hydratingConversationIdRef: MutableRefObject<string | null>;
-  hydrationFailedConversationIdRef: MutableRefObject<string | null>;
+  hydration: ConversationHydrationStore;
   currentConversationIdRef: ChatPageRuntimeStore["currentConversationIdRef"];
   conversationRuntimeCacheRef: ChatPageRuntimeStore["conversationRuntimeCacheRef"];
   buildRuntimeEntryFromVisibleState: ChatPageRuntimeStore["buildRuntimeEntryFromVisibleState"];
@@ -231,8 +243,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     isImportingPastedTextRef,
     setIsImportingPastedText,
     setErrorMessage,
-    hydratingConversationIdRef,
-    hydrationFailedConversationIdRef,
+    hydration,
     currentConversationIdRef,
     conversationRuntimeCacheRef,
     buildRuntimeEntryFromVisibleState,
@@ -309,6 +320,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     conversationIdOverride?: string;
     executionModeOverride?: ExecutionMode;
     workdirOverride?: string;
+    commandSafetyModeOverride?: CommandSafetyMode;
     runtimeControlsOverride?: ChatRuntimeControls;
     gatewayBridgeRequestOverride?: ActiveGatewayBridgeRequest | null;
     preserveComposerOnStart?: boolean;
@@ -333,6 +345,14 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       overrides?.executionModeOverride ??
       gatewayBridgeRequest?.executionModeOverride ??
       settings.system.executionMode;
+    // 命令安全模式:远端 WebUI / 网关 / 排队快照带来的模式只能“收紧”,不能放宽
+    // (P3#9)。桌面端是工具唯一执行处,一份陈旧的浏览器快照不得把本地刻意选定的
+    // sandboxOffline 静默降级成 auto —— 故与本地 settings.system 取更严格者。
+    const requestedCommandSafetyMode =
+      overrides?.commandSafetyModeOverride ?? gatewayBridgeRequest?.commandSafetyModeOverride;
+    const effectiveCommandSafetyMode = requestedCommandSafetyMode
+      ? strictestCommandSafetyMode(requestedCommandSafetyMode, settings.system.commandSafetyMode)
+      : settings.system.commandSafetyMode;
     const effectiveIsAgentMode = isAgentExecutionMode(effectiveExecutionMode);
     const effectiveWorkdir = resolveEffectiveConversationWorkdir({
       isAgentMode: effectiveIsAgentMode,
@@ -424,13 +444,13 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     if (isImportingPastedTextRef.current && typeof overrides?.textOverride !== "string") {
       return false;
     }
-    if (hydratingConversationIdRef.current === conversationId) {
+    if (hydration.isHydrating(conversationId)) {
       const message = "当前会话仍在加载，请稍候。";
       setConversationErrorState(message);
       gatewayBridgeEvents.emitError(message, conversationId);
       return false;
     }
-    if (hydrationFailedConversationIdRef.current === conversationId) {
+    if (hydration.isFailed(conversationId)) {
       const message = "当前会话加载失败，请重新打开该会话后再继续。";
       setConversationErrorState(message);
       gatewayBridgeEvents.emitError(message, conversationId);
@@ -709,6 +729,10 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     let nextConversationState = appendMessagesToConversation(baseConversationState, [
       pendingUserMessage,
     ]);
+    // Safe fallback only: the exact absolute number is resolved from every persisted segment
+    // before history persistence starts. totalMessageCount may leave gaps but cannot collide.
+    let trajectoryTurn = Math.max(1, baseConversationState.meta.totalMessageCount + 1);
+    let trajectoryMessageIndex = Math.max(0, baseConversationState.meta.totalMessageCount);
     let conversationRunStarted = false;
     let conversationUiReleased = false;
     let gatewayRunStarted = false;
@@ -955,6 +979,10 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
 
     if (overrides?.editResendBaseMessageRef) {
       try {
+        // Flush and forget the old content-addressing state before the database truncates
+        // its suffix. Otherwise an unchanged header can reference a section pruned by rebase.
+        clearLocalTrajectory(conversationId);
+        await releaseTrajectoryRecorder(conversationId);
         // 重发同样是新用户消息开启新 Run:替换回来的历史 meta 可能带着上一
         // Run 持久化的 taskList,必须与常规发送一样在 Run 边界清除。
         nextConversationState = clearTaskListState(
@@ -965,6 +993,15 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
           ),
         );
         initialUserTurnPersisted = true;
+        // The authoritative SQLite suffix has now been replaced; invalidate only after that
+        // barrier so an open trajectory view cannot race and reload the stale pre-rebase window.
+        invalidateDesktopTrajectory(conversationId);
+        trajectoryMessageIndex = Math.max(0, nextConversationState.meta.totalMessageCount - 1);
+        trajectoryTurn = await resolveTrajectoryTurnNumber({
+          conversationId,
+          currentUserPersisted: true,
+          fallbackTurn: nextConversationState.meta.totalMessageCount,
+        });
         const keepParentToolCallIds =
           collectRetainedSubagentParentToolCallIds(nextConversationState);
         subagentStoresRef.current.invalidate(conversationId);
@@ -1061,6 +1098,17 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         clearConversationStopHandler(conversationId, handleConversationStop);
         restoreComposerOnStartFailure();
         return false;
+      }
+    }
+
+    if (!initialUserTurnPersisted) {
+      trajectoryTurn = await resolveTrajectoryTurnNumber({
+        conversationId,
+        currentUserPersisted: false,
+        fallbackTurn: nextConversationState.meta.totalMessageCount,
+      });
+      if (await finishRequestedStopBeforeRuntime()) {
+        return true;
       }
     }
 
@@ -1173,6 +1221,10 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       return true;
     }
     acknowledgeGatewayRunStarted();
+    const [{ memoryTurnInjection }, { buildMemoryOverviewSection }] = await Promise.all([
+      import("../../../lib/chat/memory/injectionController"),
+      import("../../../lib/memory/prompts/injection"),
+    ]);
     let skillsPrompt = "";
     let memoryPrompt = "";
     /** 本轮 `/skill-name` 显式提及块;没有提及时恒为空串,不会挂出任何内容。 */
@@ -1187,6 +1239,43 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
           allowSkillMutation: true,
         }
       : undefined;
+
+    // recorder 跨轮存活：header 分段去重靠的就是「上一份 refs」，每轮新建会让
+    // 去重立刻失效。这里只更新本轮的活动 segment。
+    const trajectoryRecording = acquireTrajectoryRecorder(
+      conversationId,
+      getActiveSegment(nextConversationState)?.segmentIndex ??
+        nextConversationState.meta.activeSegmentIndex,
+      // registry 已写入桌面实时缓存；这里只下发给 WebUI 轨迹页。
+      (events) => {
+        for (const event of events) {
+          gatewayBridgeEvents.queueEvent({
+            type: "trajectory",
+            event,
+            conversation_id: conversationId,
+          });
+        }
+      },
+    );
+    // 压缩有四条触发路径，逐个调用点埋点必漏；订阅控制器生命周期一次覆盖全部。
+    // manual 发生在两轮之间，不属于任何 turn。
+    compaction.setObserver({
+      onStart: ({ trigger }) => {
+        trajectoryRecording.recorder.compactionStart({ standalone: trigger === "manual" });
+      },
+      onEnd: ({ trigger, status, tokensBefore, tokensAfter, newSegmentIndex, error }) => {
+        trajectoryRecording.recorder.compactionEnd({
+          status,
+          standalone: trigger === "manual",
+          ...(tokensBefore === undefined ? {} : { tokensBefore }),
+          ...(tokensAfter === undefined ? {} : { tokensAfter }),
+          ...(error === undefined ? {} : { error }),
+        });
+        if (status === "complete" && newSegmentIndex !== undefined) {
+          updateTrajectoryRecorderSegment(conversationId, newSegmentIndex);
+        }
+      },
+    });
 
     function buildPreparedContext(
       state: ConversationViewState,
@@ -1219,6 +1308,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             : skillMentionInjection.getMessageUpdates(conversationId),
         includeAbortedMessages: options?.includeAbortedMessages,
         includeUploadedFilesMetadata: options?.includeUploadedFilesMetadata,
+        captureSlots: trajectorySlotCapture(conversationId),
       });
     }
 
@@ -1239,6 +1329,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         skillMentionUpdates: skillMentionInjection.getMessageUpdates(conversationId),
         includeAbortedMessages: options?.includeAbortedMessages,
         includeUploadedFilesMetadata: options?.includeUploadedFilesMetadata,
+        captureSlots: trajectorySlotCapture(conversationId),
       });
     }
 
@@ -1595,6 +1686,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             agentTemplates: settings.agents,
             getMcpSettings: getEffectiveMcpSettings,
             getToolPolicies,
+            commandSafetyMode: effectiveCommandSafetyMode,
             applyMcpOps: (ops) => {
               const removedIds = ops.filter((op) => op.kind === "remove").map((op) => op.serverId);
               setSettings((prev) =>
@@ -1648,6 +1740,11 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             commitVisibleAbortedConversation,
             persistConversationWithHistorySync: persistTerminalConversation,
             freezeGatewayFinalProjection,
+            trajectory: trajectoryRecording.recorder,
+            trajectoryTurn,
+            trajectoryMessageIndex,
+            trajectoryMessageId: pendingUserMessage.id,
+            readTrajectorySlots: trajectoryRecording.readSlots,
           },
         });
       } else {
@@ -1688,6 +1785,11 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             commitVisibleAbortedConversation,
             persistConversationWithHistorySync: persistTerminalConversation,
             freezeGatewayFinalProjection,
+            trajectory: trajectoryRecording.recorder,
+            trajectoryTurn,
+            trajectoryMessageIndex,
+            trajectoryMessageId: pendingUserMessage.id,
+            readTrajectorySlots: trajectoryRecording.readSlots,
           },
         });
       }
@@ -1733,6 +1835,17 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         gatewayRuntimeFinalState = "cancelled";
         requestRemoteGatewayCancellation();
       }
+      const trajectoryStatus =
+        gatewayRuntimeFinalState === "completed"
+          ? "complete"
+          : gatewayRuntimeFinalState === "cancelled"
+            ? "aborted"
+            : "error";
+      trajectoryRecording.recorder.endTurn({
+        status: trajectoryStatus,
+        ...(gatewayRuntimeErrorMessage ? { error: gatewayRuntimeErrorMessage } : {}),
+      });
+      await trajectoryRecording.recorder.flush();
       await finalizeConversationRun(gatewayRuntimeFinalState);
       clearConversationStopHandler(conversationId, handleConversationStop);
       pruneIdleConversationCaches([conversationId]);

@@ -58,6 +58,14 @@ macro_rules! app_invoke_handler {
             commands::chat_history::chat_history_share_get,
             commands::chat_history::chat_history_share_set,
             commands::chat_history::chat_history_delete,
+            // Trajectory (events ride the owning history segment)
+            commands::chat_history::trajectory_append_events,
+            commands::chat_history::trajectory_get_events,
+            commands::chat_history::trajectory_get_window,
+            commands::chat_history::trajectory_resolve_turn_number,
+            commands::chat_history::trajectory_get_subagent_runs,
+            commands::chat_history::trajectory_put_sections,
+            commands::chat_history::trajectory_get_sections,
             // Subagent store
             commands::subagent_store::subagent_identity_upsert,
             commands::subagent_store::subagent_identity_list,
@@ -146,10 +154,29 @@ macro_rules! app_invoke_handler {
             commands::settings::settings_save_remote,
             commands::settings::settings_save_memory,
             commands::settings::settings_save_model_failover,
+            commands::settings::settings_save_stt,
+            commands::settings::settings_reveal_stt_secret,
+            services::stt::settings_test_stt,
+            services::stt::stt_request_microphone_permission,
+            services::stt::stt_start,
+            services::stt::stt_send_audio,
+            services::stt::stt_stop,
+            services::stt::stt_cancel,
+            commands::settings::settings_backup_export,
+            commands::settings::settings_backup_peek_import,
+            commands::settings::settings_backup_apply_import,
+            commands::settings::settings_backup_load_sync_config,
+            commands::settings::settings_backup_save_sync_config,
+            commands::settings::settings_backup_test_sync_connection,
+            commands::settings::settings_backup_fetch_remote_info,
+            commands::settings::settings_backup_upload,
+            commands::settings::settings_backup_download,
+            commands::settings::settings_backup_mark_dirty,
             commands::update::app_update_check,
             commands::update::app_update_install,
             commands::update::app_restart,
             commands::app::app_runtime_platform,
+            commands::app::app_frontend_ready,
             commands::app::app_set_close_window_behavior,
             commands::app::app_set_global_shortcuts,
             commands::app::app_window_pinned,
@@ -182,6 +209,7 @@ macro_rules! app_invoke_handler {
             commands::process::managed_process_status,
             commands::process::managed_process_stop,
             commands::process::managed_process_read_log,
+            commands::process::managed_process_wait,
             commands::process::managed_process_snapshot,
             commands::process::managed_process_clear,
             commands::terminal::terminal_shell_options,
@@ -257,6 +285,7 @@ macro_rules! app_invoke_handler {
             commands::system::system_resolve_dropped_workspace_folders,
             commands::system::system_classify_dropped_paths,
             commands::system::system_pick_file,
+            commands::system::system_sandbox_capability,
             commands::system::system_save_preview_file,
             commands::system::system_create_project_folder,
             commands::system::system_import_pasted_texts,
@@ -314,6 +343,11 @@ macro_rules! app_invoke_handler {
 }
 
 fn show_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    if let Some(ready_state) = app.try_state::<Arc<commands::app::FrontendReadyState>>() {
+        if !ready_state.0.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+    }
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         window.show()?;
         window.unminimize()?;
@@ -667,6 +701,11 @@ fn configure_windows_window_chrome(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 最早期钩子:若本进程是 Windows 沙箱的自我再执行启动器(__sandbox_exec),
+    // 就在此建立受限令牌并运行真实命令,以其退出码退出——绝不继续初始化 Tauri。
+    // 非 Windows 平台为空操作。
+    runtime::windows_sandbox::run_sandbox_launcher_if_requested();
+
     let automation_store = Arc::new(
         services::automation::AutomationStore::open()
             .expect("failed to initialize LiveAgent automation store"),
@@ -693,6 +732,7 @@ pub fn run() {
     let close_window_behavior = Arc::new(commands::app::CloseWindowBehaviorState::new(
         commands::app::CLOSE_WINDOW_BEHAVIOR_MINIMIZE,
     ));
+    let stt_manager = Arc::new(services::stt::SttManager::default());
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -713,6 +753,7 @@ pub fn run() {
                 .build(),
         )
         .manage(Arc::new(commands::app::GlobalShortcutRegistry::default()))
+        .manage(Arc::new(commands::app::FrontendReadyState::default()))
         .manage(Arc::new(commands::app::WindowPinState::default()))
         .manage(Arc::new(commands::mcp::McpRuntimeManager::default()))
         .manage(Arc::clone(&memory_store))
@@ -729,6 +770,25 @@ pub fn run() {
         .manage(Arc::clone(&automation_store))
         .manage(Arc::clone(&automation_scheduler))
         .manage(Arc::new(commands::hook::HookScopeRegistry::default()))
+        .manage(stt_manager)
+        .on_page_load(|webview, payload| {
+            if webview.label() != MAIN_WINDOW_LABEL
+                || !matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+            {
+                return;
+            }
+            let app = webview.app_handle();
+            if let Some(ready_state) =
+                app.try_state::<Arc<commands::app::FrontendReadyState>>()
+            {
+                ready_state.0.store(false, Ordering::SeqCst);
+            }
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                if window.is_visible().unwrap_or(false) {
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup({
             let terminal_registry = Arc::clone(&terminal_registry);
             let sftp_registry = Arc::clone(&sftp_registry);
@@ -751,6 +811,9 @@ pub fn run() {
                 }
                 terminal_registry.attach_app_handle(app.handle().clone());
                 sftp_registry.attach_app_handle(app.handle().clone());
+                // 配置自动同步的后台任务：只消费脏信号并做防抖上传，
+                // 未开启自动同步时它会在每次唤醒后静默跳过。
+                services::webdav_auto_sync::start(app.handle().clone());
                 let gateway_controller = Arc::new(services::gateway::GatewayController::new(
                     app.handle().clone(),
                     Arc::clone(&automation_store),

@@ -7,6 +7,11 @@ import type {
 } from "@earendil-works/pi-ai";
 import { ASK_USER_QUESTION_TOOL_NAME } from "@liveagent/ui/lib/chat/askUserQuestion";
 import type { HostedSearchBlock } from "@liveagent/ui/lib/chat/hostedSearch";
+import {
+  composeTrajectorySystemPrompt,
+  serializeToolCatalog,
+} from "@liveagent/ui/lib/trajectory/sections";
+import type { TrajectoryUsage } from "@liveagent/ui/lib/trajectory/types";
 import type { CompactionController } from "../../../lib/chat/compaction/controller";
 import { estimateTextTokenUnits } from "../../../lib/chat/compaction/tokenLedger";
 import type { ProviderRuntimeConfig } from "../../../lib/chat/compaction/types";
@@ -77,17 +82,24 @@ import type { AdditionalProjectRoot } from "../../../lib/tools/additionalProject
 import { buildBuiltinToolRegistry } from "../../../lib/tools/builtinRegistry";
 import type { BuiltinToolExecutionContext } from "../../../lib/tools/builtinTypes";
 import { createFileToolState } from "../../../lib/tools/fileToolState";
+import { resolveShellSandboxSettings } from "../../../lib/tools/sandboxPolicy";
 import type { SkillAccessPolicy } from "../../../lib/tools/skillAccessPolicy";
 import type { SshManagerSessionChange } from "../../../lib/tools/sshManagerTools";
 import { formatTaskListRuntimeContext, type TaskStateStore } from "../../../lib/tools/taskTools";
 import { isSessionApproved, requestToolApproval } from "../../../lib/tools/toolApproval";
 import { resolveToolPolicy } from "../../../lib/tools/toolPolicy";
 import type { TunnelManagerChange } from "../../../lib/tools/tunnelManagerTools";
+import { trajectoryTerminalInfo } from "../../../lib/trajectory/assistantOutcome";
+import {
+  NOOP_TRAJECTORY_RECORDER,
+  type TrajectoryRecorder,
+} from "../../../lib/trajectory/recorder";
 import { appendSystemPrompt, buildPartialAssistantMessage } from "../runtime/chatPageRuntime";
 import {
   buildGatewayToolCallPreviewArguments,
   summarizeToolCallForApproval,
 } from "./gatewayToolPreview";
+import { buildTrajectoryRuntimeContext } from "./trajectoryRuntimeContext";
 
 export type RuntimeModel = {
   api: AssistantMessage["api"];
@@ -210,6 +222,44 @@ function shouldShowToolEvent(toolCall: ToolCall, toolResult?: ToolResultMessage)
   return toolResult?.isError === true;
 }
 
+/** 把 provider 用量归一到轨迹用量；字段缺失即省略，不填 0 冒充真实值。 */
+function toTrajectoryUsage(value: unknown): TrajectoryUsage | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const pick = (key: string) => (typeof raw[key] === "number" ? (raw[key] as number) : undefined);
+  const usage: TrajectoryUsage = {
+    ...(pick("totalTokens") === undefined ? {} : { totalTokens: pick("totalTokens") }),
+    ...(pick("input") === undefined ? {} : { input: pick("input") }),
+    ...(pick("output") === undefined ? {} : { output: pick("output") }),
+    ...(pick("cacheRead") === undefined ? {} : { cacheRead: pick("cacheRead") }),
+    ...(pick("cacheWrite") === undefined ? {} : { cacheWrite: pick("cacheWrite") }),
+    ...(pick("reasoning") === undefined ? {} : { reasoning: pick("reasoning") }),
+  };
+  return Object.keys(usage).length === 0 ? undefined : usage;
+}
+
+/**
+ * 从工具结果里挖出子代理 runId。
+ *
+ * Agent 工具的 details 携带一批子代理运行；轨迹只记 id，SUBTOOL 行由宿主预取
+ * 运行后在布局层展开。结构不符时安静返回空数组——埋点绝不因为 details 形状变化
+ * 而抛错。
+ */
+function subagentRunIdsFromToolResult(toolResult: unknown): string[] {
+  if (toolResult === null || typeof toolResult !== "object") return [];
+  const details = (toolResult as { details?: unknown }).details;
+  if (details === null || typeof details !== "object") return [];
+  const agents = (details as { agents?: unknown }).agents;
+  if (!Array.isArray(agents)) return [];
+  const ids: string[] = [];
+  for (const agent of agents) {
+    if (agent === null || typeof agent !== "object") continue;
+    const runId = (agent as { runId?: unknown }).runId;
+    if (typeof runId === "string" && runId !== "") ids.push(runId);
+  }
+  return ids;
+}
+
 export type RunAgentConversationTurnParams = {
   providerId: ProviderId;
   model: string;
@@ -235,6 +285,8 @@ export type RunAgentConversationTurnParams = {
   getMcpSettings: () => AppSettings["mcp"];
   /** 工具审批策略的实时读取(权威 settingsRef,非 turn 级快照),缺省视为空表。 */
   getToolPolicies?: () => AppSettings["system"]["toolPolicies"];
+  /** 命令执行方式(turn 级快照):ask 全量审批 / auto 按策略 / sandbox(±断网)。 */
+  commandSafetyMode?: AppSettings["system"]["commandSafetyMode"];
   applyMcpOps?: (ops: McpSettingsOp[]) => void;
   remoteWebTunnelsEnabled?: boolean;
   tunnelPublicBaseUrl?: string;
@@ -288,6 +340,21 @@ export type RunAgentConversationTurnParams = {
   memoryExtractionModel?: MemoryExtractionModelConfig;
   onMemoryExtractionModelFailure?: (model: MemoryExtractionModelConfig) => void;
   memoryExtractionStatusText?: MemoryExtractionStatusText;
+  /** 轨迹埋点；缺省时不记录，对话行为完全不变。 */
+  trajectory?: TrajectoryRecorder;
+  /** 本轮在会话中的 turn 序号（1-based），供轨迹归位。 */
+  trajectoryTurn?: number;
+  /** 用户消息在完整会话中的 0-based messageIndex，供分支/重发精确裁剪。 */
+  trajectoryMessageIndex?: number;
+  /** 用户消息稳定 id；正文窗口优先按它与轨迹 turn 对齐。 */
+  trajectoryMessageId?: string;
+  /** 读取最近一次上下文构建的 system prompt 分段，供轨迹分段去重。 */
+  readTrajectorySlots?: () => {
+    base?: string;
+    agent?: string;
+    skills?: string;
+    memory?: string;
+  };
 };
 
 export async function runAgentConversationTurn(params: RunAgentConversationTurnParams) {
@@ -307,6 +374,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     agentTemplates,
     getMcpSettings,
     getToolPolicies,
+    commandSafetyMode,
     applyMcpOps,
     remoteWebTunnelsEnabled,
     tunnelPublicBaseUrl,
@@ -346,6 +414,21 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     onMemoryExtractionModelFailure,
     memoryExtractionStatusText,
   } = params;
+  // 埋点全程可选：未注入 recorder 时所有调用落到无副作用的 NOOP 实现上，
+  // 对话路径一行都不变。
+  const trajectory = params.trajectory ?? NOOP_TRAJECTORY_RECORDER;
+  if (params.trajectoryTurn !== undefined) {
+    // 正文（用户原话）不进事件流，渲染时由正文索引从 messages 补上。
+    trajectory.beginTurn({
+      turn: params.trajectoryTurn,
+      ...(params.trajectoryMessageIndex === undefined
+        ? {}
+        : { messageIndex: params.trajectoryMessageIndex }),
+      ...(params.trajectoryMessageId === undefined
+        ? {}
+        : { messageId: params.trajectoryMessageId }),
+    });
+  }
 
   if (!effectiveWorkdir) {
     throw new Error("Tool mode requires a project directory from the chat sidebar.");
@@ -430,6 +513,8 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
       currentAgentName: PARENT_MESSAGE_BUS_AGENT_NAME,
     });
   };
+  let currentTrajectoryRuntimeContext = buildTrajectoryRuntimeContext([]);
+  const lastRecordedRuntimeContextBySource = new Map<string, string>();
   // 已投递进上下文的 roster 易变段：与 bus 的 seq 游标同理，只有真正挂上才推进。
   // run 起始不投递——此时消息尾部还没有安全锚点（末条是 user 消息），首次投递发生在
   // 第一轮工具结果之后；在那之前 Agent 工具描述里的 roster 已带有 status / summary，
@@ -480,6 +565,13 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     if (frozenTaskListContext) {
       systemPrompt = appendSystemPrompt(systemPrompt, frozenTaskListContext);
     }
+    // 轨迹 runtime 段与真实注入同口径：只记录此刻真的拼进 systemPrompt 的部分，
+    // builder 会跳过空段，与上方 appendSystemPrompt 的条件一一对应。
+    currentTrajectoryRuntimeContext = buildTrajectoryRuntimeContext([
+      { source: "subagent-roster", text: rosterIdentitySection },
+      { source: "parent-message-bus", text: parentMessageBusSnapshot },
+      { source: "task-list", text: frozenTaskListContext },
+    ]);
     return systemPrompt !== context.systemPrompt
       ? {
           ...context,
@@ -491,12 +583,14 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   const subagentScheduler = createSubagentScheduler();
   const runtimePlatform = await resolveRuntimePlatform();
   const buildRegistryStartedAt = perfNowMs();
+  const safetyMode = commandSafetyMode ?? "auto";
   const builtinRegistry = await buildBuiltinToolRegistry({
     workdir: effectiveWorkdir,
     additionalRoots,
     providerId,
     runtimePlatform,
     fileState,
+    sandbox: resolveShellSandboxSettings(safetyMode),
     taskStateStore,
     askUserQuestionConversationId: conversationId,
     checkpoint: {
@@ -584,22 +678,21 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
 
   // 工具审批门:按实时策略裁决每次调用。deny → 直接拦;ask → 挂起等用户在
   // 聊天审批卡片作决定(本会话已“记住”的工具免审);allow → 放行。
+  // 命令执行方式为 ask 时,非只读工具无论策略如何都升级为 ask(deny 仍拦)。
   const resolveToolGate = async (
     toolCall: ToolCall,
     signal?: AbortSignal,
   ): Promise<{ allow: true } | { allow: false; reason: string }> => {
-    const policy = resolveToolPolicy(
-      toolCall.name,
-      builtinRegistry.metadataByName.get(toolCall.name),
-      getToolPolicies?.(),
-    );
+    const metadata = builtinRegistry.metadataByName.get(toolCall.name);
+    const policy = resolveToolPolicy(toolCall.name, metadata, getToolPolicies?.());
     if (policy === "deny") {
       return {
         allow: false,
         reason: `工具 ${toolCall.name} 已被用户的权限策略禁止(deny)。不要重试;如确需使用,请让用户在设置的工具权限中放行。`,
       };
     }
-    if (policy !== "ask") {
+    const effectivePolicy = safetyMode === "ask" && !metadata?.isReadOnly ? "ask" : policy;
+    if (effectivePolicy !== "ask") {
       return { allow: true };
     }
     if (isSessionApproved(conversationId, toolCall.name)) {
@@ -849,7 +942,6 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     // （userStop）随时链式传导，不存在换代窗口。
     const scope = cancellation.deriveScope();
     compaction.beginRequest(agentContext, getNextConversationState());
-
     try {
       const assistantRunStartedAt = perfNowMs();
       result = await runAssistantWithTools({
@@ -867,6 +959,48 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
         subagentScheduler,
         executeToolCall: combinedExecutor,
         resolveToolGate,
+        onRequestStart: ({ round, context, toolsSuffix }) => {
+          const activeSources = new Set(
+            currentTrajectoryRuntimeContext.entries.map((entry) => entry.source),
+          );
+          for (const source of lastRecordedRuntimeContextBySource.keys()) {
+            if (!activeSources.has(source)) lastRecordedRuntimeContextBySource.delete(source);
+          }
+          for (const entry of currentTrajectoryRuntimeContext.entries) {
+            if (lastRecordedRuntimeContextBySource.get(entry.source) === entry.text) continue;
+            trajectory.noteContext(entry);
+            lastRecordedRuntimeContextBySource.set(entry.source, entry.text);
+          }
+
+          const toolCatalog = serializeToolCatalog(context.tools);
+          const segmentedHeader = {
+            ...(params.readTrajectorySlots?.() ?? {}),
+            ...(currentTrajectoryRuntimeContext.prompt === undefined
+              ? {}
+              : { runtime: currentTrajectoryRuntimeContext.prompt }),
+            toolsSuffix,
+            toolCatalog,
+          };
+          const actualSystemPrompt =
+            typeof context.systemPrompt === "string" ? context.systemPrompt : undefined;
+          const reconstructed = composeTrajectorySystemPrompt(segmentedHeader);
+          const headerInput =
+            actualSystemPrompt !== undefined && reconstructed !== actualSystemPrompt
+              ? {
+                  // Diagnostic fallback: preserve the exact provider-boundary prompt even if a
+                  // future builder adds an unsegmented source. The warning makes the drift visible.
+                  runtime: actualSystemPrompt,
+                  toolCatalog,
+                }
+              : segmentedHeader;
+          if (headerInput !== segmentedHeader) {
+            console.warn(
+              "[trajectory] segmented system prompt drifted from provider context; recording exact fallback",
+            );
+          }
+          const headerId = trajectory.captureHeader(headerInput);
+          trajectory.stepStart(round, headerId);
+        },
         onTurnStart: (round) => {
           activeAgentRound = round;
           streamedAgentText = "";
@@ -895,6 +1029,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
           );
         },
         onTextDelta: (delta, round) => {
+          trajectory.firstToken(round);
           gatewayBridgeEvents.queueToken(delta, { round });
           streamedAgentText += delta;
           streamedAgentTokenUnits += estimateTextTokenUnits(delta);
@@ -924,6 +1059,9 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
           scope.controller.abort();
         },
         onThinkingDelta: (delta, round) => {
+          // thinking 也算首 token：推理模型的 TTFT 就落在这里，只认 text 会把
+          // 整段推理时间错算进解码。
+          trajectory.firstToken(round);
           gatewayBridgeEvents.queueEvent({
             type: "thinking",
             text: delta,
@@ -940,9 +1078,11 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
           );
         },
         onHostedSearch: (hostedSearch, round) => {
+          trajectory.firstToken(round);
           updateHostedSearch(hostedSearch, round);
         },
         onToolCall: (toolCall, round) => {
+          trajectory.firstToken(round);
           sawToolCallInRound = true;
           discardPendingToolCallDelta(toolCall, round);
           // isRunning 只表示工具已出现在当前轮次，不代表提问已经进入权威
@@ -969,11 +1109,14 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
           );
         },
         onToolCallDelta: (toolCall, round) => {
+          trajectory.firstToken(round);
           sawToolCallInRound = true;
           queueToolCallDelta(toolCall, round);
         },
         onToolExecutionStart: (toolCall, round) => {
+          trajectory.firstToken(round);
           sawToolCallInRound = true;
+          trajectory.toolStart(round, toolCall);
           discardPendingToolCallDelta(toolCall, round);
           if (!isSubagentCardToolCall(toolCall)) {
             hookLifecycle.toolExecutionStarted();
@@ -998,6 +1141,13 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
         },
         onToolResult: (toolCall, toolResult, round) => {
           if (toolResult.role !== "toolResult") return;
+          trajectory.toolEnd(toolCall.id, {
+            isError: toolResult.isError === true,
+            ...(() => {
+              const runIds = subagentRunIdsFromToolResult(toolResult);
+              return runIds.length === 0 ? {} : { subagentRunIds: runIds };
+            })(),
+          });
           compaction.observeContextMessages([toolResult]);
           discardPendingToolCallDelta(toolCall, round);
           if (!isSubagentCardToolCall(toolCall)) {
@@ -1033,6 +1183,22 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
         },
         onAssistantMessage: (assistant, round) => {
           if (assistant.role !== "assistant") return;
+          // Some transports only surface a final message (no incremental text/tool callback).
+          trajectory.firstToken(round);
+          // stepEnd 记在这里而不是工具执行之后：这样 step 的耗时是纯模型时间，
+          // 工具各有自己的区间，甘特图上不会把工具时间重复计进模型泳道。
+          const trajectoryUsage = toTrajectoryUsage(assistant.usage);
+          const terminalInfo = trajectoryTerminalInfo(assistant);
+          trajectory.stepEnd(round, {
+            ...terminalInfo,
+            ...(trajectoryUsage === undefined ? {} : { usage: trajectoryUsage }),
+            provider: assistant.provider || providerId,
+            model: assistant.model || model,
+            ...(assistant.api ? { api: assistant.api } : {}),
+            ...(typeof assistant.stopReason === "string"
+              ? { stopReason: assistant.stopReason }
+              : {}),
+          });
           hookLifecycle.ensureMessageEnded();
           const toolCallCount = assistant.content.filter(
             (block) => block.type === "toolCall",
@@ -1049,6 +1215,15 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
           updateToolStatus(s, transcriptStore);
         },
         onRetryAttempts: (_round, attempts) => {
+          const latest = attempts.at(-1);
+          if (latest !== undefined) {
+            trajectory.noteRetry(activeAgentRound, {
+              attempt: latest.attempt,
+              // maxAttempts 含首次尝试，重试上限要减去它。
+              maxRetries: Math.max(0, latest.maxAttempts - 1),
+              ...(latest.errorMessage === "" ? {} : { error: latest.errorMessage }),
+            });
+          }
           updateRetryAttempts(attempts, transcriptStore);
         },
         onBeforeNextTurn: async ({ round, assistant, toolResults, emittedMessages }) => {
@@ -1261,6 +1436,13 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   freezeGatewayFinalProjection(finalState, true);
   settleLiveTranscript(transcriptStore);
   const historyPersisted = await persistCompletedState(finalState);
+  trajectory.endTurn(
+    pendingTerminalAssistantMeta === null
+      ? { status: "complete" }
+      : trajectoryTerminalInfo(pendingTerminalAssistantMeta.assistant),
+  );
+  // 落盘与历史写入对齐：turn 边界是账本的一致点，之后的记忆提取不属于本轮轨迹。
+  await trajectory.flush();
 
   // Memory extraction reads the in-memory final state. Only run it after the
   // durable history write succeeds so we never keep "memory has the answer,

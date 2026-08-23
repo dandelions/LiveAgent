@@ -1,6 +1,7 @@
 export const ZH_CN_SETTINGS_TRANSLATIONS = {
   "settings.navSystem": "系统设置",
   "settings.navSystemTools": "系统工具",
+  "settings.navStt": "语音输入",
   "settings.toolPermissionsOverridden": "{count} 项已自定义",
   "settings.toolPolicy.allow": "允许",
   "settings.toolPolicy.ask": "询问",
@@ -375,6 +376,11 @@ export const ZH_CN_SETTINGS_TRANSLATIONS = {
   "settings.toolBadgeCustom": "自定义",
   "settings.toolConditionalNote": "按条件注册",
   "settings.addProvider": "新增供应商",
+  "settings.addProviderShort": "新增",
+  "settings.importProviders": "导入",
+  "settings.importProvidersHint": "从桌面开发工具导入供应商",
+  "settings.providerActionGroup": "供应商操作",
+  "settings.providerActionSettings": "设置",
   "settings.editProvider": "编辑供应商",
   "settings.compatible": "兼容",
   "settings.providerName": "分组名称",
@@ -603,6 +609,12 @@ export const ZH_CN_SETTINGS_TRANSLATIONS = {
   "settings.failoverQueueHint":
     "按优先级排列的 {vendor} 备用供应商（P1 优先）。当前供应商请求失败时，用同一个模型依次尝试；未激活该模型的供应商会被跳过。",
   "settings.failoverQueueAdd": "选择供应商加入队列",
+  "settings.failoverQueueSearch": "搜索供应商...",
+  "settings.failoverQueueNoMatch": "未找到匹配的供应商",
+  "settings.failoverQueueUnavailableCandidates":
+    "有 {count} 个供应商因缺少 Base URL 或 API Key，未列入候选。",
+  "settings.failoverQueueUnavailableExisting":
+    "队列中有 {count} 个供应商缺少 Base URL 或 API Key，运行时会跳过。",
   "settings.failoverQueueEmpty": "队列为空。添加至少一个备用供应商后，自动故障转移才会生效。",
   "settings.failoverQueueMoveUp": "上移",
   "settings.failoverQueueMoveDown": "下移",
