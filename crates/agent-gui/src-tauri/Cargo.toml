@@ -22,6 +22,7 @@ prost-build = "0.14.4"
 
 [dependencies]
 tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2.4.3"
 tauri-plugin-opener = "2.5.4"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
@@ -75,12 +76,18 @@ russh = "0.62.2"
 russh-sftp = "2.3.0"
 encoding_rs = "0.8.35"
 chardetng = "0.1.17"
+# MCP OAuth（docs/design/mcp-oauth.md）：token 只进 OS keystore；PKCE/state 熵源。
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+getrandom = "0.3.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSButton", "NSControl", "NSView", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSButton", "NSControl", "NSView", "NSWindow", "NSWorkspace", "NSRunningApplication", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSGraphicsContext", "objc2-core-graphics"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
 objc2 = { version = "0.6", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSData", "NSDictionary", "NSArray", "NSObject", "NSEnumerator", "NSGeometry", "objc2-core-foundation"] }
 block2 = "0.6"
+# 读 .app bundle 的 Info.plist（输入框 @ 应用提及的枚举）。
+plist = "1.10"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -95,6 +102,12 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Environment",
     "Win32_System_Registry",
     "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    # 已安装应用枚举（输入框 @ 应用提及）：SHGetFileInfoW 取图标需要
+    # Shell + Com（SHGetFileInfo 要求 COM 已初始化），位图转像素走 Gdi。
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
 ] }
 
 [dev-dependencies]

@@ -205,18 +205,39 @@ test("uploaded file helpers preserve display text and strip model-hidden metadat
     ["assets/diagram.png", 3 * 1024 * 1024],
   ]);
 
-  const message = uploadedFiles.createUserMessageWithUploads(" Please review ", [fileA], 1234);
+  const referencedConversation = {
+    id: "conversation-source",
+    title: "Source conversation",
+    cwd: "/workspace/source",
+  };
+  const message = uploadedFiles.createUserMessageWithUploads(
+    " Please review ",
+    [fileA],
+    1234,
+    [referencedConversation],
+  );
   assert.ok(message);
   assert.equal(message.role, "user");
   assert.equal(message.timestamp, 1234);
   assert.equal(uploadedFiles.getUserMessageDisplayText(message), " Please review ");
   assert.deepEqual(uploadedFiles.getUserMessageAttachments(message), [fileA]);
+  assert.deepEqual(uploadedFiles.getUserMessageReferencedConversations(message), [
+    referencedConversation,
+  ]);
   assert.match(message.content, /The user attached the files below/);
   assert.match(message.content, /Use Read with these exact paths/);
+
+  const projected = conversationState.createConversationStateFromContext({
+    messages: [message],
+  });
+  assert.deepEqual(projected.transcript.items[0].referencedConversations, [
+    referencedConversation,
+  ]);
 
   const stripped = uploadedFiles.stripUploadedFilesMessageMetadata(message);
   assert.equal(uploadedFiles.getUserMessageDisplayText(stripped), message.content);
   assert.deepEqual(uploadedFiles.getUserMessageAttachments(stripped), []);
+  assert.deepEqual(uploadedFiles.getUserMessageReferencedConversations(stripped), []);
 });
 
 test("request context can preserve uploaded file metadata for native provider adapters", () => {
@@ -375,7 +396,6 @@ test("UI message builder groups assistant rounds and attaches matching tool resu
       api: "openai-responses",
       stopReason: "stop",
       usage: { totalTokens: 42 },
-      liveAgentContextUsage: { totalTokens: 84, fixedTokens: 20 },
       timestamp: 4,
     },
   ];
@@ -388,8 +408,37 @@ test("UI message builder groups assistant rounds and attaches matching tool resu
   assert.equal(ui[1].rounds.length, 2);
   assert.equal(uiMessages.getRoundThinkingText(ui[1].rounds[0]), "checking");
   assert.equal(uiMessages.getRoundToolTrace(ui[1].rounds[0])[0].toolResult.content[0].text, "file contents");
-  assert.equal(ui[1].rounds[1].meta.usageTotalTokens, 42);
-  assert.equal(ui[1].rounds[1].meta.contextUsageTokens, 84);
+  // meta 只携带原始事实（usage/stopReason），用量环锚点在读取时现算。
+  assert.equal(ui[1].rounds[1].meta.usage.totalTokens, 42);
+  assert.equal(ui[1].rounds[1].meta.stopReason, "stop");
+  assert.equal("usageTotalTokens" in ui[1].rounds[1].meta, false);
+  assert.equal("contextUsageTokens" in ui[1].rounds[1].meta, false);
+});
+
+test("UI message builder stores Responses reasoning replay units on thinking blocks", () => {
+  const signature = JSON.stringify({
+    id: "rs_1",
+    type: "reasoning",
+    encrypted_content: "A".repeat(800),
+  });
+  const ui = uiMessages.buildUiMessages([
+    { role: "user", content: "hi", timestamp: 1 },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "short", thinkingSignature: signature },
+        { type: "text", text: "ok" },
+      ],
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      api: "openai-responses",
+      stopReason: "stop",
+      timestamp: 2,
+    },
+  ]);
+  const thinking = ui[1].rounds[0].blocks.find((block) => block.kind === "thinking");
+  assert.equal(thinking.text, "short");
+  assert.ok(thinking.replayTokenUnits > 100, `replayTokenUnits=${thinking.replayTokenUnits}`);
 });
 
 test("UI message builder preserves provider hosted search blocks", () => {

@@ -4,7 +4,6 @@ import {
 } from "@liveagent/ui/lib/settings/sync";
 import { invoke } from "@tauri-apps/api/core";
 import { type Locale, normalizeLocale } from "../../i18n/config";
-import { markBackupDirty } from "../backup";
 import { SettingsStorageError, type SettingsStorageErrorCode } from "./errors";
 import {
   type AppSettings,
@@ -50,6 +49,7 @@ type LocalUiSettings = {
   updates?: unknown;
   selectedModel?: unknown;
   modelFailover?: unknown;
+  retryErrorSettings?: unknown;
   theme?: unknown;
   locale?: unknown;
   closeWindowBehavior?: unknown;
@@ -98,6 +98,12 @@ function readLocalUiSettings(): {
    * with no providers would drop the whole queue.
    */
   modelFailover: unknown;
+  /**
+   * Retry-error config is a local UI preference (not gateway-synced), so it
+   * lives in localStorage like chatRuntimeControls. Read raw; normalizeSettings
+   * validates preset codes and de-dupes custom patterns.
+   */
+  retryErrorSettings: unknown;
   theme: Theme;
   locale: Locale;
   closeWindowBehavior: CloseWindowBehavior;
@@ -118,6 +124,11 @@ function readLocalUiSettings(): {
       },
       chatTranscript: normalizeChatTranscriptSettings(obj.chatTranscript),
       rightDock: normalizeRightDockSettings(obj.rightDock),
+      // 三档枚举（与 normalizeCustomSettings 同口径）：脏值/缺省落回统计状态栏。
+      composerContextDisplay:
+        obj.composerContextDisplay === "ring" || obj.composerContextDisplay === "both"
+          ? obj.composerContextDisplay
+          : "statsBar",
       // fontFamily was the single pre-split preference. Read it only to migrate
       // old local settings into the interface-specific field.
       interfaceFontFamily: normalizeFontFamily(obj.interfaceFontFamily ?? obj.fontFamily),
@@ -137,6 +148,7 @@ function readLocalUiSettings(): {
         updates: defaults.updates,
         selectedModel: defaults.selectedModel,
         modelFailover: defaults.modelFailover,
+        retryErrorSettings: defaults.retryErrorSettings,
         theme: defaults.theme,
         locale: defaults.locale,
         closeWindowBehavior: defaults.closeWindowBehavior,
@@ -157,6 +169,7 @@ function readLocalUiSettings(): {
       updates: normalizeUpdateSettings(parsed?.updates ?? defaults.updates),
       selectedModel: normalizeSelectedModel(parsed?.selectedModel),
       modelFailover: parsed?.modelFailover ?? defaults.modelFailover,
+      retryErrorSettings: parsed?.retryErrorSettings ?? defaults.retryErrorSettings,
       theme: normalizeTheme(parsed?.theme ?? defaults.theme),
       locale: normalizeLocale(hasStoredLocale ? parsed?.locale : defaults.locale),
       closeWindowBehavior: normalizeCloseWindowBehavior(
@@ -171,6 +184,7 @@ function readLocalUiSettings(): {
       updates: defaults.updates,
       selectedModel: defaults.selectedModel,
       modelFailover: defaults.modelFailover,
+      retryErrorSettings: defaults.retryErrorSettings,
       theme: defaults.theme,
       locale: defaults.locale,
       closeWindowBehavior: defaults.closeWindowBehavior,
@@ -189,6 +203,7 @@ function writeLocalUiSettings(
     | "theme"
     | "locale"
     | "closeWindowBehavior"
+    | "retryErrorSettings"
   >,
 ) {
   const payload = {
@@ -200,6 +215,7 @@ function writeLocalUiSettings(
     theme: settings.theme,
     locale: settings.locale,
     closeWindowBehavior: settings.closeWindowBehavior,
+    retryErrorSettings: settings.retryErrorSettings,
   };
   localStorage.setItem(LOCAL_UI_SETTINGS_STORAGE_KEY, JSON.stringify(payload));
 }
@@ -265,6 +281,7 @@ export async function loadPersistedSettingsWithDefaults(): Promise<PersistedSett
     // the localStorage copy only migrates pre-SQLite installs forward.
     modelFailover: (persisted?.modelFailover ??
       localUi.modelFailover) as AppSettings["modelFailover"],
+    retryErrorSettings: localUi.retryErrorSettings as AppSettings["retryErrorSettings"],
     theme: localUi.theme,
     locale: localUi.locale,
     closeWindowBehavior: localUi.closeWindowBehavior,
@@ -369,7 +386,7 @@ export async function persistSettings(
 
   if (hasChanged(prev.stt, next.stt)) {
     tasks.push(
-      invoke<unknown>("settings_save_stt", { payload: next.stt } as any).then((response) => {
+      invoke<unknown>("settings_save_stt", { payload: next.stt }).then((response) => {
         if (response) {
           result.stt = normalizeSettings({ stt: response as AppSettings["stt"] }).stt;
         }
@@ -385,7 +402,8 @@ export async function persistSettings(
     hasChanged(prev.selectedModel ?? null, next.selectedModel ?? null) ||
     hasChanged(prev.theme, next.theme) ||
     hasChanged(prev.locale, next.locale) ||
-    hasChanged(prev.closeWindowBehavior, next.closeWindowBehavior)
+    hasChanged(prev.closeWindowBehavior, next.closeWindowBehavior) ||
+    hasChanged(prev.retryErrorSettings, next.retryErrorSettings)
   ) {
     writeLocalUiSettings({
       skills: next.skills,
@@ -396,27 +414,13 @@ export async function persistSettings(
       theme: next.theme,
       locale: next.locale,
       closeWindowBehavior: next.closeWindowBehavior,
+      retryErrorSettings: next.retryErrorSettings,
     });
   }
 
-  // 备份快照只覆盖 providers / mcp / system / skills 四域，其余域的变更不该
-  // 触发同步。skills 存在 localStorage，后端感知不到，所以四域统一在这里通知
-  // ——providers/mcp/system 侧后端也会各自标脏，重复标脏被防抖窗口合并掉，无害。
-  const backupDirty =
-    hasChanged(prev.customProviders, next.customProviders) ||
-    hasChanged(prev.system, next.system) ||
-    hasChanged(prev.mcp, next.mcp) ||
-    hasChanged(prev.skills, next.skills);
-
+  // 自动同步的标脏完全由后端完成：快照六域全部落 SQLite，各域的 save_*
+  // 在 tx.commit() 之后自行标脏，前端无需（也不应）参与。
   await Promise.all(tasks);
-
-  // 标脏必须等落盘完成，与后端侧一致（save_providers / save_mcp / save_system
-  // 都在 tx.commit() 之后才标脏）。提前标脏会让自动上传在某个域写失败时，
-  // 仍把「部分成功」的库状态当成一份完整快照推上远端 —— 它带着自洽的 sha256，
-  // 其他设备的下载校验一路放行，三域互不一致的配置就这么扩散出去了。
-  if (backupDirty) {
-    markBackupDirty(next.skills);
-  }
 
   return result;
 }

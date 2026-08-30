@@ -27,6 +27,7 @@ import { AppBootShell } from "./components/app/AppBootShell";
 import { useNativeInputContextMenu } from "./components/input-context-menu/NativeInputContextMenu";
 import { WindowsTitleBar } from "./components/WindowsTitleBar";
 import { useAppUpdateController } from "./lib/appUpdates";
+import { setRetryErrorExtension } from "./lib/providers/runtime/streamRetry";
 import {
   type AppSettings,
   getDefaultSettings,
@@ -96,6 +97,7 @@ function AppChrome(props: { children: ReactNode }) {
   // suppressed native menu (surfaces with their own menus opt out upstream).
   const { onRootContextMenu, onRootMouseDownCapture, menu } = useNativeInputContextMenu();
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: Root-level pointer handlers only route native input menus and dismissals; child controls own activation semantics.
     <div
       className="relative flex h-full w-full flex-col overflow-hidden bg-background"
       onContextMenu={onRootContextMenu}
@@ -247,6 +249,7 @@ export default function App() {
     setSttProviderOverride(null);
   }, [settings.stt.provider]);
   const [systemThemeVersion, setSystemThemeVersion] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The version is an explicit invalidation signal for the system media query, which resolveEffectiveTheme reads outside React.
   const effectiveTheme = useMemo(
     () => resolveEffectiveTheme(settings.theme),
     [settings.theme, systemThemeVersion],
@@ -384,6 +387,18 @@ export default function App() {
     const timeoutId = window.setTimeout(revealBackgroundHosts, 0);
     return () => window.clearTimeout(timeoutId);
   }, [settingsReady]);
+
+  // Push the user's retry-error classification (preset Cloudflare 5xx toggles +
+  // custom substrings) into the stream-retry runtime. The extension is a pure
+  // function of settings, so re-running on every change keeps the runtime in
+  // sync without any per-call plumbing. The runtime's default already enables
+  // every preset, so this is a no-op until the user actually changes something.
+  useEffect(() => {
+    setRetryErrorExtension({
+      statusCodes: settings.retryErrorSettings.presetStatusCodes,
+      patterns: settings.retryErrorSettings.customPatterns,
+    });
+  }, [settings.retryErrorSettings]);
 
   const queueSettingsSave = useCallback(
     (prev: AppSettings, next: AppSettings, fallback: string, publishSync: boolean) => {

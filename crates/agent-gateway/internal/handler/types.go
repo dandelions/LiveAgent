@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	gatewayv2 "github.com/liveagent/agent-gateway/internal/proto/v2"
 )
@@ -17,6 +18,9 @@ type ChatRuntimeControlsBody struct {
 	ThinkingEnabled        *bool  `json:"thinking_enabled,omitempty"`
 	NativeWebSearchEnabled *bool  `json:"native_web_search_enabled,omitempty"`
 	Reasoning              string `json:"reasoning"`
+	// Plan mode 是限制性开关:缺省按 false 归一(桌面端"只能收紧"合并,false
+	// 不会关闭本地已开启的 plan mode),与 thinking/webSearch 的缺省 true 相反。
+	PlanModeEnabled *bool `json:"plan_mode_enabled,omitempty"`
 }
 
 type ChatUploadedFileBody struct {
@@ -27,17 +31,25 @@ type ChatUploadedFileBody struct {
 	SizeBytes    int64  `json:"size_bytes"`
 }
 
+type ChatConversationReferenceBody struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Cwd       string `json:"cwd,omitempty"`
+	UpdatedAt int64  `json:"updated_at,omitempty"`
+}
+
 type ChatRequestBody struct {
-	ConversationID      string                   `json:"conversation_id"`
-	ClientRequestID     string                   `json:"client_request_id,omitempty"`
-	Message             string                   `json:"message"`
-	SelectedModel       *ChatSelectedModelBody   `json:"selected_model,omitempty"`
-	RuntimeControls     *ChatRuntimeControlsBody `json:"runtime_controls,omitempty"`
-	ExecutionMode       string                   `json:"execution_mode,omitempty"`
-	Workdir             string                   `json:"workdir,omitempty"`
-	CommandSafetyMode   string                   `json:"command_safety_mode,omitempty"`
-	UploadedFiles       []ChatUploadedFileBody   `json:"uploaded_files,omitempty"`
-	QueuePolicy         string                   `json:"queue_policy,omitempty"`
+	ConversationID          string                          `json:"conversation_id"`
+	ClientRequestID         string                          `json:"client_request_id,omitempty"`
+	Message                 string                          `json:"message"`
+	SelectedModel           *ChatSelectedModelBody          `json:"selected_model,omitempty"`
+	RuntimeControls         *ChatRuntimeControlsBody        `json:"runtime_controls,omitempty"`
+	ExecutionMode           string                          `json:"execution_mode,omitempty"`
+	Workdir                 string                          `json:"workdir,omitempty"`
+	CommandSafetyMode       string                          `json:"command_safety_mode,omitempty"`
+	UploadedFiles           []ChatUploadedFileBody          `json:"uploaded_files,omitempty"`
+	ReferencedConversations []ChatConversationReferenceBody `json:"referenced_conversations,omitempty"`
+	QueuePolicy             string                          `json:"queue_policy,omitempty"`
 }
 
 type CancelChatRequestBody struct {
@@ -114,6 +126,7 @@ func NormalizeChatRuntimeControls(input *ChatRuntimeControlsBody) *ChatRuntimeCo
 		ThinkingEnabled:        boolPtr(boolValue(input.ThinkingEnabled, true)),
 		NativeWebSearchEnabled: boolPtr(boolValue(input.NativeWebSearchEnabled, true)),
 		Reasoning:              normalizeChatRuntimeReasoning(input.Reasoning),
+		PlanModeEnabled:        boolPtr(boolValue(input.PlanModeEnabled, false)),
 	}
 }
 
@@ -188,6 +201,56 @@ func NormalizeChatUploadedFiles(input []ChatUploadedFileBody) []ChatUploadedFile
 	return out
 }
 
+func NormalizeChatConversationReferences(
+	input []ChatConversationReferenceBody,
+	currentConversationID string,
+) []ChatConversationReferenceBody {
+	out := make([]ChatConversationReferenceBody, 0, 3)
+	seen := make(map[string]struct{}, len(input))
+	currentConversationID = normalizeTrimmedText(currentConversationID)
+
+	for _, item := range input {
+		id := normalizeTrimmedText(item.ID)
+		title := strings.Join(strings.Fields(item.Title), " ")
+		if id == "" || title == "" || id == currentConversationID {
+			continue
+		}
+		idRunes := []rune(id)
+		if len(idRunes) > 256 {
+			continue
+		}
+		invalidID := false
+		for _, value := range idRunes {
+			if unicode.IsControl(value) {
+				invalidID = true
+				break
+			}
+		}
+		if invalidID {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		titleRunes := []rune(title)
+		if len(titleRunes) > 240 {
+			title = string(titleRunes[:240])
+		}
+		out = append(out, ChatConversationReferenceBody{
+			ID:        id,
+			Title:     title,
+			Cwd:       normalizeTrimmedText(item.Cwd),
+			UpdatedAt: item.UpdatedAt,
+		})
+		if len(out) == 3 {
+			break
+		}
+	}
+
+	return out
+}
+
 func ToProtoChatSelectedModel(input *ChatSelectedModelBody) *gatewayv2.ChatSelectedModel {
 	if input == nil {
 		return nil
@@ -209,6 +272,7 @@ func ToProtoChatRuntimeControls(input *ChatRuntimeControlsBody) *gatewayv2.ChatR
 		ThinkingEnabled:        boolValue(input.ThinkingEnabled, true),
 		NativeWebSearchEnabled: boolValue(input.NativeWebSearchEnabled, true),
 		Reasoning:              normalizeChatRuntimeReasoning(input.Reasoning),
+		PlanModeEnabled:        boolValue(input.PlanModeEnabled, false),
 	}
 }
 
@@ -225,6 +289,25 @@ func ToProtoChatUploadedFiles(input []ChatUploadedFileBody) []*gatewayv2.ChatUpl
 			FileName:     item.FileName,
 			Kind:         item.Kind,
 			SizeBytes:    item.SizeBytes,
+		})
+	}
+	return out
+}
+
+func ToProtoChatConversationReferences(
+	input []ChatConversationReferenceBody,
+) []*gatewayv2.ChatConversationReference {
+	if len(input) == 0 {
+		return nil
+	}
+
+	out := make([]*gatewayv2.ChatConversationReference, 0, len(input))
+	for _, item := range input {
+		out = append(out, &gatewayv2.ChatConversationReference{
+			Id:        item.ID,
+			Title:     item.Title,
+			Cwd:       item.Cwd,
+			UpdatedAt: item.UpdatedAt,
 		})
 	}
 	return out

@@ -1,3 +1,8 @@
+import {
+  type ConversationMentionReference,
+  normalizeConversationMentionReferences,
+} from "@liveagent/ui/lib/chat/mentionReferences";
+import { resolveStreamingRenderDelay } from "@liveagent/ui/lib/chat/streamingRenderPolicy";
 import type { HistoryMessageRef } from "@/lib/chat/conversationState";
 import type {
   ConversationStreamEvent,
@@ -67,6 +72,7 @@ export type TranscriptStore = {
     clientRequestId: string;
     text: string;
     attachments?: UserChatEntry["attachments"];
+    referencedConversations?: UserChatEntry["referencedConversations"];
     // For edit-resend, truncate the visible transcript before inserting the
     // optimistic bubble so it appears at the edited turn immediately. The
     // later stream `rebased` event is an idempotent confirmation.
@@ -90,6 +96,27 @@ export type TranscriptStore = {
 };
 
 const EMPTY_RETRY_ATTEMPTS: readonly RetryAttemptRecord[] = [];
+
+function normalizeLiveConversationReferences(
+  raw: unknown,
+  currentConversationId: string,
+): ConversationMentionReference[] {
+  if (!Array.isArray(raw)) return [];
+  const references: ConversationMentionReference[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const reference: ConversationMentionReference = {
+      id: typeof record.id === "string" ? record.id : "",
+      title: typeof record.title === "string" ? record.title : "",
+      ...(typeof record.cwd === "string" ? { cwd: record.cwd } : {}),
+    };
+    const updatedAt = record.updated_at ?? record.updatedAt;
+    if (typeof updatedAt === "number") reference.updatedAt = updatedAt;
+    references.push(reference);
+  }
+  return normalizeConversationMentionReferences(references, currentConversationId);
+}
 
 const EMPTY_SNAPSHOT: TranscriptSnapshot = {
   rows: [],
@@ -137,6 +164,21 @@ const HIDDEN_COMMIT_DELAY_MS = 250;
 
 function isDocumentHidden() {
   return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
+function countLiveSnapshotCharacters(snapshot: TranscriptSnapshot) {
+  if (snapshot.liveStartIndex < 0) return 0;
+  let count = 0;
+  for (let index = snapshot.liveStartIndex; index < snapshot.rows.length; index += 1) {
+    const row = snapshot.rows[index];
+    if (row?.kind !== "assistant") continue;
+    for (const round of row.rounds) {
+      for (const block of round.blocks) {
+        if (block.kind === "text" || block.kind === "thinking") count += block.text.length;
+      }
+    }
+  }
+  return count;
 }
 
 function readEventClientRequestId(event: ConversationStreamEvent): string {
@@ -222,6 +264,8 @@ export function createTranscriptStore(options?: {
   let dirty = false;
   let rafId: number | null = null;
   let hiddenCommitTimer: ReturnType<typeof setTimeout> | null = null;
+  let visibleCommitTimer: ReturnType<typeof setTimeout> | null = null;
+  let renderedCharacterCount = 0;
   const listeners = new Set<() => void>();
 
   // Row caches: history rows rebuild only when the history region changes;
@@ -236,6 +280,7 @@ export function createTranscriptStore(options?: {
     historyEntries: ChatEntry[];
     foldedTurns: Turn[];
     rows: TranscriptRow[];
+    keys: ReadonlySet<string>;
   } | null = null;
 
   const historyRows = (): TranscriptRow[] => {
@@ -344,10 +389,20 @@ export function createTranscriptStore(options?: {
         ...historyRows(),
         ...foldedTurns.flatMap((turn) => rowsForTurn(turn)),
       ]);
-      foldedRowsCache = { historyEntries, foldedTurns, rows: foldedRows };
+      foldedRowsCache = {
+        historyEntries,
+        foldedTurns,
+        rows: foldedRows,
+        keys: new Set(foldedRows.map((row) => row.key)),
+      };
     }
 
-    const seenKeys = new Set(foldedRows.map((row) => row.key));
+    const foldedKeys = foldedRowsCache?.keys ?? new Set<string>();
+    const liveKeys = new Set<string>();
+    const seenKeys = {
+      has: (key: string) => foldedKeys.has(key) || liveKeys.has(key),
+      add: (key: string) => liveKeys.add(key),
+    };
     const liveRows = dedupeRowKeys(
       unfoldedTurns.flatMap((turn) => rowsForTurn(turn)),
       seenKeys,
@@ -382,18 +437,23 @@ export function createTranscriptStore(options?: {
       clearTimeout(hiddenCommitTimer);
       hiddenCommitTimer = null;
     }
+    if (visibleCommitTimer !== null) {
+      clearTimeout(visibleCommitTimer);
+      visibleCommitTimer = null;
+    }
     if (!dirty) {
       return;
     }
     dirty = false;
     snapshot = buildSnapshot();
+    renderedCharacterCount = countLiveSnapshotCharacters(snapshot);
     emit();
   };
   // While a batch is open (applySync), schedule() only marks dirty: the
   // snapshot rebuild and the event replay must land as ONE commit, never an
   // intermediate frame at the (older) snapshot state.
   let batchDepth = 0;
-  const schedule = (flush?: boolean) => {
+  const schedule = (flush?: boolean, adaptive = false) => {
     dirty = true;
     if (batchDepth > 0) {
       return;
@@ -416,8 +476,31 @@ export function createTranscriptStore(options?: {
         cancelAnimationFrame(rafId);
         rafId = null;
       }
+      if (visibleCommitTimer !== null) {
+        clearTimeout(visibleCommitTimer);
+        visibleCommitTimer = null;
+      }
       if (hiddenCommitTimer === null) {
         hiddenCommitTimer = setTimeout(commit, HIDDEN_COMMIT_DELAY_MS);
+      }
+      return;
+    }
+    if (hiddenCommitTimer !== null) {
+      clearTimeout(hiddenCommitTimer);
+      hiddenCommitTimer = null;
+    }
+    const renderDelay = adaptive ? resolveStreamingRenderDelay(renderedCharacterCount) : 0;
+    if (renderDelay > 0 && typeof setTimeout === "function") {
+      if (visibleCommitTimer === null && rafId === null) {
+        visibleCommitTimer = setTimeout(() => {
+          visibleCommitTimer = null;
+          if (!dirty) return;
+          if (typeof requestAnimationFrame === "function") {
+            rafId = requestAnimationFrame(commit);
+          } else {
+            commit();
+          }
+        }, renderDelay);
       }
       return;
     }
@@ -476,6 +559,8 @@ export function createTranscriptStore(options?: {
       message_id?: unknown;
       messageId?: unknown;
       uploaded_files?: unknown;
+      referenced_conversations?: unknown;
+      referencedConversations?: unknown;
       message_ref?: unknown;
     };
     const clientRequestId = readEventClientRequestId(event);
@@ -483,6 +568,10 @@ export function createTranscriptStore(options?: {
     const messageIdRaw = payload.message_id ?? payload.messageId;
     const messageId = typeof messageIdRaw === "string" ? messageIdRaw.trim() : "";
     const attachments = normalizeLiveUploadedFiles(payload.uploaded_files);
+    const referencedConversations = normalizeLiveConversationReferences(
+      payload.referenced_conversations ?? payload.referencedConversations,
+      event.conversation_id ?? "",
+    );
     if (!text.trim() && attachments.length === 0) {
       return;
     }
@@ -498,6 +587,9 @@ export function createTranscriptStore(options?: {
       }
       if (messageRef && next.messageRef?.messageId !== messageRef.messageId) {
         next = { ...next, messageRef };
+      }
+      if ((next.referencedConversations?.length ?? 0) === 0 && referencedConversations.length > 0) {
+        next = { ...next, referencedConversations };
       }
       return next;
     };
@@ -529,6 +621,7 @@ export function createTranscriptStore(options?: {
             kind: "user",
             text,
             attachments,
+            referencedConversations,
             messageId: messageId || undefined,
             messageRef,
             timestamp: Date.now(),
@@ -558,6 +651,7 @@ export function createTranscriptStore(options?: {
             kind: "user",
             text,
             attachments,
+            referencedConversations,
             messageId: messageId || undefined,
             messageRef,
             timestamp: Date.now(),
@@ -590,6 +684,7 @@ export function createTranscriptStore(options?: {
           kind: "user",
           text,
           attachments,
+          referencedConversations,
           messageId: messageId || undefined,
           messageRef,
           timestamp: Date.now(),
@@ -626,7 +721,7 @@ export function createTranscriptStore(options?: {
     const next = applyEventToTurn(turn, event as ChatEvent);
     if (next !== turn) {
       replaceTurn(turn, next);
-      schedule(false);
+      schedule(false, true);
     }
   };
 
@@ -1231,7 +1326,13 @@ export function createTranscriptStore(options?: {
       applyOne(event);
     },
 
-    addOptimisticUserEntry: ({ clientRequestId, text, attachments, baseMessageRef }) => {
+    addOptimisticUserEntry: ({
+      clientRequestId,
+      text,
+      attachments,
+      referencedConversations,
+      baseMessageRef,
+    }) => {
       const preRebaseHistoryEntries = historyEntries;
       const preRebaseTurns = turns;
       const rebased = baseMessageRef ? rebaseFromMessageRef(baseMessageRef) : false;
@@ -1259,6 +1360,7 @@ export function createTranscriptStore(options?: {
             kind: "user",
             text,
             attachments: attachments ?? [],
+            referencedConversations: referencedConversations ?? [],
             timestamp: Date.now(),
           },
         },

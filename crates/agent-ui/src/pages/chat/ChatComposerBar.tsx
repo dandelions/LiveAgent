@@ -1,6 +1,7 @@
 import {
   type ChatRuntimeControls,
   type CommandSafetyMode,
+  type ComposerContextDisplayMode,
   type ExecutionMode,
   isAgentExecutionMode,
   type ProviderId,
@@ -15,6 +16,8 @@ import { ContextUsageRing } from "@liveagent/ui/components/chat/ContextUsageRing
 import { getUploadedFileTypeIcon } from "@liveagent/ui/components/chat/fileTypeIcons";
 import {
   MentionComposer,
+  type MentionComposerApp,
+  type MentionComposerConversation,
   type MentionComposerHandle,
   type MentionComposerSkill,
 } from "@liveagent/ui/components/chat/MentionComposer";
@@ -23,20 +26,38 @@ import {
   ChevronDown,
   ChevronUp,
   Clock3,
+  FolderOpen,
+  Lightbulb,
   Loader2,
   Maximize2,
   Mic,
   Minimize2,
   Paperclip,
   Play,
+  Plus,
   Send,
   Square,
   SquarePen,
   Trash2,
 } from "@liveagent/ui/components/IconSet";
 import { Button } from "@liveagent/ui/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@liveagent/ui/components/ui/dropdown-menu";
 import { LabelTooltip as RuntimeControlTooltip } from "@liveagent/ui/components/ui/label-tooltip";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import {
+  type ConversationReferenceInsertResult,
+  getActiveConversationReferenceDrag,
+  hasConversationReferenceDragPayload,
+  readConversationReferenceDragPayload,
+  registerConversationReferenceDropZone,
+} from "@liveagent/ui/lib/chat/conversationReferenceDrag";
+import type { ConversationMentionReference } from "@liveagent/ui/lib/chat/mentionReferences";
 import type { GitClient } from "@liveagent/ui/lib/git/types";
 import type { SharedModelOption } from "@liveagent/ui/lib/models/modelOptions";
 import { cn } from "@liveagent/ui/lib/shared/utils";
@@ -45,6 +66,7 @@ import type { WorkspaceActivityClient } from "@liveagent/ui/lib/workspace-activi
 import {
   type MutableRefObject,
   memo,
+  type DragEvent as ReactDragEvent,
   type ReactNode,
   type PointerEvent as ReactPointerEvent,
   useCallback,
@@ -174,6 +196,7 @@ const DEFAULT_QUEUE_SCROLLBAR_STATE: QueueScrollbarState = {
 
 const COMPOSER_EXPAND_ANIMATION_MS = 280;
 const COMPOSER_EXPAND_EASING = "cubic-bezier(0.32, 0.72, 0.22, 1)";
+const CONVERSATION_DROP_NOTICE_MS = 800;
 
 /** 用量环实时读数订阅源（getContextUsageTokens 必须对同一底层状态返回稳定值）。 */
 export type ContextUsageTokensSource = {
@@ -205,6 +228,8 @@ function ComposerContextUsageRing(props: {
       contextWindow={contextWindow}
       disabled={disabled}
       onConfirm={onConfirm}
+      // 环在 "ring" / "both" 展示模式下渲染（见 contextDisplayMode），必须 0% 起
+      // 常显——"ring" 模式它是唯一占用读数，不再挂低占用隐藏门槛。
     />
   );
 }
@@ -238,6 +263,12 @@ export type ChatComposerBarProps = {
   inputPlaceholder: string;
   workdir: string;
   enabledSkills: MentionComposerSkill[];
+  /** Earlier conversations available to the structured @ reference picker. */
+  mentionableConversations?: MentionComposerConversation[];
+  /** Searches all persisted conversations beyond the sidebar's loaded page. */
+  searchMentionableConversations?: (query: string) => Promise<MentionComposerConversation[]>;
+  /** @ 弹层的应用候选（computer use 目标）；由宿主门控，缺省不显示。 */
+  mentionApps?: MentionComposerApp[];
   executionMode: ExecutionMode;
   hasModels: boolean;
   currentModelLabel: string;
@@ -278,6 +309,8 @@ export type ChatComposerBarProps = {
   onOpenSettings: (section?: "providers", providerId?: string) => void;
   onChatRuntimeControlsChange: (patch: Partial<ChatRuntimeControls>) => void;
   onPickReadableFiles: () => void;
+  /** Select a folder to mount as a read-only project root. */
+  onPickWorkspaceFolder: () => void;
   onPasteFiles: (files: File[]) => void;
   onLoadUploadedImagePreview?: UploadedImagePreviewLoader;
   /** Prompts previously sent in this conversation for ↑/↓ recall. */
@@ -292,10 +325,23 @@ export type ChatComposerBarProps = {
   onHeightChange?: (height: number) => void;
   /** 当前会话任务进度（存在时渲染在审批栏和队列面板之上）。 */
   taskProgressBar?: ReactNode;
-  /** 输入框上方的集中审批栏(待审批时由上层注入,渲染在队列面板之上)。 */
+  /** 待审批时替换输入卡片的集中审批面板。 */
   approvalBar?: ReactNode;
   /** 文件拖入命中输入框时显示的局部反馈层。 */
   fileDropOverlay?: ReactNode;
+  /**
+   * 卡片正下方的会话统计状态栏插槽（docs/design/composer-context-stats-bar.md）。
+   * 卡片与胶囊已为它压缩过高度预算，宿主未接线时不占位。
+   */
+  statsBar?: ReactNode;
+  /**
+   * 上下文占用的三档展示样式（settings.customSettings.composerContextDisplay，
+   * docs/design/composer-context-stats-bar.md §4.7）。取舍在本组件内统一裁决：
+   * "statsBar"（缺省）渲染 statsBar 插槽、不渲染用量环；"both" 状态栏与常显
+   * 用量环同时渲染；"ring" 渲染常显用量环（0% 起，环是唯一读数）、statsBar
+   * 插槽即使传入也不挂载。
+   */
+  contextDisplayMode?: ComposerContextDisplayMode;
 };
 
 export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposerBarProps) {
@@ -315,6 +361,9 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     inputPlaceholder,
     workdir,
     enabledSkills,
+    mentionableConversations = [],
+    searchMentionableConversations,
+    mentionApps,
     executionMode,
     hasModels,
     currentModelLabel,
@@ -345,6 +394,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     onOpenSettings,
     onChatRuntimeControlsChange,
     onPickReadableFiles,
+    onPickWorkspaceFolder,
     onPasteFiles,
     onLoadUploadedImagePreview,
     loadHistoryPrompts,
@@ -359,6 +409,8 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     taskProgressBar,
     approvalBar,
     fileDropOverlay,
+    statsBar,
+    contextDisplayMode,
   } = props;
   const { t } = useLocale();
   const [composerIsEmpty, setComposerIsEmpty] = useState(true);
@@ -375,6 +427,14 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const isComposerExpandedRef = useRef(false);
   const glassCardRef = useRef<HTMLDivElement | null>(null);
+  const conversationDragDepthRef = useRef(0);
+  const [conversationDropReference, setConversationDropReference] =
+    useState<ConversationMentionReference | null>(null);
+  const conversationDropNoticeCounterRef = useRef(0);
+  const [conversationDropNotice, setConversationDropNotice] = useState<{
+    result: Exclude<ConversationReferenceInsertResult, "inserted">;
+    key: number;
+  } | null>(null);
   const attachmentListRef = useRef<HTMLDivElement | null>(null);
   const previousPendingUploadCountRef = useRef(0);
   /** 切换瞬间记录的卡片旧高度，供 FLIP 动画用；消费后立即置空。 */
@@ -399,6 +459,10 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
   const uploadDisabled =
     isInputDisabled || stt.active || isUploadingFiles || !isAgentMode || !workdir;
   const controlsDisabled = isInputDisabled || stt.active;
+  const canDropConversationReference = isAgentMode && !controlsDisabled && !hidden;
+  // "+"菜单不只有上传:plan 开关不依赖 workdir/上传状态,菜单触发键只按
+  // 最宽松的可用项禁用,各菜单项再单独按自身前置条件禁用。
+  const composerAddMenuDisabled = isAgentMode ? controlsDisabled : uploadDisabled;
   const hasSendableDraft = !composerIsEmpty || pendingUploadedFiles.length > 0;
   const sendDisabled = isInputDisabled || stt.active || isUploadingFiles || !hasSendableDraft;
   const canQueueDraftWhileSending = isSending && !sendDisabled;
@@ -414,10 +478,137 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
       : !workdir
         ? t("chat.upload.requireWorkdir")
         : t("chat.upload.button");
+  // 菜单触发键的提示:菜单可用而上传不可用时用泛化"添加"文案,上传专属限制
+  // (需要工作目录等)只出现在上传菜单项自身的禁用态上。
+  const addMenuTooltip =
+    !composerAddMenuDisabled && uploadDisabled ? t("chat.upload.addSection") : uploadTooltip;
   const toggleQueueTooltip = queueCollapsed ? t("chat.queue.expand") : t("chat.queue.collapse");
   const toggleComposerExpandTooltip = isComposerExpanded
     ? t("chat.composer.collapse")
     : t("chat.composer.expand");
+
+  const showConversationDropNotice = useCallback((result: ConversationReferenceInsertResult) => {
+    if (result === "inserted") {
+      setConversationDropNotice(null);
+      return;
+    }
+    conversationDropNoticeCounterRef.current += 1;
+    setConversationDropNotice({ result, key: conversationDropNoticeCounterRef.current });
+  }, []);
+
+  const insertConversationReference = useCallback(
+    (reference: ConversationMentionReference) => {
+      const result: ConversationReferenceInsertResult = !canDropConversationReference
+        ? "disabled"
+        : reference.id.trim() === conversationId.trim()
+          ? "self"
+          : (composerRef.current?.insertConversationMention(reference) ?? "disabled");
+      showConversationDropNotice(result);
+      return result;
+    },
+    [canDropConversationReference, composerRef, conversationId, showConversationDropNotice],
+  );
+
+  const clearConversationDropState = useCallback(() => {
+    conversationDragDepthRef.current = 0;
+    setConversationDropReference(null);
+  }, []);
+
+  useEffect(() => {
+    const card = glassCardRef.current;
+    if (!card) return;
+    return registerConversationReferenceDropZone(card, {
+      conversationId,
+      enabled: canDropConversationReference,
+      onHover(reference, active) {
+        if (active) setConversationDropNotice(null);
+        setConversationDropReference(
+          active && canDropConversationReference && reference.id !== conversationId
+            ? reference
+            : null,
+        );
+      },
+      onDrop(reference) {
+        const result = insertConversationReference(reference);
+        clearConversationDropState();
+        return result;
+      },
+    });
+  }, [
+    canDropConversationReference,
+    clearConversationDropState,
+    conversationId,
+    insertConversationReference,
+  ]);
+
+  useEffect(() => {
+    if (!conversationDropNotice) return;
+    const timeout = window.setTimeout(
+      () => setConversationDropNotice(null),
+      CONVERSATION_DROP_NOTICE_MS,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [conversationDropNotice]);
+
+  const conversationDropNoticeText = conversationDropNotice
+    ? conversationDropNotice.result === "self"
+      ? t("chat.conversationReference.self")
+      : conversationDropNotice.result === "duplicate"
+        ? t("chat.conversationReference.duplicate")
+        : conversationDropNotice.result === "limit"
+          ? t("chat.conversationReference.limit")
+          : conversationDropNotice.result === "invalid"
+            ? t("chat.conversationReference.invalid")
+            : t("chat.conversationReference.disabled")
+    : null;
+
+  const handleConversationDragEnter = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!hasConversationReferenceDragPayload(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "copy";
+      conversationDragDepthRef.current += 1;
+      const reference =
+        readConversationReferenceDragPayload(event.dataTransfer) ??
+        getActiveConversationReferenceDrag();
+      if (canDropConversationReference && reference?.id !== conversationId) {
+        setConversationDropReference(reference);
+      }
+    },
+    [canDropConversationReference, conversationId],
+  );
+
+  const handleConversationDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasConversationReferenceDragPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const handleConversationDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasConversationReferenceDragPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    conversationDragDepthRef.current = Math.max(0, conversationDragDepthRef.current - 1);
+    if (conversationDragDepthRef.current === 0) setConversationDropReference(null);
+  }, []);
+
+  const handleConversationDrop = useCallback(
+    (event: ReactDragEvent<HTMLDivElement>) => {
+      if (!hasConversationReferenceDragPayload(event.dataTransfer)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const reference = readConversationReferenceDragPayload(event.dataTransfer);
+      if (reference) {
+        insertConversationReference(reference);
+      } else {
+        showConversationDropNotice("invalid");
+      }
+      clearConversationDropState();
+    },
+    [clearConversationDropState, insertConversationReference, showConversationDropNotice],
+  );
 
   const toggleQueueCollapsed = useCallback(() => {
     setQueueCollapsed((current) => !current);
@@ -722,7 +913,6 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
         )}
       >
         {taskProgressBar}
-        {approvalBar}
         {queuedTurns.length > 0 ? (
           <div
             ref={queuePanelRef}
@@ -863,11 +1053,21 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
           </div>
         ) : null}
 
+        {approvalBar}
         {/* biome-ignore lint/a11y/noStaticElementInteractions: Escape 捕获仅在展开态生效，焦点始终在内部 textbox 上，包装层不参与 Tab 序。 */}
         <div
+          hidden={approvalBar != null}
           ref={glassCardRef}
           data-file-upload-drop-zone=""
           data-file-upload-conversation-id={conversationId}
+          data-conversation-reference-drop-zone={
+            canDropConversationReference ? "enabled" : "disabled"
+          }
+          data-conversation-reference-drop-conversation-id={conversationId}
+          onDragEnter={handleConversationDragEnter}
+          onDragOver={handleConversationDragOver}
+          onDragLeave={handleConversationDragLeave}
+          onDrop={handleConversationDrop}
           onKeyDown={
             isComposerExpanded
               ? (event) => {
@@ -888,6 +1088,22 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
             isComposerExpanded && "min-h-0 flex-1",
           )}
         >
+          {conversationDropReference ? (
+            <div className="pointer-events-none absolute inset-1 z-50 flex items-center justify-center rounded-3xl border border-dashed border-primary/45 bg-background/88 px-6 text-center shadow-inner backdrop-blur-sm">
+              <span className="max-w-full truncate rounded-full bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary">
+                {t("chat.conversationReference.drop").replace(
+                  "{title}",
+                  conversationDropReference.title,
+                )}
+              </span>
+            </div>
+          ) : conversationDropNoticeText ? (
+            <div className="pointer-events-none absolute inset-1 z-50 flex items-center justify-center rounded-3xl border border-dashed border-amber-500/45 bg-background/90 px-6 text-center shadow-inner backdrop-blur-sm">
+              <span className="max-w-full rounded-full bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                {conversationDropNoticeText}
+              </span>
+            </div>
+          ) : null}
           {/* macOS material rim-light */}
           <div
             aria-hidden
@@ -935,16 +1151,19 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
             )}
           </button>
 
-          {/* 用量环位于卡片右侧控制列的垂直中心，保持在展开与发送按钮之间。 */}
-          <div className="absolute right-3 top-1/2 z-20 -translate-y-1/2">
-            <ComposerContextUsageRing
-              source={contextUsageTokensSource}
-              totalTokens={contextUsageTokens}
-              contextWindow={contextWindow}
-              disabled={controlsDisabled || isSending || manualCompactBlocked}
-              onConfirm={onManualCompactConfirm}
-            />
-          </div>
+          {/* 用量环位于卡片右侧控制列的垂直中心，保持在展开与发送按钮之间。
+              "ring" / "both" 展示模式渲染，"statsBar" 模式整枚不渲染（§4.7）。 */}
+          {contextDisplayMode === "ring" || contextDisplayMode === "both" ? (
+            <div className="absolute right-3 top-1/2 z-20 -translate-y-1/2">
+              <ComposerContextUsageRing
+                source={contextUsageTokensSource}
+                totalTokens={contextUsageTokens}
+                contextWindow={contextWindow}
+                disabled={controlsDisabled || isSending || manualCompactBlocked}
+                onConfirm={onManualCompactConfirm}
+              />
+            </div>
+          ) : null}
 
           {/* 常驻 flex-1：动画把卡片钳在中间高度时由本区吸收伸缩，工具栏才能
               全程贴住卡片底边。min-h-0 只在展开态加——折叠态靠自动最小高度
@@ -959,7 +1178,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
           <div
             className={cn(
               "relative flex flex-1 pl-4 pr-12",
-              pendingUploadedFiles.length > 0 ? "pt-1.5" : "pt-3.5",
+              pendingUploadedFiles.length > 0 ? "pt-1.5" : "pt-2.5",
               isComposerExpanded && "min-h-0",
             )}
             onFocusCapture={onPrepareChatRuntime}
@@ -975,44 +1194,53 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
               disabled={isInputDisabled || stt.active}
               workdir={workdir}
               enabledSkills={enabledSkills}
+              conversationMentionsEnabled={isAgentExecutionMode(executionMode)}
+              conversations={
+                isAgentExecutionMode(executionMode)
+                  ? mentionableConversations.filter((item) => item.id !== conversationId)
+                  : []
+              }
+              searchConversations={
+                isAgentExecutionMode(executionMode) ? searchMentionableConversations : undefined
+              }
+              currentConversationId={conversationId}
+              mentionApps={mentionApps}
               className={cn(
                 // 右让位由外层容器 pr-12 统一承担（见上），此处不再补 pr——
                 // 编辑器自身的右内距只会把文字推开、留下滚动条压在控制列上。
-                "px-0 py-0",
+                // min-h 覆盖编辑器默认 70px（twMerge 后写胜出）：折叠态压到
+                // 3 行文本高，为卡片下方的会话统计状态栏腾出高度预算。
+                "min-h-[60px] px-0 py-0",
                 isComposerExpanded &&
                   (surface === "desktop" ? "h-full max-h-none" : "h-full! max-h-none!"),
               )}
             />
           </div>
 
-          <div className="relative flex items-center justify-between gap-2 px-3 pb-2 pt-1">
+          <div className="relative flex items-center justify-between gap-2 px-3 pb-1.5 pt-0.5">
             <div className="flex min-w-0 flex-1 items-center gap-1">
-              <RuntimeControlTooltip label={uploadTooltip}>
-                <button
-                  type="button"
-                  disabled={uploadDisabled}
-                  onClick={onPickReadableFiles}
-                  aria-label={
-                    isUploadingFiles
-                      ? t("chat.upload.uploading")
-                      : !isAgentMode
-                        ? t("chat.upload.onlyInTools")
-                        : !workdir
-                          ? t("chat.upload.requireWorkdir")
-                          : t("chat.upload.selectFiles")
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <button
+                      type="button"
+                      disabled={composerAddMenuDisabled}
+                      aria-label={addMenuTooltip}
+                      title={addMenuTooltip}
+                      className={cn(
+                        "composer-toolbar-action relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full outline-hidden transition-colors hover:bg-muted/60 focus-visible:bg-muted/60 data-[popup-open]:bg-muted/60",
+                        "disabled:pointer-events-none disabled:opacity-40",
+                        pendingUploadedFiles.length > 0
+                          ? "text-sky-600 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200"
+                          : "text-muted-foreground hover:text-foreground dark:hover:text-white",
+                      )}
+                    />
                   }
-                  className={cn(
-                    "composer-toolbar-action relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full outline-hidden transition-colors hover:bg-muted/60 focus-visible:bg-muted/60",
-                    "disabled:pointer-events-none disabled:opacity-40",
-                    pendingUploadedFiles.length > 0
-                      ? "text-sky-600 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200"
-                      : "text-muted-foreground hover:text-foreground dark:hover:text-white",
-                  )}
                 >
                   {isUploadingFiles ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
-                    <Paperclip className="h-4 w-4" />
+                    <Plus className="h-4 w-4" />
                   )}
                   {pendingUploadedFiles.length > 0 ? (
                     <span
@@ -1022,8 +1250,95 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                       {pendingUploadedFiles.length}
                     </span>
                   ) : null}
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  className="composer-add-dropdown flex w-60 flex-col overflow-hidden p-1"
+                  side="top"
+                  align="start"
+                >
+                  <DropdownMenuLabel className="px-2 pb-1 pt-1.5 text-xs font-medium text-muted-foreground">
+                    {t("chat.upload.addSection")}
+                  </DropdownMenuLabel>
+                  <DropdownMenuItem
+                    onSelect={onPickReadableFiles}
+                    disabled={uploadDisabled}
+                    className="composer-safety-item items-center gap-2 rounded-md py-1.5 text-xs"
+                  >
+                    <Paperclip className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="font-medium leading-5">{t("chat.upload.files")}</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={onPickWorkspaceFolder}
+                    disabled={uploadDisabled}
+                    className="composer-safety-item items-center gap-2 rounded-md py-1.5 text-xs"
+                  >
+                    <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="font-medium leading-5">{t("chat.upload.folder")}</span>
+                  </DropdownMenuItem>
+                  {isAgentMode ? (
+                    // 计划模式开关行:整行即开关,右侧迷你 switch 呈现状态。
+                    // closeOnClick=false 让切换就地生效——开关动画可见,菜单
+                    // 不弹跳;行为说明降为 hover 提示,不再挤占行内小字。
+                    <DropdownMenuItem
+                      closeOnClick={false}
+                      role="menuitemcheckbox"
+                      aria-checked={chatRuntimeControls.planModeEnabled}
+                      title={t("chat.runtime.planModeHint")}
+                      onSelect={() =>
+                        onChatRuntimeControlsChange({
+                          planModeEnabled: !chatRuntimeControls.planModeEnabled,
+                        })
+                      }
+                      className="composer-safety-item items-center gap-2 rounded-md py-1.5 text-xs"
+                    >
+                      <Lightbulb
+                        className={cn(
+                          "h-3.5 w-3.5 shrink-0 transition-colors",
+                          chatRuntimeControls.planModeEnabled
+                            ? "text-sky-600 dark:text-sky-300"
+                            : "text-muted-foreground",
+                        )}
+                      />
+                      <span className="min-w-0 flex-1 truncate font-medium leading-5">
+                        {t("chat.runtime.planModeTitle")}
+                      </span>
+                      {/* 视觉开关(aria 由行上的 menuitemcheckbox 承担):与计划
+                          pill 同用 sky 色系,状态一眼可辨。 */}
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "ml-auto inline-flex h-[18px] w-8 shrink-0 items-center rounded-full transition-colors",
+                          chatRuntimeControls.planModeEnabled
+                            ? "bg-sky-500 dark:bg-sky-400"
+                            : "bg-muted-foreground/25",
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "block h-3.5 w-3.5 translate-x-[2px] rounded-full bg-white shadow-sm transition-transform dark:bg-slate-100",
+                            chatRuntimeControls.planModeEnabled && "translate-x-4",
+                          )}
+                        />
+                      </span>
+                    </DropdownMenuItem>
+                  ) : null}
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              {/* 计划模式开启指示(Codex 风格 pill):一眼可见,点击即关。 */}
+              {isAgentMode && chatRuntimeControls.planModeEnabled ? (
+                <button
+                  type="button"
+                  disabled={controlsDisabled}
+                  onClick={() => onChatRuntimeControlsChange({ planModeEnabled: false })}
+                  title={t("chat.runtime.planModeSlashOff")}
+                  aria-label={t("chat.runtime.planModeSlashOff")}
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-sky-500/25 bg-sky-500/10 px-2.5 text-[11px] font-medium text-sky-700 outline-hidden transition-colors hover:bg-sky-500/15 focus-visible:ring-2 focus-visible:ring-primary/35 disabled:pointer-events-none disabled:opacity-40 dark:text-sky-300"
+                >
+                  <Lightbulb className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">{t("chat.runtime.planMode")}</span>
                 </button>
-              </RuntimeControlTooltip>
+              ) : null}
 
               {stt.available ? (
                 <RuntimeControlTooltip label={stt.active ? "停止语音输入" : "开始语音输入"}>
@@ -1054,6 +1369,14 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                 </RuntimeControlTooltip>
               ) : null}
 
+              {isAgentMode && commandSafetyMode && onCommandSafetyModeChange ? (
+                <CommandSafetyModeSelector
+                  value={commandSafetyMode}
+                  disabled={controlsDisabled}
+                  onChange={onCommandSafetyModeChange}
+                />
+              ) : null}
+
               <ComposerModelControls
                 executionMode={executionMode}
                 hasModels={hasModels}
@@ -1069,14 +1392,6 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                 onOpenSettings={onOpenSettings}
                 onChatRuntimeControlsChange={onChatRuntimeControlsChange}
               />
-
-              {isAgentMode && commandSafetyMode && onCommandSafetyModeChange ? (
-                <CommandSafetyModeSelector
-                  value={commandSafetyMode}
-                  disabled={controlsDisabled}
-                  onChange={onCommandSafetyModeChange}
-                />
-              ) : null}
 
               <GitBranchSelector
                 workdir={workdir}
@@ -1144,6 +1459,9 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
           </div>
           {fileDropOverlay}
         </div>
+        {/* 会话统计状态栏插槽：贴卡片下缘，与卡片同宽；审批面板可见时让位；
+            只在 "ring" 展示模式下不挂载——"statsBar" 与 "both" 都渲染（§4.7）。 */}
+        {statsBar && approvalBar == null && contextDisplayMode !== "ring" ? statsBar : null}
       </div>
     </div>
   );

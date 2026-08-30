@@ -1,5 +1,8 @@
 import type { SharedChatEntry } from "@liveagent/ui/contracts/chatEntry";
-import { positiveTokenCount } from "@liveagent/ui/lib/chat/contextUsage";
+import {
+  estimateThinkingReplayTokenUnits,
+  positiveTokenCount,
+} from "@liveagent/ui/lib/chat/contextUsage";
 import { createUuid } from "@liveagent/ui/lib/shared/id";
 
 export { hashText } from "@liveagent/ui/lib/shared/hash";
@@ -8,9 +11,11 @@ import {
   type HostedSearchBlock,
   normalizeHostedSearchBlock,
 } from "@liveagent/ui/lib/chat/hostedSearch";
+import type { ConversationMentionReference } from "@liveagent/ui/lib/chat/mentionReferences";
 import {
   getUserMessageAttachments,
   getUserMessageDisplayText,
+  getUserMessageReferencedConversations,
   type PendingUploadedFile,
 } from "@liveagent/ui/lib/chat/uploadedFiles";
 import { hashText } from "@liveagent/ui/lib/shared/hash";
@@ -32,7 +37,12 @@ type SharedGatewayChatEntry = SharedChatEntry<
   ToolCall,
   ToolResultMessage,
   AssistantMeta,
-  { messageId?: string; messageRef?: HistoryMessageRef; timestamp?: number },
+  {
+    messageId?: string;
+    messageRef?: HistoryMessageRef;
+    timestamp?: number;
+    referencedConversations?: ConversationMentionReference[];
+  },
   { timestamp?: number }
 >;
 
@@ -69,7 +79,6 @@ type StoredMessage = {
   timestamp?: unknown;
   summaryMeta?: unknown;
   liveAgentHistoryRef?: unknown;
-  liveAgentContextUsage?: unknown;
 };
 
 function readMessageTimestamp(value: unknown): number | undefined {
@@ -96,7 +105,7 @@ export type ToolCallLike = {
 
 type NormalizedAssistantBlock =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string }
+  | { type: "thinking"; text: string; thinkingSignature?: string }
   | { type: "toolCall"; toolCall: ToolCallLike }
   | { type: "hostedSearch"; hostedSearch: HostedSearchBlock };
 
@@ -347,21 +356,12 @@ export function safeStringify(value: unknown) {
   }
 }
 
-function getUsageTotalTokens(usage: unknown) {
-  const record = asRecord(usage);
-  const totalTokens = record.totalTokens;
-  if (typeof totalTokens === "number") return totalTokens;
-  const snakeCaseTotal = record.total_tokens;
-  return typeof snakeCaseTotal === "number" ? snakeCaseTotal : undefined;
-}
-
 export function buildAssistantMeta(params: {
   provider?: unknown;
   model?: unknown;
   api?: unknown;
   stopReason?: unknown;
   usage?: unknown;
-  contextUsageTokens?: unknown;
   contextRelevant?: unknown;
 }) {
   const usage =
@@ -369,7 +369,7 @@ export function buildAssistantMeta(params: {
 
   // 增量构建：只 set 已定义的字段，绝不物化出 own-property undefined 键。后者在
   // `{ ...target.meta, ...meta }` 合并时会用 undefined 覆盖此前事件送达的
-  // contextUsageTokens/usageTotalTokens 等锚点，导致用量环塌值（issue #359 缺陷 #2）。
+  // usage/stopReason 等字段，导致用量环倒扫失去锚点输入（issue #359 缺陷 #2）。
   const meta: AssistantMeta = {};
   const provider = readString(params.provider) || undefined;
   if (provider !== undefined) meta.provider = provider;
@@ -380,10 +380,6 @@ export function buildAssistantMeta(params: {
   const stopReason = readString(params.stopReason) || undefined;
   if (stopReason !== undefined) meta.stopReason = stopReason;
   if (usage !== undefined) meta.usage = usage;
-  const usageTotalTokens = getUsageTotalTokens(params.usage);
-  if (usageTotalTokens !== undefined) meta.usageTotalTokens = usageTotalTokens;
-  const contextUsageTokens = positiveTokenCount(params.contextUsageTokens);
-  if (contextUsageTokens !== undefined) meta.contextUsageTokens = contextUsageTokens;
   if (typeof params.contextRelevant === "boolean") {
     meta.contextRelevant = params.contextRelevant;
   }
@@ -578,8 +574,13 @@ function normalizeAssistantBlocks(content: unknown): NormalizedAssistantBlock[] 
     }
     if (type === "thinking") {
       const text = stripRecoveredToolCallMarkup(readString(record.thinking));
-      if (text !== "") {
-        blocks.push({ type: "thinking", text });
+      const thinkingSignature = readString(record.thinkingSignature);
+      if (text !== "" || thinkingSignature) {
+        blocks.push({
+          type: "thinking",
+          text,
+          ...(thinkingSignature ? { thinkingSignature } : {}),
+        });
       }
       continue;
     }
@@ -707,6 +708,7 @@ export function parseHistoryMessagesJson(raw: string): ChatEntry[] {
       const userRecord = asUploadedFilesUserMessage(message);
       const text = getUserMessageDisplayText(userRecord);
       const attachments = getUserMessageAttachments(userRecord);
+      const referencedConversations = getUserMessageReferencedConversations(userRecord);
       const messageRef = readHistoryMessageRef(userRecord.liveAgentHistoryRef);
       if (text.trim() || attachments.length > 0) {
         const baseId = messageRef ? `hu:${messageRef.messageId}` : `hu:~${hashText(text)}`;
@@ -720,6 +722,7 @@ export function parseHistoryMessagesJson(raw: string): ChatEntry[] {
           kind: "user",
           text,
           attachments,
+          referencedConversations,
           messageId: messageRef?.messageId,
           messageRef,
           timestamp: readMessageTimestamp(message.timestamp),
@@ -760,7 +763,6 @@ export function parseHistoryMessagesJson(raw: string): ChatEntry[] {
         api: message.api,
         stopReason: message.stopReason,
         usage: message.usage,
-        contextUsageTokens: asRecord(message.liveAgentContextUsage).totalTokens,
       });
       let textBuffer = "";
       let metaEmitted = false;
@@ -789,13 +791,22 @@ export function parseHistoryMessagesJson(raw: string): ChatEntry[] {
 
         flushText();
 
-        if (block.type === "thinking" && block.text.trim()) {
-          entries.push({
-            id: nextEntryId(),
-            kind: "thinking",
-            round,
-            text: block.text,
-          });
+        if (block.type === "thinking") {
+          const replayTokenUnits = Math.ceil(
+            estimateThinkingReplayTokenUnits({
+              thinking: block.text,
+              thinkingSignature: block.thinkingSignature,
+            }),
+          );
+          if (block.text.trim() || replayTokenUnits > 0) {
+            entries.push({
+              id: nextEntryId(),
+              kind: "thinking",
+              round,
+              text: block.text,
+              ...(replayTokenUnits > 0 ? { replayTokenUnits } : {}),
+            });
+          }
         }
 
         if (block.type === "toolCall") {

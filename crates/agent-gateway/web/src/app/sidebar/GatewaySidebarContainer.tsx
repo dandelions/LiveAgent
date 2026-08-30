@@ -16,7 +16,7 @@ import { deleteSidebarConversations } from "@liveagent/ui/lib/sidebar/batchDelet
 import type { SidebarSnapshot, SidebarStore } from "@liveagent/ui/lib/sidebar/store";
 import type { TransientSidebarRunningConversation } from "@liveagent/ui/lib/sidebar/transientActivity";
 import { mergeTransientSidebarRunningActivity } from "@liveagent/ui/lib/sidebar/transientActivity";
-import type { SidebarErrorCode } from "@liveagent/ui/lib/sidebar/types";
+import type { SidebarConversation, SidebarErrorCode } from "@liveagent/ui/lib/sidebar/types";
 import { useSidebarContainerState } from "@liveagent/ui/lib/sidebar/useSidebarContainerState";
 import { useSidebarSelector } from "@liveagent/ui/lib/sidebar/useSidebarSelector";
 import { sortWorkspaceProjectsByActivity } from "@liveagent/ui/lib/workspaceProjects";
@@ -60,6 +60,7 @@ export type GatewaySidebarContainerProps = Omit<
   "onShareConversation"
 > & {
   store: SidebarStore;
+  approvalConversationIds: ReadonlySet<string>;
   // 手动压缩 pending 已按会话 id 键化，多个会话可同时“转圈”（issue #359 缺陷 #3）。
   transientRunningConversations?: readonly TransientSidebarRunningConversation[];
   // GatewayApp-level sidebar errors (project removal flow); store errors are
@@ -72,6 +73,28 @@ export type GatewaySidebarContainerProps = Omit<
   // both the browser transport and the desktop Agent are confirmed online.
   sectionsDisabled: boolean;
   isLocalDraftConversationId: (id: string) => boolean;
+  /** Session Workbench：菜单入口「在分屏中打开」（未接入时不渲染该菜单项）。 */
+  onConversationOpenInWorkbenchSplit?: (item: SidebarConversation) => void;
+  /** Session Workbench：会话行标题拖拽发起（未接入时行内不装拖拽手柄）。 */
+  onConversationWorkbenchDragIntent?: (
+    item: SidebarConversation,
+    event: {
+      pointerId: number;
+      clientX: number;
+      clientY: number;
+      currentTarget?: EventTarget | null;
+    },
+  ) => void;
+  /** Session Workbench：项目行标题拖拽发起（落点为该项目新建会话）。 */
+  onProjectWorkbenchDragIntent?: (
+    project: ChatHistorySidebarContainerSource["projects"][number],
+    event: {
+      pointerId: number;
+      clientX: number;
+      clientY: number;
+      currentTarget?: EventTarget | null;
+    },
+  ) => void;
   onShareConversation: (item: ChatHistorySummary) => void;
   // User-initiated removal of a local draft row (never hits the backend).
   onLocalDraftDeleted: (id: string) => void;
@@ -84,6 +107,7 @@ export type GatewaySidebarContainerProps = Omit<
 export function GatewaySidebarContainer(props: GatewaySidebarContainerProps) {
   const {
     store,
+    approvalConversationIds,
     projects,
     externalErrorMessage,
     connectionLost,
@@ -319,6 +343,10 @@ export function GatewaySidebarContainer(props: GatewaySidebarContainerProps) {
         renamingId,
         renameDraft,
       })}
+      approvalConversationIds={approvalConversationIds}
+      onConversationOpenInWorkbenchSplit={props.onConversationOpenInWorkbenchSplit}
+      onConversationWorkbenchDragIntent={props.onConversationWorkbenchDragIntent}
+      onProjectWorkbenchDragIntent={props.onProjectWorkbenchDragIntent}
       {...buildChatHistorySidebarWorkspaceProps(
         props,
         sortedProjects,

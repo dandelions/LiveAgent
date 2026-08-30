@@ -1,4 +1,8 @@
 import { buildHistoryMessageRefPayload } from "@liveagent/ui/lib/chat/historyMessageRef";
+import {
+  type ConversationMentionReference,
+  normalizeConversationMentionReferences,
+} from "@liveagent/ui/lib/chat/mentionReferences";
 import type { PendingUploadedFile } from "@liveagent/ui/lib/chat/uploadedFiles";
 import type { GatewaySettingsSyncPayload } from "@liveagent/ui/lib/settings/sync";
 import type { SftpTransferEvent } from "@liveagent/ui/lib/sftp/types";
@@ -55,7 +59,7 @@ export type ChatCommandUpdateListener = (update: ChatCommandUpdate) => void;
 export type WorkspaceActivityListener = (event: WorkspaceActivityEventPayload) => void;
 
 export type PendingRequest = {
-  resolve: (value: any) => void;
+  resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
   timeoutId: number;
 };
@@ -78,6 +82,7 @@ export type GatewayChatCommandInput = {
   systemSettings?: GatewayChatSystemSettings;
   signal?: AbortSignal;
   uploadedFiles?: PendingUploadedFile[];
+  referencedConversations?: ConversationMentionReference[];
   clientRequestId?: string;
   runtimeControls?: GatewayChatRuntimeControls;
   baseMessageRef?: HistoryMessageRef;
@@ -97,6 +102,12 @@ export type SshKnownHostResetResult = {
 export type MentionListResponse = {
   entries: Array<{ path: string; kind: "file" | "dir"; hidden: boolean }>;
   truncated: boolean;
+};
+
+/** 桌面宿主的已安装应用（@ 应用提及）；字段对齐桌面 InstalledApp 的
+ *  camelCase 序列化，空串表示缺失（无 bundle id / 取不到图标）。 */
+export type InstalledAppsListResponse = {
+  apps: Array<{ name: string; bundleId: string; path: string; iconDataUrl: string }>;
 };
 
 export type FsRoot = {
@@ -479,6 +490,15 @@ export function buildChatCommandPayload(input: GatewayChatCommandInput) {
           kind: file.kind,
           size_bytes: file.sizeBytes,
         })) ?? [],
+      referenced_conversations: normalizeConversationMentionReferences(
+        input.referencedConversations,
+        input.conversationId,
+      ).map((reference) => ({
+        id: reference.id,
+        title: reference.title,
+        cwd: reference.cwd ?? "",
+        updated_at: reference.updatedAt ?? 0,
+      })),
       selected_model: input.selectedModel
         ? {
             custom_provider_id: input.selectedModel.customProviderId,
@@ -491,6 +511,7 @@ export function buildChatCommandPayload(input: GatewayChatCommandInput) {
             thinking_enabled: input.runtimeControls.thinkingEnabled,
             native_web_search_enabled: input.runtimeControls.nativeWebSearchEnabled,
             reasoning: input.runtimeControls.reasoning,
+            plan_mode_enabled: input.runtimeControls.planModeEnabled === true,
           }
         : undefined,
       queue_policy: input.queuePolicy ?? "auto",

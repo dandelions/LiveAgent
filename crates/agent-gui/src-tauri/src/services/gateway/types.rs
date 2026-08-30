@@ -32,6 +32,7 @@ pub struct GatewayChatRuntimeControlsEvent {
     pub thinking_enabled: bool,
     pub native_web_search_enabled: bool,
     pub reasoning: String,
+    pub plan_mode_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -57,6 +58,15 @@ pub struct GatewayChatMessageRefEvent {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GatewayConversationReferenceEvent {
+    pub id: String,
+    pub title: String,
+    pub cwd: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GatewayChatRequestEvent {
     pub request_id: String,
     pub conversation_id: String,
@@ -72,6 +82,7 @@ pub struct GatewayChatRequestEvent {
     /// 未指定,桌面端回落到本地 settings.system.commandSafetyMode。
     pub command_safety_mode: String,
     pub uploaded_files: Vec<GatewayUploadedFileEvent>,
+    pub referenced_conversations: Vec<GatewayConversationReferenceEvent>,
     pub queue_policy: String,
 }
 

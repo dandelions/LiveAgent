@@ -32,6 +32,7 @@ import type {
 import {
   CancelChatRequestSchema,
   ChatCommandRequestSchema,
+  ChatConversationReferenceSchema,
   ChatFileOpenRequestSchema,
   ChatMessageRefSchema,
   ChatQueueRequestSchema,
@@ -66,6 +67,7 @@ import {
   HistoryShareGetRequestSchema,
   HistoryShareSetRequestSchema,
   HistoryWorkdirsRequestSchema,
+  InstalledAppsListRequestSchema,
   ManagedProcessRequestSchema,
   MemoryManageRequestSchema,
   ProviderListRequestSchema,
@@ -326,6 +328,9 @@ function buildChatCommand(body: J) {
   const selectedModel = rec(inner.selected_model);
   const runtimeControls = rec(inner.runtime_controls);
   const uploadedFiles = Array.isArray(inner.uploaded_files) ? inner.uploaded_files : [];
+  const referencedConversations = Array.isArray(inner.referenced_conversations)
+    ? inner.referenced_conversations
+    : [];
   return create(ChatCommandRequestSchema, {
     type: str(body.type),
     request: create(ChatRequestSchema, {
@@ -351,12 +356,22 @@ function buildChatCommand(body: J) {
           sizeBytes: toI64(raw.size_bytes),
         });
       }),
+      referencedConversations: referencedConversations.map((reference) => {
+        const raw = rec(reference);
+        return create(ChatConversationReferenceSchema, {
+          id: str(raw.id),
+          title: str(raw.title),
+          cwd: str(raw.cwd),
+          updatedAt: toI64(raw.updated_at),
+        });
+      }),
       clientRequestId: str(inner.client_request_id),
       runtimeControls: inner.runtime_controls
         ? create(ChatRuntimeControlsSchema, {
             thinkingEnabled: bool(runtimeControls.thinking_enabled),
             nativeWebSearchEnabled: bool(runtimeControls.native_web_search_enabled),
             reasoning: str(runtimeControls.reasoning),
+            planModeEnabled: bool(runtimeControls.plan_mode_enabled),
           })
         : undefined,
       queuePolicy: str(inner.queue_policy),
@@ -657,6 +672,8 @@ function agentRequestPayload(type: string, body: J): GatewayEnvelope["payload"] 
           showHidden: optBool(body.show_hidden),
         }),
       };
+    case "apps.installed.list":
+      return { case: "installedAppsList", value: create(InstalledAppsListRequestSchema, {}) };
     case "files.preview":
       return {
         case: "uploadedImagePreview",
@@ -1206,6 +1223,15 @@ function decodeAgentResponse(envelope: AgentEnvelope, options: { agentOnline: bo
           hidden: entry.hidden,
         })),
         truncated: payload.value.truncated,
+      };
+    case "installedAppsListResp":
+      return {
+        apps: payload.value.apps.map((app) => ({
+          name: app.name,
+          bundleId: app.bundleId,
+          path: app.path,
+          iconDataUrl: app.iconDataUrl,
+        })),
       };
     case "uploadedImagePreviewResp":
       return { mimeType: payload.value.mimeType, data: payload.value.data };

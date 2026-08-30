@@ -78,6 +78,7 @@ import {
   type GatewayWorkspaceRootGrantDraft,
   type GatewayWorkspaceRootGrantsResponse,
   type HistoryGetOptions,
+  type InstalledAppsListResponse,
   isConnectionSetupTimeoutError,
   isRecoverableGatewayTransportError,
   isRequestTimeoutError,
@@ -266,6 +267,21 @@ export class GatewayWebSocketRpcClient extends GatewayWebSocketTransport {
   ): Promise<ChatQueueResponse> {
     return normalizeChatQueueResponse(
       await this.requestWithRecovery<RawChatQueueResponse>("chat_queue.tool_approval", {
+        conversation_id: conversationId,
+        item_id: toolCallId,
+        request_json: decisionJson,
+      }),
+    );
+  }
+
+  /** 提交对桌面端挂起计划的决定：item_id 为 toolCallId，request_json 为 {"decision":...,"feedback"?}。 */
+  async chatQueuePlanDecision(
+    conversationId: string,
+    toolCallId: string,
+    decisionJson: string,
+  ): Promise<ChatQueueResponse> {
+    return normalizeChatQueueResponse(
+      await this.requestWithRecovery<RawChatQueueResponse>("chat_queue.plan_decision", {
         conversation_id: conversationId,
         item_id: toolCallId,
         request_json: decisionJson,
@@ -1093,6 +1109,16 @@ export class GatewayWebSocketRpcClient extends GatewayWebSocketTransport {
       query,
       show_hidden: showHidden,
     });
+  }
+
+  /** 桌面宿主的已安装应用（@ 应用提及）；返回条目数组，与 GUI 端
+   *  Tauri 命令 `cua_driver_list_installed_apps` 的载荷一致。 */
+  async listInstalledApps(): Promise<InstalledAppsListResponse["apps"]> {
+    const response = await this.requestWithRecovery<InstalledAppsListResponse>(
+      "apps.installed.list",
+      {},
+    );
+    return response.apps;
   }
 
   async listFsRoots(): Promise<FsRootsResponse> {

@@ -389,6 +389,31 @@ test("custom settings migrate the legacy font family and normalize each typograp
   );
 });
 
+test("composer context display normalizes to the three-state union", () => {
+  // 三档枚举（docs/design/composer-context-stats-bar.md §4.7）：默认统计状态栏。
+  assert.equal(settings.getDefaultSettings().customSettings.composerContextDisplay, "statsBar");
+  assert.equal(
+    settings.normalizeSettings({ customSettings: {} }).customSettings.composerContextDisplay,
+    "statsBar",
+  );
+  assert.equal(
+    settings.normalizeSettings({ customSettings: { composerContextDisplay: "ring" } })
+      .customSettings.composerContextDisplay,
+    "ring",
+  );
+  assert.equal(
+    settings.normalizeSettings({ customSettings: { composerContextDisplay: "both" } })
+      .customSettings.composerContextDisplay,
+    "both",
+  );
+  // 脏值/历史遗留值（如曾经设想过的 "auto"）一律落回默认，不留第四态。
+  assert.equal(
+    settings.normalizeSettings({ customSettings: { composerContextDisplay: "auto" } })
+      .customSettings.composerContextDisplay,
+    "statsBar",
+  );
+});
+
 test("settings normalization canonicalizes project keyed maps with Windows path compatibility", () => {
   const normalized = settings.normalizeSettings({
     ssh: {
@@ -559,6 +584,7 @@ test("chat runtime controls default and follow provider model reasoning support"
   assert.deepEqual(defaults.chatRuntimeControls, {
     thinkingEnabled: true,
     nativeWebSearchEnabled: true,
+    planModeEnabled: false,
     reasoning: "high",
     reasoningByProvider: {
       claude_code: "high",
@@ -687,6 +713,7 @@ test("chat runtime controls default and follow provider model reasoning support"
     {
       thinkingEnabled: false,
       nativeWebSearchEnabled: false,
+      planModeEnabled: false,
       reasoning: "high",
       reasoningByProvider: {
         claude_code: "xhigh",
@@ -703,6 +730,7 @@ test("chat runtime controls default and follow provider model reasoning support"
       {
         thinkingEnabled: true,
         nativeWebSearchEnabled: true,
+        planModeEnabled: false,
         reasoning: "xhigh",
         reasoningByProvider: {
           codex_openai_completions: "xhigh",
@@ -717,6 +745,7 @@ test("chat runtime controls default and follow provider model reasoning support"
     {
       thinkingEnabled: true,
       nativeWebSearchEnabled: true,
+      planModeEnabled: false,
       // 目录未命中（聚合命名）走标准四档兜底：存量 xhigh 钳回默认 high。
       reasoning: "high",
       reasoningByProvider: {
@@ -746,6 +775,7 @@ test("chat runtime controls default and follow provider model reasoning support"
     {
       thinkingEnabled: true,
       nativeWebSearchEnabled: true,
+      planModeEnabled: false,
       reasoning: "xhigh",
       reasoningByProvider: {
         claude_code: "high",
@@ -804,6 +834,7 @@ test("chat runtime controls default and follow provider model reasoning support"
   assert.deepEqual(normalized.chatRuntimeControls, {
     thinkingEnabled: false,
     nativeWebSearchEnabled: false,
+    planModeEnabled: false,
     reasoning: "high",
     reasoningByProvider: {
       claude_code: "high",
@@ -1188,6 +1219,41 @@ test("ssh keyboard-interactive hosts normalize without credential secrets or sec
   assert.equal(payload.ssh.hosts[0].privateKeyPassphraseConfigured, false);
   assert.equal(payload.ssh.hosts[0].proxy.password, "");
   assert.equal(payload.ssh.hosts[0].proxy.passwordConfigured, true);
+});
+
+test("ssh proxy app-proxy reuse flag normalizes strictly and defaults to false", () => {
+  const appSettings = settings.normalizeSettings({
+    ssh: {
+      hosts: [
+        {
+          id: "reuse",
+          name: "Reuse",
+          host: "reuse.example.com",
+          authType: "password",
+          proxy: { useSystemProxy: true },
+        },
+        {
+          id: "manual",
+          name: "Manual",
+          host: "manual.example.com",
+          authType: "password",
+          proxy: { type: "http", url: "http://127.0.0.1", port: 8080, useSystemProxy: "yes" },
+        },
+        {
+          id: "legacy",
+          name: "Legacy",
+          host: "legacy.example.com",
+          authType: "password",
+        },
+      ],
+    },
+  });
+
+  assert.equal(appSettings.ssh.hosts[0].proxy.useSystemProxy, true);
+  // Non-boolean input must not accidentally opt a host into the app proxy.
+  assert.equal(appSettings.ssh.hosts[1].proxy.useSystemProxy, false);
+  assert.equal(appSettings.ssh.hosts[1].proxy.url, "http://127.0.0.1");
+  assert.equal(appSettings.ssh.hosts[2].proxy.useSystemProxy, false);
 });
 
 test("legacy ssh agent hosts fall back to password auth", () => {
@@ -2082,6 +2148,7 @@ test("gateway settings update payload uses sshPatch when hosts are explicitly de
           username: "",
           password: "",
           passwordConfigured: false,
+          useSystemProxy: false,
         },
       },
       after: null,
@@ -2341,6 +2408,75 @@ test("only one agent prompt template remains enabled after normalization", () =>
   );
 });
 
+test("effective prompts append or replace project prompts after the active global template", () => {
+  const appSettings = settings.normalizeSettings({
+    agents: [
+      { id: "a", name: "A", prompt: "Global A", enabled: true },
+      { id: "b", name: "B", prompt: "Global B", enabled: true },
+      { id: "c", name: "C", prompt: "Disabled", enabled: false },
+    ],
+    system: {
+      workspaceResourceSettings: {
+        "/repo/append": {
+          projectPrompt: "Project append",
+          projectPromptStrategy: "append",
+          stateVersion: 1,
+          writerId: "test",
+          updatedAt: 1,
+        },
+        "/repo/replace": {
+          projectPrompt: "Project replace",
+          projectPromptStrategy: "replace",
+          stateVersion: 1,
+          writerId: "test",
+          updatedAt: 1,
+        },
+      },
+    },
+  });
+
+  assert.equal(
+    settings.resolveEffectivePromptSettings(appSettings, "/repo/append").prompt,
+    "Global A\n\nProject append",
+  );
+  assert.equal(
+    settings.resolveEffectivePromptSettings(appSettings, "/repo/replace").prompt,
+    "Project replace",
+  );
+  assert.equal(
+    settings.resolveEffectivePromptSettings(appSettings, "/repo/unconfigured").prompt,
+    "Global A",
+  );
+});
+
+test("project prompt updates preserve workspace Skill and MCP configuration", () => {
+  const initial = settings.normalizeSettings({
+    system: {
+      workspaceResourceSettings: {
+        "/repo": {
+          mode: "custom",
+          skillNames: ["skill-a"],
+          mcpServerIds: ["mcp-a"],
+          stateVersion: 2,
+          writerId: "test",
+          updatedAt: 1,
+        },
+      },
+    },
+  });
+  const updated = settings.updateWorkspacePromptSettings(initial, "/repo", {
+    projectPrompt: "Project",
+    projectPromptStrategy: "replace",
+  });
+  const entry = updated.system.workspaceResourceSettings["/repo"];
+
+  assert.equal(entry.mode, "custom");
+  assert.deepEqual(entry.skillNames, ["skill-a"]);
+  assert.deepEqual(entry.mcpServerIds, ["mcp-a"]);
+  assert.equal(entry.projectPrompt, "Project");
+  assert.equal(entry.projectPromptStrategy, "replace");
+});
+
 test("mcp and remote settings normalize transport, selection, ports, and tokens", () => {
   const mcp = settings.normalizeMcpSettings({
     servers: [
@@ -2383,6 +2519,39 @@ test("mcp and remote settings normalize transport, selection, ports, and tokens"
     gatewayPort: "70000",
   });
   assert.equal(remoteWithOversizedPort.gatewayPort, 65_535);
+});
+
+test("mcp auth config keeps oauth with trimmed fields and drops none/invalid shapes", () => {
+  const oauth = settings.normalizeMcpServerConfig({
+    id: "srv",
+    enabled: true,
+    transport: "http",
+    url: "https://mcp.example.com/mcp",
+    auth: { type: "oauth", scope: " mcp.read mcp.write ", clientId: " cid " },
+  });
+  assert.deepEqual(oauth.auth, { type: "oauth", scope: "mcp.read mcp.write", clientId: "cid" });
+
+  const oauthBare = settings.normalizeMcpServerConfig({
+    id: "srv",
+    enabled: true,
+    transport: "http",
+    url: "https://mcp.example.com/mcp",
+    auth: { type: "oauth", scope: "  ", clientId: "" },
+  });
+  assert.deepEqual(oauthBare.auth, { type: "oauth" });
+
+  // "none"/未知/非对象 一律不落壳对象——旧配置形态零变化。
+  for (const auth of [{ type: "none" }, { type: "basic" }, "oauth", 42, null, undefined]) {
+    const normalized = settings.normalizeMcpServerConfig({
+      id: "srv",
+      enabled: true,
+      transport: "http",
+      url: "https://mcp.example.com/mcp",
+      auth,
+    });
+    assert.equal(normalized.auth, undefined);
+    assert.ok(!("auth" in normalized));
+  }
 });
 
 test("font scale settings normalize invalid values to 1 and clamp out-of-range values", () => {
@@ -2585,8 +2754,8 @@ test("gateway sync merge keeps system proxy password against redacted payloads",
 test("xai provider model defaults come from the generated model catalog", () => {
   assert.equal(settings.getProviderModelDefaults("xai", "grok-4.5").contextWindow, 500_000);
   // 上游（models.dev）已下架的旧模型与目录未收录的模型一样吃供应商兜底值。
-  assert.equal(settings.getProviderModelDefaults("xai", "grok-3").contextWindow, 258_000);
-  assert.equal(settings.getProviderModelDefaults("xai", "grok-unknown").contextWindow, 258_000);
+  assert.equal(settings.getProviderModelDefaults("xai", "grok-3").contextWindow, 400_000);
+  assert.equal(settings.getProviderModelDefaults("xai", "grok-unknown").contextWindow, 400_000);
 });
 
 test("gateway sync keeps all desktop font families local", () => {
@@ -2614,6 +2783,23 @@ test("gateway sync keeps all desktop font families local", () => {
   assert.equal(merged.interfaceFontFamily, "Inter");
   assert.equal(merged.chatFontFamily, "Charter");
   assert.equal(merged.codeFontFamily, "Menlo");
+});
+
+test("gateway sync carries the composer context display mode across surfaces", () => {
+  // 与字体/宽度等设备本地偏好不同：展示样式是全局产品偏好，不进
+  // syncableCustomSettings 的重置清单，桌面端与 WebUI 同步生效。
+  const current = settings.normalizeSettings({});
+  for (const mode of ["ring", "both"]) {
+    const incoming = sync.buildGatewaySettingsSyncPayload(
+      settings.normalizeSettings({ customSettings: { composerContextDisplay: mode } }),
+    );
+    assert.equal(incoming.customSettings.composerContextDisplay, mode);
+    assert.equal(
+      sync.applyGatewaySettingsSyncPayload(current, incoming).customSettings
+        .composerContextDisplay,
+      mode,
+    );
+  }
 });
 
 test("degenerate catalog limits (output == context window) are clamped in the snapshot", () => {
@@ -2721,7 +2907,7 @@ test("legacy configs without limitsSource infer catalog/fallback/user by matchin
   assert.equal(catalogMatch.limitsSource, "catalog");
   // 推断规则 2：落库值等于当前供应商兜底常量、且目录/跨供应商都查不到 → fallback。
   const fallbackMatch = settings.normalizeProviderModelConfig(
-    { id: "relay-only-model", contextWindow: 258_000, maxOutputToken: 142_000 },
+    { id: "relay-only-model", contextWindow: 400_000, maxOutputToken: 142_000 },
     "xai",
   );
   assert.equal(fallbackMatch.limitsSource, "fallback");
@@ -3131,6 +3317,8 @@ test("resetting a removed workspace leaves an inherit tombstone for the same pat
           mode: "custom",
           skillNames: ["workspace-skill"],
           mcpServerIds: ["workspace-mcp"],
+          projectPrompt: "Removed project prompt",
+          projectPromptStrategy: "replace",
           stateVersion: 4,
           writerId: "old-writer",
           updatedAt: 10,
@@ -3145,6 +3333,8 @@ test("resetting a removed workspace leaves an inherit tombstone for the same pat
   assert.equal(tombstone.stateVersion, 5);
   assert.deepEqual(tombstone.skillNames, []);
   assert.deepEqual(tombstone.mcpServerIds, []);
+  assert.equal(tombstone.projectPrompt, "");
+  assert.equal(tombstone.projectPromptStrategy, "append");
   const readded = settings.resolveWorkspaceResources(reset, "/repo/removed");
   assert.ok(readded.skillNames.includes("global-skill"));
   assert.deepEqual(readded.mcpServers.map((server) => server.id), ["global-mcp"]);
@@ -3235,11 +3425,20 @@ test("workspace resource normalization expires only old inherit tombstones", () 
       writerId: "test",
       updatedAt: now,
     },
+    "/repo/project-prompt": {
+      mode: "inherit",
+      projectPrompt: "Keep project context",
+      projectPromptStrategy: "append",
+      stateVersion: 2,
+      writerId: "test",
+      updatedAt: old,
+    },
   });
   assert.equal(normalized["/repo/old-tombstone"], undefined);
   assert.equal(normalized["/repo/custom"].mode, "custom");
   assert.equal(normalized["/repo/off"].mode, "off");
   assert.equal(normalized["/repo/recent-tombstone"].mode, "inherit");
+  assert.equal(normalized["/repo/project-prompt"].projectPrompt, "Keep project context");
 });
 
 test("workspace resource overflow prefers active entries and newest tombstones deterministically", () => {

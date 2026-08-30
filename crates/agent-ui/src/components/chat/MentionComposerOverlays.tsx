@@ -1,6 +1,13 @@
 import { openUrl } from "@liveagent/app/shims/tauriOpener";
 import { getFileTypeIcon } from "@liveagent/ui/components/chat/fileTypeIcons";
-import { Blend } from "@liveagent/ui/components/IconSet";
+import {
+  AppWindow,
+  ArrowLeft,
+  Blend,
+  ChevronRight,
+  MessageSquareText,
+  Paperclip,
+} from "@liveagent/ui/components/IconSet";
 import { useLocale } from "@liveagent/ui/i18n/index";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -9,33 +16,56 @@ import {
   formatLargePasteCount,
   type MentionComposerCommitMention,
   type MentionContext,
+  type MentionMenuMode,
   type MentionSuggestion,
 } from "./MentionComposerModel";
+
+function conversationUpdatedAtLabel(value: number | undefined, locale: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const deltaSeconds = Math.round((date.getTime() - Date.now()) / 1000);
+  const unit =
+    Math.abs(deltaSeconds) >= 86_400
+      ? ({ name: "day", seconds: 86_400 } as const)
+      : Math.abs(deltaSeconds) >= 3_600
+        ? ({ name: "hour", seconds: 3_600 } as const)
+        : ({ name: "minute", seconds: 60 } as const);
+  return new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(
+    Math.round(deltaSeconds / unit.seconds),
+    unit.name,
+  );
+}
 
 export function Popup({
   anchorRef,
   trigger,
+  mode,
   suggestions,
   highlightIndex,
   isLoading,
   error,
   showEmpty,
   emptyLabel,
+  onBack,
   onSelect,
 }: {
   anchorRef: RefObject<HTMLElement | null>;
   trigger: MentionContext["trigger"];
+  mode: MentionMenuMode;
   suggestions: MentionSuggestion[];
   highlightIndex: number;
   isLoading: boolean;
   error: string | null;
   showEmpty: boolean;
   emptyLabel: string;
+  onBack: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
 }) {
+  const { locale, t } = useLocale();
   const popupRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const hlRef = useRef<HTMLDivElement>(null);
+  const hlRef = useRef<HTMLButtonElement>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: highlightIndex is the trigger — hlRef points at a different row after each keyboard move, and the scroll must follow it.
   useEffect(() => {
     hlRef.current?.scrollIntoView({ block: "nearest" });
@@ -67,6 +97,7 @@ export function Popup({
   }, [anchorRef]);
 
   return createPortal(
+    // biome-ignore lint/a11y/noStaticElementInteractions: The popup intercepts pointer-down solely to preserve editor focus; it is not an activation target.
     <div
       ref={popupRef}
       className={cn(
@@ -89,40 +120,115 @@ export function Popup({
         event.preventDefault();
       }}
     >
-      <div className="px-3.5 pb-1.5 pt-3 text-xs font-medium text-muted-foreground">
-        {trigger === "skill" ? "Skills" : "文件"}
+      <div className="flex min-h-10 items-center px-3.5 pb-1 pt-2 text-xs font-medium text-muted-foreground">
+        {trigger === "skill" ? (
+          "Skills"
+        ) : mode === "root" ? (
+          t("chat.composer.add")
+        ) : (
+          <button
+            type="button"
+            className="-ml-1 flex min-h-8 items-center gap-1 rounded-md px-1.5 transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              onBack();
+            }}
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            {mode === "apps"
+              ? t("chat.composer.mentionGroupApps")
+              : mode === "files"
+                ? t("chat.composer.filesAndFolders")
+                : t("chat.composer.conversations")}
+          </button>
+        )}
       </div>
       <div
         ref={listRef}
+        role="listbox"
+        aria-label={
+          trigger === "skill"
+            ? "Skills"
+            : mode === "root"
+              ? t("chat.composer.add")
+              : mode === "apps"
+                ? t("chat.composer.mentionGroupApps")
+                : mode === "files"
+                  ? t("chat.composer.filesAndFolders")
+                  : t("chat.composer.conversations")
+        }
         className="mention-popup-scroll relative flex max-h-[320px] flex-col overflow-y-auto px-2 pb-2"
       >
         {isLoading && (
-          <div className="px-2 py-2 text-xs text-muted-foreground">Indexing files...</div>
+          <div className="px-2 py-2 text-xs text-muted-foreground">
+            {mode === "conversations"
+              ? t("chat.composer.searchingConversations")
+              : t("chat.composer.indexingFiles")}
+          </div>
         )}
         {error && !isLoading && <div className="px-2 py-2 text-xs text-destructive">{error}</div>}
         {suggestions.map((suggestion, i) => {
+          const isCategory = suggestion.type === "category";
           const isSkill = suggestion.type === "skill";
+          const conversation = suggestion.type === "conversation" ? suggestion.conversation : null;
+          const isApp = suggestion.type === "app";
           const entry = suggestion.type === "file" ? suggestion.entry : null;
           const skill = suggestion.type === "skill" ? suggestion.skill : null;
+          const app = suggestion.type === "app" ? suggestion.app : null;
           const isDir = entry?.kind === "dir";
           const parts = entry ? entry.path.split("/") : [];
           const fileName = parts.pop() || "";
           const dirPath = parts.join("/");
           const Icon = entry ? getFileTypeIcon(entry.path, entry.kind) : null;
-          const title = skill?.name ?? fileName;
-          const subtitle = skill?.description ?? (dirPath ? `${dirPath}/` : "");
+          const category = suggestion.type === "category" ? suggestion.category : null;
+          const title =
+            app?.name ??
+            (category === "apps"
+              ? t("chat.composer.mentionGroupApps")
+              : category === "files"
+                ? t("chat.composer.filesAndFolders")
+                : category === "conversations"
+                  ? t("chat.composer.conversations")
+                  : (conversation?.title ?? skill?.name ?? fileName));
+          const updatedAtLabel = conversationUpdatedAtLabel(conversation?.updatedAt, locale);
+          const conversationMeta = [conversation?.cwd, updatedAtLabel].filter(Boolean).join(" · ");
+          const subtitle =
+            category === "apps"
+              ? t("chat.composer.appsHint")
+              : category === "files"
+                ? t("chat.composer.filesAndFoldersHint")
+                : category === "conversations"
+                  ? t("chat.composer.conversationsHint")
+                  : conversation
+                    ? conversation.searchPreview || conversationMeta
+                    : (app?.bundleId ?? skill?.description ?? (dirPath ? `${dirPath}/` : ""));
+          const RowIcon =
+            category === "apps"
+              ? AppWindow
+              : category === "files"
+                ? Paperclip
+                : category === "conversations" || conversation
+                  ? MessageSquareText
+                  : Icon;
           return (
-            <div
+            <button
+              type="button"
+              role="option"
+              aria-selected={i === highlightIndex}
               key={
-                entry ? `${entry.kind}:${entry.path}` : `skill:${skill?.skillFile ?? skill?.name}`
+                entry
+                  ? `${entry.kind}:${entry.path}`
+                  : app
+                    ? `app:${app.bundleId || app.path || app.name}`
+                    : conversation
+                      ? `conversation:${conversation.id}`
+                      : category
+                        ? `category:${category}`
+                        : `skill:${skill?.skillFile ?? skill?.name}`
               }
               ref={i === highlightIndex ? hlRef : undefined}
               className={cn(
-                // Rows are 38px hitboxes with 2px transparent borders so the
-                // visual 34px row keeps the 4px gap while clicks in the gap
-                // still land on a row instead of a dead strip. shrink-0 stops
-                // the max-h flex column from compressing rows before it scrolls.
-                "mention-popup-item group flex h-[38px] shrink-0 cursor-pointer items-center gap-3 rounded-lg border-y-2 border-transparent bg-clip-padding px-3 text-xs leading-5 transition-colors",
+                "mention-popup-item group flex min-h-11 shrink-0 cursor-pointer items-center justify-start gap-3 rounded-lg border-y-2 border-transparent bg-clip-padding px-3 text-left text-xs leading-5 transition-colors",
                 i === highlightIndex
                   ? "bg-foreground/[0.07] text-foreground"
                   : "text-foreground/85 hover:bg-foreground/[0.05] dark:text-foreground/90",
@@ -135,22 +241,36 @@ export function Popup({
               <span
                 className={cn(
                   "flex h-4 w-4 shrink-0 items-center justify-center",
-                  isSkill
-                    ? "text-foreground/85"
-                    : isDir
-                      ? "text-amber-600 dark:text-amber-300"
-                      : "text-muted-foreground",
+                  isCategory || conversation
+                    ? "text-muted-foreground"
+                    : isSkill || isApp
+                      ? "text-foreground/85"
+                      : isDir
+                        ? "text-amber-600 dark:text-amber-300"
+                        : "text-muted-foreground",
                 )}
               >
-                {Icon ? <Icon width={16} height={16} /> : <Blend className="h-4 w-4" />}
+                {isApp ? (
+                  app?.iconDataUrl ? (
+                    <img src={app.iconDataUrl} alt="" className="h-4 w-4 rounded-sm" />
+                  ) : (
+                    <AppWindow className="h-4 w-4" />
+                  )
+                ) : RowIcon ? (
+                  <RowIcon width={16} height={16} />
+                ) : (
+                  <Blend className="h-4 w-4" />
+                )}
               </span>
-              <span className="min-w-0 flex-1 truncate">
+              <span className="min-w-0 flex-1 truncate text-left">
                 <span className="font-normal text-foreground/95">{title}</span>
                 {subtitle && (
                   <span className="ml-2 text-xs text-muted-foreground/75">{subtitle}</span>
                 )}
               </span>
-              {isSkill ? (
+              {isCategory ? (
+                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/65" />
+              ) : isSkill ? (
                 <span className="shrink-0 text-[10px] uppercase tracking-wider text-muted-foreground/60">
                   skill
                 </span>
@@ -161,7 +281,7 @@ export function Popup({
                   </span>
                 )
               )}
-            </div>
+            </button>
           );
         })}
         {showEmpty && !isLoading && !error && suggestions.length === 0 && (
@@ -195,7 +315,10 @@ export function formatCommitTooltipDate(value: string, locale: string) {
     { unit: "minute", seconds: 60 },
     { unit: "second", seconds: 1 },
   ];
-  const selected = units.find(({ seconds }) => Math.abs(deltaSeconds) >= seconds) ?? units.at(-1)!;
+  const selected = units.find(({ seconds }) => Math.abs(deltaSeconds) >= seconds) ?? {
+    unit: "second",
+    seconds: 1,
+  };
   const relative = new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(
     Math.round(deltaSeconds / selected.seconds),
     selected.unit,
@@ -274,6 +397,7 @@ export function CommitMentionTooltip({
   }, [commit, maxWidth, minWidth]);
 
   return createPortal(
+    // biome-ignore lint/a11y/noStaticElementInteractions: Hover and pointer handlers keep this non-interactive tooltip open while the pointer crosses into it.
     <div
       ref={tooltipRef}
       className="layer-popover fixed overflow-y-auto rounded-xl border border-border bg-popover px-3 py-2.5 text-xs text-popover-foreground shadow-xl"
@@ -323,7 +447,7 @@ export function CommitMentionTooltip({
             <button
               type="button"
               className="inline-flex items-center gap-1 rounded px-1 py-0.5 text-primary hover:bg-primary/10"
-              onClick={() => void openUrl(commit.githubUrl!)}
+              onClick={() => commit.githubUrl && void openUrl(commit.githubUrl)}
             >
               <GitHubMarkIcon className="h-3 w-3" />
               {t("chat.composer.commitTooltipOpenGithub")}

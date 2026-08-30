@@ -42,6 +42,7 @@ import {
   normalizePositiveInteger,
   normalizeStringArray,
 } from "./normalizers";
+import { normalizeRetryErrorSettings } from "./retryError";
 import {
   DEFAULT_RIGHT_DOCK_FILE_TREE_STATE,
   normalizeRightDockFileTreeExpandedPaths,
@@ -62,6 +63,7 @@ import {
 import type {
   AgentPromptTemplate,
   AppSettings,
+  BrowserAutomationMode,
   ChatRuntimeControls,
   ChatRuntimeReasoningProviderKey,
   CloseWindowBehavior,
@@ -69,17 +71,21 @@ import type {
   CommandSafetyMode,
   CustomProvider,
   CustomSettings,
+  EffectivePromptSettings,
   EffectiveWorkspaceResources,
   ExecutionMode,
+  McpAuthConfig,
   McpServerConfig,
   McpSettings,
   McpTransport,
   MemorySettings,
   ModelLimitsSource,
+  ProjectPromptStrategy,
   PromptCacheHintMode,
   ProviderFailoverSettings,
   ProviderId,
   ProviderModelConfig,
+  ProviderRetryPolicy,
   ReasoningLevel,
   RemoteSettings,
   RightDockFileTreeState,
@@ -108,10 +114,12 @@ import type {
   WorkspaceResourceSettings,
 } from "./types";
 import {
+  BROWSER_AUTOMATION_MODES,
   COMMAND_SAFETY_MODES,
   DEFAULT_CHAT_RUNTIME_CONTROLS,
   getDefaultUsageQueryConfig,
   PROMPT_CACHE_HINT_MODES,
+  PROVIDER_RETRY_MAX_RETRIES_LIMITS,
   RIGHT_DOCK_BACKGROUND_TASKS_TAB_ID,
   RIGHT_DOCK_TOOL_KINDS,
   USAGE_QUERY_TIMEOUT_DEFAULT_SECS,
@@ -144,6 +152,7 @@ export {
   normalizeFontScale,
   normalizeFontScaleSettings,
 } from "./normalizers";
+export { normalizeRetryErrorSettings } from "./retryError";
 export {
   DEFAULT_RIGHT_DOCK_FILE_TREE_STATE,
   normalizeRightDockBackgroundTasksState,
@@ -432,6 +441,9 @@ export function normalizeChatRuntimeControls(input: unknown): ChatRuntimeControl
   return {
     thinkingEnabled: obj.thinkingEnabled !== false,
     nativeWebSearchEnabled: obj.nativeWebSearchEnabled !== false,
+    // Plan mode 是限制性开关,归一化取向与联网/思考相反:仅显式 true 生效,
+    // 旧配置/远端缺失字段一律回落 false,绝不把历史会话意外锁进只读。
+    planModeEnabled: obj.planModeEnabled === true,
     reasoning,
     reasoningByProvider: normalizeChatRuntimeReasoningByProvider(
       obj.reasoningByProvider,
@@ -1036,6 +1048,30 @@ function normalizeUsageQueryConfig(input: unknown): UsageQueryConfig {
   };
 }
 
+/**
+ * 供应商级重试策略归一化。default 态在持久层不落字段（返回 undefined），
+ * 保证旧配置零迁移；非法输入（未知 mode、custom 无有效次数）一律视为
+ * default。custom 的 maxRetries（不含首次请求的重试次数）钳位 1..10。
+ */
+export function normalizeProviderRetryPolicy(input: unknown): ProviderRetryPolicy | undefined {
+  const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  if (obj.mode === "off") return { mode: "off" };
+  if (obj.mode === "custom") {
+    const raw = obj.maxRetries;
+    if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
+    return {
+      mode: "custom",
+      maxRetries: clampInt(
+        raw,
+        PROVIDER_RETRY_MAX_RETRIES_LIMITS.min,
+        PROVIDER_RETRY_MAX_RETRIES_LIMITS.max,
+        PROVIDER_RETRY_MAX_RETRIES_LIMITS.min,
+      ),
+    };
+  }
+  return undefined;
+}
+
 export function normalizeCustomProvider(input: unknown): CustomProvider {
   const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const type = normalizeProviderId(obj.type);
@@ -1095,6 +1131,10 @@ export function normalizeCustomProvider(input: unknown): CustomProvider {
       : {}),
     nativeWebSearchEnabled: obj.nativeWebSearchEnabled !== false,
     useSystemProxy: obj.useSystemProxy === true,
+    ...((): { retryPolicy?: ProviderRetryPolicy } => {
+      const retryPolicy = normalizeProviderRetryPolicy(obj.retryPolicy);
+      return retryPolicy ? { retryPolicy } : {};
+    })(),
     usageQuery: normalizeUsageQueryConfig(obj.usageQuery),
   };
 }
@@ -1149,6 +1189,7 @@ export function normalizeSshProxyConfig(input: unknown): SshProxyConfig {
     username: typeof obj.username === "string" ? obj.username.trim() : "",
     password,
     passwordConfigured: password.length > 0 || obj.passwordConfigured === true,
+    useSystemProxy: obj.useSystemProxy === true,
   };
 }
 
@@ -1331,13 +1372,28 @@ export function strictestCommandSafetyMode(
   return COMMAND_SAFETY_MODE_STRICTNESS[a] >= COMMAND_SAFETY_MODE_STRICTNESS[b] ? a : b;
 }
 
+/**
+ * 浏览器接入模式归一。缺失/空串/未知值一律回 `auto`:该设置是行为选择而非
+ * 安全约束(登录态使用与否由 group:browser 审批把关),未知值不需要 fail-closed。
+ */
+export function normalizeBrowserAutomationMode(input: unknown): BrowserAutomationMode {
+  if (typeof input !== "string") return "auto";
+  const mode = input.trim();
+  return (BROWSER_AUTOMATION_MODES as readonly string[]).includes(mode)
+    ? (mode as BrowserAutomationMode)
+    : "auto";
+}
+
 export function normalizeSystemSettings(input: unknown): SystemSettings {
   const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   return {
     executionMode: normalizeExecutionMode(obj.executionMode),
     workdir: normalizeWorkdir(obj.workdir),
     toolPolicies: normalizeToolPolicies(obj.toolPolicies),
+    // 安全侧开关：任何非 true 的值都收敛成 false。
+    cuaAllowSelfTargeting: obj.cuaAllowSelfTargeting === true,
     commandSafetyMode: normalizeCommandSafetyMode(obj.commandSafetyMode),
+    browserAutomationMode: normalizeBrowserAutomationMode(obj.browserAutomationMode),
     workspaceProjects: normalizeWorkspaceProjects(obj.workspaceProjects),
     workspaceProjectGroups: normalizeWorkspaceProjectGroups(obj.workspaceProjectGroups),
     activeWorkspaceProjectId:
@@ -1358,6 +1414,19 @@ export function normalizeSystemSettings(input: unknown): SystemSettings {
   };
 }
 
+function normalizeMcpAuthConfig(input: unknown): McpAuthConfig | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const obj = input as Record<string, unknown>;
+  if (obj.type !== "oauth") return undefined; // "none"/未知值 = 现状，不存壳对象
+  const scope = typeof obj.scope === "string" ? obj.scope.trim() : "";
+  const clientId = typeof obj.clientId === "string" ? obj.clientId.trim() : "";
+  return {
+    type: "oauth",
+    ...(scope ? { scope } : {}),
+    ...(clientId ? { clientId } : {}),
+  };
+}
+
 export function normalizeMcpServerConfig(input: unknown): McpServerConfig {
   const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const id = typeof obj.id === "string" ? obj.id.trim() : "";
@@ -1365,6 +1434,7 @@ export function normalizeMcpServerConfig(input: unknown): McpServerConfig {
   const docsUrl = typeof obj.docsUrl === "string" ? obj.docsUrl.trim() : "";
   const cwd = typeof obj.cwd === "string" ? obj.cwd.trim() : "";
   const messageUrl = typeof obj.messageUrl === "string" ? obj.messageUrl.trim() : "";
+  const auth = normalizeMcpAuthConfig(obj.auth);
 
   return {
     id,
@@ -1380,6 +1450,7 @@ export function normalizeMcpServerConfig(input: unknown): McpServerConfig {
     headers: normalizeRecordStringString(obj.headers),
     timeoutMs: normalizeTimeoutMs(obj.timeoutMs),
     messageUrl: messageUrl || undefined,
+    ...(auth ? { auth } : {}),
   };
 }
 
@@ -1410,7 +1481,7 @@ export function normalizeAgentPromptTemplates(input: unknown): AgentPromptTempla
 export function normalizeSkillsSettings(input: unknown): SkillsSettings {
   const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   return {
-    enabled: obj.enabled === false ? false : true,
+    enabled: obj.enabled !== false,
     selected: mergeAlwaysEnabledSkillNames(normalizeStringArray(obj.selected)),
   };
 }
@@ -1518,6 +1589,11 @@ export function normalizeCustomSettings(
     },
     chatTranscript: normalizeChatTranscriptSettings(obj.chatTranscript),
     rightDock: normalizeRightDockSettings(obj.rightDock),
+    // 三档枚举：历史配置无此字段或值不合法（含曾设想过的 "auto"）一律落回默认的统计状态栏。
+    composerContextDisplay:
+      obj.composerContextDisplay === "ring" || obj.composerContextDisplay === "both"
+        ? obj.composerContextDisplay
+        : "statsBar",
     // fontFamily was the single pre-split preference. Read it only to migrate
     // saved local settings into the new interface-specific field.
     interfaceFontFamily: normalizeFontFamily(obj.interfaceFontFamily ?? obj.fontFamily),
@@ -1541,6 +1617,7 @@ export function getDefaultSettings(): AppSettings {
       executionMode: "tools",
       workdir: "",
       commandSafetyMode: "auto",
+      browserAutomationMode: "auto",
       workspaceProjects: [],
       workspaceProjectGroups: [],
       activeWorkspaceProjectId: undefined,
@@ -1577,6 +1654,7 @@ export function getDefaultSettings(): AppSettings {
     memory: normalizeMemorySettings({}, customProviders),
     customSettings: normalizeCustomSettings({}, customProviders),
     modelFailover: normalizeModelFailoverSettings({}, customProviders),
+    retryErrorSettings: normalizeRetryErrorSettings({}),
     updates: normalizeUpdateSettings({}),
     skills: {
       enabled: true,
@@ -1618,6 +1696,9 @@ export function normalizeSettings(input?: Partial<AppSettings> | null): AppSetti
     modelFailover: normalizeModelFailoverSettings(
       obj.modelFailover ?? defaults.modelFailover,
       customProviders,
+    ),
+    retryErrorSettings: normalizeRetryErrorSettings(
+      obj.retryErrorSettings ?? defaults.retryErrorSettings,
     ),
     updates: normalizeUpdateSettings(obj.updates ?? defaults.updates),
     skills: normalizeSkillsSettings(obj.skills ?? defaults.skills),
@@ -1786,6 +1867,33 @@ export function resolveWorkspaceResources(
   };
 }
 
+export function resolveEffectivePromptSettings(
+  settings: AppSettings,
+  workdir: string,
+): EffectivePromptSettings {
+  const globalTemplate = settings.agents.find(
+    (template) => template.enabled && template.prompt.trim(),
+  );
+  const globalTemplates = globalTemplate ? [globalTemplate] : [];
+  const globalPrompt = globalTemplate?.prompt.trim() ?? "";
+  const pathKey = workspaceProjectPathKey(workdir);
+  const entry = pathKey ? settings.system.workspaceResourceSettings[pathKey] : undefined;
+  const projectPrompt = entry?.projectPrompt.trim() ?? "";
+  const projectPromptStrategy = entry?.projectPromptStrategy ?? "append";
+  const prompt = projectPrompt
+    ? projectPromptStrategy === "replace" || !globalPrompt
+      ? projectPrompt
+      : `${globalPrompt}\n\n${projectPrompt}`
+    : globalPrompt;
+  return {
+    globalTemplates,
+    globalPrompt,
+    projectPrompt,
+    projectPromptStrategy,
+    prompt,
+  };
+}
+
 export function filterMcpSettingsForWorkspace(
   mcp: McpSettings,
   resources: Pick<EffectiveWorkspaceResources, "mode" | "mcpServerIds">,
@@ -1799,13 +1907,40 @@ export function filterMcpSettingsForWorkspace(
 export function updateWorkspaceResourceSettings(
   prev: AppSettings,
   workdir: string,
-  patch: Pick<WorkspaceResourceSettings, "mode" | "skillNames" | "mcpServerIds">,
+  patch: Pick<WorkspaceResourceSettings, "mode" | "skillNames" | "mcpServerIds"> &
+    Partial<Pick<WorkspaceResourceSettings, "projectPrompt" | "projectPromptStrategy">>,
 ): AppSettings {
   const pathKey = workspaceProjectPathKey(workdir);
   if (!pathKey) return prev;
   const entries = { ...prev.system.workspaceResourceSettings };
   const current = entries[pathKey];
   entries[pathKey] = normalizeWorkspaceResourceSettingsEntry({
+    ...current,
+    ...patch,
+    stateVersion: (current?.stateVersion ?? 0) + 1,
+    writerId: getRightDockWriterId(),
+    updatedAt: Date.now(),
+  });
+  return normalizeSettings({
+    ...prev,
+    system: { ...prev.system, workspaceResourceSettings: entries },
+  });
+}
+
+export function updateWorkspacePromptSettings(
+  prev: AppSettings,
+  workdir: string,
+  patch: { projectPrompt: string; projectPromptStrategy: ProjectPromptStrategy },
+): AppSettings {
+  const pathKey = workspaceProjectPathKey(workdir);
+  if (!pathKey) return prev;
+  const entries = { ...prev.system.workspaceResourceSettings };
+  const current = entries[pathKey];
+  entries[pathKey] = normalizeWorkspaceResourceSettingsEntry({
+    ...current,
+    mode: current?.mode ?? "inherit",
+    skillNames: current?.skillNames ?? [],
+    mcpServerIds: current?.mcpServerIds ?? [],
     ...patch,
     stateVersion: (current?.stateVersion ?? 0) + 1,
     writerId: getRightDockWriterId(),
@@ -1822,6 +1957,8 @@ export function resetWorkspaceResourceSettings(prev: AppSettings, workdir: strin
     mode: "inherit",
     skillNames: [],
     mcpServerIds: [],
+    projectPrompt: "",
+    projectPromptStrategy: "append",
   });
 }
 

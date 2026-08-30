@@ -47,7 +47,7 @@ type UseWorkspaceProjectsParams = {
   setErrorMessage: Dispatch<SetStateAction<string | null>>;
   setActiveView: Dispatch<SetStateAction<"chat" | "skills-hub" | "mcp-hub">>;
   setRightDockOpen: Dispatch<SetStateAction<boolean>>;
-  startNewConversationActionRef: MutableRefObject<(options?: { workdir?: string }) => void>;
+  startNewConversationActionRef: MutableRefObject<(options?: { workdir?: string }) => string>;
   prepareComposerForConversationChangeActionRef: MutableRefObject<() => void>;
 };
 
@@ -181,10 +181,11 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
     [setWorkspaceProjectDirectoryMissing],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Action refs deliberately provide the latest conversation-transition handlers without changing this callback identity.
   const activateWorkspaceProject = useCallback(
     (project: WorkspaceProject, options?: { startConversation?: boolean }) => {
       const pathKey = project.path.trim();
-      if (!pathKey) return;
+      if (!pathKey) return null;
       const normalizedPathKey = workspaceProjectPathKey(pathKey);
       const matchedProject = workspaceProjects.find(
         (item) =>
@@ -212,7 +213,7 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
           (path) => workspaceProjectPathKey(path) === normalizedPathKey,
         )
       ) {
-        return;
+        return null;
       }
       setActiveWorkspaceProjectId(targetProject.id);
       setSettings((prev) => {
@@ -268,8 +269,9 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
       });
       if (options?.startConversation) {
         prepareComposerForConversationChangeActionRef.current();
-        startNewConversationActionRef.current({ workdir: targetProject.path });
+        return startNewConversationActionRef.current({ workdir: targetProject.path });
       }
+      return null;
     },
     [setSettings, workspaceProjects, activeWorkspaceProjectId, settings.system],
   );
@@ -287,12 +289,12 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
   const handleNewConversationForProject = useCallback(
     async (project: WorkspaceProject) => {
       if (!(await checkWorkspaceProjectDirectory(project))) {
-        return;
+        return null;
       }
       setActiveView("chat");
-      activateWorkspaceProject(project, { startConversation: true });
+      return activateWorkspaceProject(project, { startConversation: true });
     },
-    [activateWorkspaceProject, checkWorkspaceProjectDirectory],
+    [activateWorkspaceProject, checkWorkspaceProjectDirectory, setActiveView],
   );
 
   const handleBrowseWorkspaceProjectInFileTree = useCallback(
@@ -310,7 +312,13 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
       activateWorkspaceProject(project);
       setSettings((prev) => openRightDockSingletonTab(prev, pathKey, "fileTree"));
     },
-    [activateWorkspaceProject, checkWorkspaceProjectDirectory, setSettings],
+    [
+      activateWorkspaceProject,
+      checkWorkspaceProjectDirectory,
+      setActiveView,
+      setRightDockOpen,
+      setSettings,
+    ],
   );
 
   const ensureTunnelToolTab = useCallback(

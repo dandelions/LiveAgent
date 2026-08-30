@@ -253,6 +253,44 @@ test("without failover params the stream goes straight to the primary", async ()
   assert.equal(streamCalls[0].model.baseUrl, "https://primary.example");
 });
 
+test("流内重试回调携带当前候选标签：failover 下备用供应商的重试可归属", async () => {
+  streamImpl = (model) =>
+    model.baseUrl === "https://primary.example"
+      ? uncommittedErrorStream("503 service unavailable")
+      : successStream("fallback-answer");
+
+  const retries = [];
+  await streamAssistantMessage(
+    baseParams({
+      onRetryStatus: (attempt, maxAttempts, errorMessage, plannedDelayMs, providerLabel) =>
+        retries.push({ attempt, maxAttempts, errorMessage, plannedDelayMs, providerLabel }),
+      failover: makeFailoverParams(),
+    }),
+  );
+
+  // 两个候选各自的 options 必须把自己的标签绑进 streamRetry.onRetry——
+  // 直接触发装配好的回调，断言标签逐候选独立而非共享同一个通用回调。
+  assert.equal(streamCalls.length, 2);
+  streamCalls[0].options.streamRetry.onRetry(1, 5, "boom-primary", 200);
+  streamCalls[1].options.streamRetry.onRetry(2, 5, "boom-fallback", 400);
+  assert.deepEqual(retries, [
+    {
+      attempt: 1,
+      maxAttempts: 5,
+      errorMessage: "boom-primary",
+      plannedDelayMs: 200,
+      providerLabel: "P1 · claude-x",
+    },
+    {
+      attempt: 2,
+      maxAttempts: 5,
+      errorMessage: "boom-fallback",
+      plannedDelayMs: 400,
+      providerLabel: "P2 · claude-x",
+    },
+  ]);
+});
+
 test("text mode exposes the exact provider-boundary prompt before transport setup", async () => {
   streamImpl = () => successStream("answer");
   const starts = [];
@@ -288,4 +326,38 @@ test("DeepSeek title-style text requests preserve explicit thinking-off and work
   assert.equal(streamCalls[0].options.reasoning, undefined);
   assert.equal(streamCalls[0].options.deepSeekThinking, "disabled");
   assert.equal(streamCalls[0].options.workdir, "/workspace");
+});
+
+test("text mode forwards thinking deltas without leaking them into the answer", async () => {
+  const message = makeAssistantMessage({
+    content: [
+      { type: "thinking", thinking: "weighing options" },
+      { type: "text", text: "Answer" },
+    ],
+  });
+  streamImpl = () =>
+    makeSourceStream([
+      { type: "start", partial: message },
+      { type: "thinking_start", contentIndex: 0, partial: message },
+      { type: "thinking_delta", contentIndex: 0, delta: "weighing ", partial: message },
+      { type: "thinking_delta", contentIndex: 0, delta: "options", partial: message },
+      { type: "thinking_end", contentIndex: 0, content: "weighing options", partial: message },
+      { type: "text_start", contentIndex: 1, partial: message },
+      { type: "text_delta", contentIndex: 1, delta: "Answer", partial: message },
+      { type: "done", reason: "stop", message },
+    ]);
+
+  const thinking = [];
+  const deltas = [];
+  const final = await streamAssistantMessage(
+    baseParams({
+      onTextDelta: (delta) => deltas.push(delta),
+      onThinkingDelta: (delta) => thinking.push(delta),
+    }),
+  );
+
+  assert.deepEqual(thinking, ["weighing ", "options"]);
+  assert.deepEqual(deltas, ["Answer"]);
+  assert.equal(deltas.join("").includes("<think>"), false);
+  assert.equal(final.content[0].thinking, "weighing options");
 });

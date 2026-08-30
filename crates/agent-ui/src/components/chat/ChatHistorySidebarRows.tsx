@@ -29,6 +29,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -37,9 +38,14 @@ import {
 import { Input } from "@liveagent/ui/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@liveagent/ui/components/ui/tooltip";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import {
+  clearActiveConversationReferenceDrag,
+  writeConversationReferenceDragPayload,
+} from "@liveagent/ui/lib/chat/conversationReferenceDrag";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import {
   memo,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -71,6 +77,7 @@ type HistoryRowProps = {
   isActive: boolean;
   isBusy: boolean;
   isRunning: boolean;
+  needsApproval: boolean;
   isDeleteDisabled: boolean;
   canShareConversation: boolean;
   isRenaming: boolean;
@@ -104,7 +111,12 @@ type HistoryRowProps = {
    */
   onWorkbenchDragIntent?: (
     item: SidebarConversation,
-    event: { pointerId: number; clientX: number; clientY: number },
+    event: {
+      pointerId: number;
+      clientX: number;
+      clientY: number;
+      currentTarget?: EventTarget | null;
+    },
   ) => void;
   /** Menu alternative to dragging: open the conversation in a split pane. */
   onOpenInWorkbenchSplit?: (item: SidebarConversation) => void;
@@ -127,6 +139,7 @@ function areHistoryRowPropsEqual(previous: HistoryRowProps, next: HistoryRowProp
     previous.isActive === next.isActive &&
     previous.isBusy === next.isBusy &&
     previous.isRunning === next.isRunning &&
+    previous.needsApproval === next.needsApproval &&
     previous.isDeleteDisabled === next.isDeleteDisabled &&
     previous.canShareConversation === next.canShareConversation &&
     previous.isRenaming === next.isRenaming &&
@@ -164,6 +177,7 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
     isActive,
     isBusy,
     isRunning,
+    needsApproval,
     isDeleteDisabled,
     canShareConversation,
     isRenaming,
@@ -194,6 +208,7 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
     onOpenInWorkbenchSplit,
   } = props;
   const { t } = useLocale();
+  const showRunningIndicator = isRunning && !needsApproval;
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   // Enter/Escape mark the blur as handled so onBlur commits exactly once —
@@ -378,6 +393,7 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
           pointerId: event.pointerId,
           clientX: event.clientX,
           clientY: event.clientY,
+          currentTarget: event.currentTarget,
         });
       }
       if (isInteractionDisabled || isSelectionMode || !isMobileMenuLayout || isBusy) {
@@ -488,6 +504,42 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
       setIsLongPressActive(false);
     },
     [isMobileMenuLayout],
+  );
+
+  const handleNativeConversationDragStart = useCallback(
+    (event: ReactDragEvent<HTMLButtonElement>) => {
+      if (
+        onWorkbenchDragIntent ||
+        isInteractionDisabled ||
+        isSelectionMode ||
+        isRenaming ||
+        isPendingDelete ||
+        menuOpen ||
+        item.isPending
+      ) {
+        event.preventDefault();
+        return;
+      }
+      if (
+        !writeConversationReferenceDragPayload(event.dataTransfer, {
+          id: item.id,
+          title: item.title,
+          cwd: item.cwd,
+          updatedAt: item.updatedAt,
+        })
+      ) {
+        event.preventDefault();
+      }
+    },
+    [
+      isInteractionDisabled,
+      isPendingDelete,
+      isRenaming,
+      isSelectionMode,
+      item,
+      menuOpen,
+      onWorkbenchDragIntent,
+    ],
   );
 
   const shouldShowMobilePressFeedback = isMobileMenuLayout && (isLongPressActive || menuOpen);
@@ -610,6 +662,9 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
 
               <button
                 type="button"
+                draggable={!onWorkbenchDragIntent && !item.isPending}
+                onDragStart={handleNativeConversationDragStart}
+                onDragEnd={clearActiveConversationReferenceDrag}
                 onClick={handleTitleClick}
                 onMouseDown={(event) => {
                   if (event.shiftKey) event.preventDefault();
@@ -648,6 +703,11 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
                 <span className="sidebar-project-name-fade min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5">
                   {item.title}
                 </span>
+                {!isSelectionMode && needsApproval ? (
+                  <span className="inline-flex h-5 shrink-0 items-center rounded-full bg-emerald-500/[0.14] px-2 text-[calc(10.5px*var(--zone-font-scale,1))] font-medium leading-none text-emerald-700 dark:bg-emerald-400/[0.13] dark:text-emerald-300">
+                    {t("chat.toolApproval.sidebarStatus")}
+                  </span>
+                ) : null}
               </button>
             </div>
 
@@ -655,7 +715,7 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
               className={cn(
                 "relative flex items-center justify-end overflow-hidden transition-[max-width,opacity] duration-200 ease-out",
                 isSelectionMode && "hidden",
-                isRunning || item.isPinned
+                showRunningIndicator || item.isPinned
                   ? // Mobile rows render no inline action buttons, so this flex
                     // box has zero content width AND zero height — max-w alone
                     // leaves the absolutely-positioned spinner fully clipped by
@@ -668,7 +728,7 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
                 menuOpen && "max-w-16 opacity-100",
               )}
             >
-              {isRunning ? (
+              {showRunningIndicator ? (
                 <span
                   role="img"
                   aria-label={t("chat.statusRunningReply")}
@@ -683,7 +743,7 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
                         ],
                   )}
                 >
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <Loader2 className="h-4 w-4 animate-spin [animation-duration:1.6s] motion-reduce:animate-none" />
                 </span>
               ) : item.isPinned ? (
                 <span
@@ -704,7 +764,7 @@ export const HistoryRow = memo(function HistoryRow(props: HistoryRowProps) {
               <div
                 className={cn(
                   "flex items-center gap-0.5 transition-opacity duration-200",
-                  isRunning || item.isPinned
+                  showRunningIndicator || item.isPinned
                     ? "opacity-0 group-hover/item:opacity-100 group-focus-within/item:opacity-100"
                     : "opacity-100",
                   menuOpen && "opacity-100",
@@ -1005,7 +1065,12 @@ export const ProjectRow = memo(function ProjectRow(props: {
    */
   onWorkbenchDragIntent?: (
     project: WorkspaceProject,
-    event: { pointerId: number; clientX: number; clientY: number },
+    event: {
+      pointerId: number;
+      clientX: number;
+      clientY: number;
+      currentTarget?: EventTarget | null;
+    },
   ) => void;
 }) {
   const {
@@ -1259,6 +1324,7 @@ export const ProjectRow = memo(function ProjectRow(props: {
                   pointerId: event.pointerId,
                   clientX: event.clientX,
                   clientY: event.clientY,
+                  currentTarget: event.currentTarget,
                 });
               }}
               onDoubleClick={(event) => {
@@ -1324,7 +1390,7 @@ export const ProjectRow = memo(function ProjectRow(props: {
               menuOpen && "opacity-0",
             )}
           >
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <Loader2 className="h-4 w-4 animate-spin [animation-duration:1.6s] motion-reduce:animate-none" />
           </span>
         ) : !isMissing && !isArchived && isPinned ? (
           <span
@@ -1407,51 +1473,22 @@ export const ProjectRow = memo(function ProjectRow(props: {
                   sideOffset={6}
                   className="sidebar-context-menu"
                 >
+                  {/* 第一组：管理 —— 配置、分组归属、归档状态。 */}
                   <DropdownMenuItem
                     disabled={isInteractionDisabled}
                     onSelect={() => onConfigureProject(project)}
                     className="gap-2"
                   >
-                    <Settings className="h-3.5 w-3.5" />
+                    <Settings className="h-3.5 w-3.5 text-muted-foreground" />
                     {t("chat.workspaceConfigure")}
                   </DropdownMenuItem>
-                  {!isDefaultProject ? (
-                    <>
-                      <DropdownMenuItem
-                        disabled={isInteractionDisabled}
-                        onSelect={handleRequestRemove}
-                        className="gap-2 text-destructive focus:bg-destructive/10 focus:text-destructive"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                        {t("chat.workspaceRemoveOnly")}
-                      </DropdownMenuItem>
-                      {project.worktree ? (
-                        <DropdownMenuItem
-                          disabled={isInteractionDisabled}
-                          onSelect={handleRequestDeleteWorktree}
-                          className="gap-2 text-destructive focus:bg-destructive/10 focus:text-destructive"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                          {t("chat.workspaceDeleteWorktree")}
-                        </DropdownMenuItem>
-                      ) : null}
-                    </>
-                  ) : null}
-                  {!isArchived && canArchive ? (
-                    <DropdownMenuItem
-                      disabled={isInteractionDisabled}
-                      onSelect={handleArchive}
-                      className="gap-2"
-                    >
-                      <Archive className="h-3.5 w-3.5" />
-                      {t("chat.workspaceArchive")}
-                    </DropdownMenuItem>
-                  ) : null}
-                  {onMoveProjectToGroup ? (
+                  {/* 无任何分组时隐藏“移动到分组”，避免展开空的子菜单。 */}
+                  {onMoveProjectToGroup && workspaceProjectGroups.length > 0 ? (
                     <DropdownMenuSub>
-                      <DropdownMenuSubTrigger className="gap-2">
-                        <Folder className="h-3.5 w-3.5" />
-                        <span>{t("chat.workspaceGroupMove")}</span>
+                      <DropdownMenuSubTrigger disabled={isInteractionDisabled} className="gap-2">
+                        <Folder className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span className="min-w-0 flex-1">{t("chat.workspaceGroupMove")}</span>
+                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
                       </DropdownMenuSubTrigger>
                       <DropdownMenuSubContent
                         side="right"
@@ -1475,16 +1512,29 @@ export const ProjectRow = memo(function ProjectRow(props: {
                           </DropdownMenuItem>
                         ))}
                         {currentGroupId ? (
-                          <DropdownMenuItem
-                            onSelect={() => onMoveProjectToGroup(project.path, null)}
-                            className="gap-2 text-xs"
-                          >
-                            <X className="h-3.5 w-3.5" />
-                            <span>{t("chat.workspaceGroupUngroup")}</span>
-                          </DropdownMenuItem>
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onSelect={() => onMoveProjectToGroup(project.path, null)}
+                              className="gap-2 text-xs"
+                            >
+                              <X className="h-3.5 w-3.5 text-muted-foreground" />
+                              <span>{t("chat.workspaceGroupUngroup")}</span>
+                            </DropdownMenuItem>
+                          </>
                         ) : null}
                       </DropdownMenuSubContent>
                     </DropdownMenuSub>
+                  ) : null}
+                  {!isArchived && canArchive ? (
+                    <DropdownMenuItem
+                      disabled={isInteractionDisabled}
+                      onSelect={handleArchive}
+                      className="gap-2"
+                    >
+                      <Archive className="h-3.5 w-3.5 text-muted-foreground" />
+                      {t("chat.workspaceArchive")}
+                    </DropdownMenuItem>
                   ) : null}
                   {isArchived ? (
                     <DropdownMenuItem
@@ -1492,9 +1542,13 @@ export const ProjectRow = memo(function ProjectRow(props: {
                       onSelect={handleUnarchive}
                       className="gap-2"
                     >
-                      <ArchiveRestore className="h-3.5 w-3.5" />
+                      <ArchiveRestore className="h-3.5 w-3.5 text-muted-foreground" />
                       {t("chat.workspaceUnarchive")}
                     </DropdownMenuItem>
+                  ) : null}
+                  {/* 第二组：浏览定位 —— 在文件树 / 系统资源管理器中打开。 */}
+                  {onBrowseProjectInFileTree || onBrowseProjectInSystemFileManager ? (
+                    <DropdownMenuSeparator />
                   ) : null}
                   {onBrowseProjectInFileTree ? (
                     <DropdownMenuItem
@@ -1502,7 +1556,7 @@ export const ProjectRow = memo(function ProjectRow(props: {
                       onSelect={handleBrowseInFileTree}
                       className="gap-2"
                     >
-                      <FolderTree className="h-3.5 w-3.5" />
+                      <FolderTree className="h-3.5 w-3.5 text-muted-foreground" />
                       {t("chat.workspaceBrowseInFileTree")}
                     </DropdownMenuItem>
                   ) : null}
@@ -1512,9 +1566,33 @@ export const ProjectRow = memo(function ProjectRow(props: {
                       onSelect={handleBrowseInSystemFileManager}
                       className="gap-2"
                     >
-                      <FolderOpen className="h-3.5 w-3.5" />
+                      <FolderOpen className="h-3.5 w-3.5 text-muted-foreground" />
                       {t("chat.workspaceBrowseInSystemFileManager")}
                     </DropdownMenuItem>
+                  ) : null}
+                  {/* 第三组：危险操作 —— 固定在菜单底部并以分隔线隔开。 */}
+                  {!isDefaultProject ? (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        disabled={isInteractionDisabled}
+                        onSelect={handleRequestRemove}
+                        className="gap-2 text-destructive focus:bg-destructive/10 focus:text-destructive"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                        {t("chat.workspaceRemoveOnly")}
+                      </DropdownMenuItem>
+                      {project.worktree ? (
+                        <DropdownMenuItem
+                          disabled={isInteractionDisabled}
+                          onSelect={handleRequestDeleteWorktree}
+                          className="gap-2 text-destructive focus:bg-destructive/10 focus:text-destructive"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          {t("chat.workspaceDeleteWorktree")}
+                        </DropdownMenuItem>
+                      ) : null}
+                    </>
                   ) : null}
                 </DropdownMenuContent>
               </DropdownMenu>

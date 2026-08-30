@@ -23,6 +23,7 @@ import { WorkspaceOverlayHost } from "@liveagent/ui/components/workspace-editor/
 import { useLocale } from "@liveagent/ui/i18n/index";
 import { getAutomationState, useAutomation } from "@liveagent/ui/lib/automation/index";
 import { formatCheckpointRewoundNotification } from "@liveagent/ui/lib/chat/checkpointRewind";
+import { searchMentionConversations } from "@liveagent/ui/lib/chat/conversationSearch";
 import { useChangedFilesActions } from "@liveagent/ui/lib/chat/useChangedFilesActions";
 import { useChatFileLinkNavigation } from "@liveagent/ui/lib/chat/useChatFileLinkNavigation";
 import {
@@ -30,6 +31,7 @@ import {
   useComposerSkillSelection,
   useInsertCodeReviewSkill,
 } from "@liveagent/ui/lib/chat/useComposerActions";
+import { useMentionApps } from "@liveagent/ui/lib/chat/useMentionApps";
 import { setPreferredMonacoNlsLocale } from "@liveagent/ui/lib/monacoNls";
 import { useRightDockSettings } from "@liveagent/ui/lib/projectTools/useRightDockSettings";
 import {
@@ -55,11 +57,13 @@ import {
 import { useConversationViewState } from "@liveagent/ui/lib/trajectory/useConversationViewState";
 import type { LocalTunnelClient } from "@liveagent/ui/lib/tunnels/constants";
 import {
+  commitWorkspaceDropConversation,
   findAdjacentPaneId,
   findParentSplitId,
   hitTestWorkbenchDrop,
+  type PendingWorkspaceDropOperation,
+  shouldDeferWorkspaceDropConversationSync,
   type WorkbenchCommandError,
-  type WorkbenchDropTarget,
   type WorkbenchGeometry,
 } from "@liveagent/ui/lib/workbench/index";
 import {
@@ -69,6 +73,7 @@ import {
   surfaceIdentityKey,
   surfaceProjectRef,
 } from "@liveagent/ui/lib/workbench/types";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   type CSSProperties,
@@ -109,10 +114,14 @@ import { buildMemoryOverviewSection } from "../lib/memory/prompts/injection";
 import { toModelValue } from "../lib/providers/llm";
 import {
   findProviderModelConfig,
+  getChatRuntimeReasoningLevelsForProvider,
   isAgentDevMode,
   isAgentExecutionMode,
+  isThinkingAlwaysOnForModel,
+  normalizeChatRuntimeControlsForProvider,
   normalizeSelectedModelForProviders,
   parseSelectedModelJson,
+  resolveEffectivePromptSettings,
   resolveEffectiveTheme,
   resolveWorkspaceResources,
   updateExecutionModeFromChatSelection,
@@ -127,12 +136,21 @@ import { desktopSttTransport } from "../lib/stt/desktopSttTransport";
 import { createSubagentStoreManager } from "../lib/subagents";
 import { tauriTerminalClient } from "../lib/terminal/tauriTerminalClient";
 import { cancelPendingAskUserQuestionsForConversation } from "../lib/tools/askUserQuestionTools";
+import {
+  answerPlanDecision,
+  cancelPendingPlanDecisionsForConversation,
+  getPendingPlanForConversation,
+  isPlanApprovalMessage,
+  registerPlanDecisionHandlers,
+} from "../lib/tools/planModeTools";
 import { cancelPendingToolApprovalsForConversation } from "../lib/tools/toolApproval";
+import { clearMcpToolActivation } from "../lib/tools/toolSearchTools";
 import { buildTrayMenuModel, syncTrayMenu } from "../lib/tray/trayMenu";
 import { useTrayPrefs } from "../lib/tray/trayPrefs";
 import { createTauriTunnelClient } from "../lib/tunnels/tauriTunnelClient";
 import { tauriWorkspaceActivityClient } from "../lib/workspace-activity/tauriWorkspaceActivityClient";
 import type { ChatPageProps } from "./chat/chatPageTypes";
+import { asErrorMessage } from "./chat/chatPageUtils";
 import { useComposerHistoryPrompts } from "./chat/composer/useComposerHistoryPrompts";
 import type {
   ConversationControllerActions,
@@ -195,6 +213,7 @@ import { TerminalPaneHost } from "./chat/surfaces/TerminalPaneHost";
 import { resolveWorkbenchPaneProject } from "./chat/workbench/paneProjectContext";
 import { sessionWorkbench } from "./chat/workbench/sessionWorkbench";
 import { commitTerminalDrop } from "./chat/workbench/terminalDropCommit";
+import { releaseOrphanTerminalPaneLeases } from "./chat/workbench/terminalPaneLeaseStore";
 import {
   createTerminalSurfaceId,
   findTerminalPaneForSession,
@@ -207,6 +226,7 @@ import { useWindowWorkbench } from "./chat/workbench/useWindowWorkbench";
 import {
   canSplitRectAtEdge,
   useWorkbenchDragSession,
+  type WorkbenchDragUnavailableReason,
   type WorkbenchDropCommit,
 } from "./chat/workbench/useWorkbenchDragSession";
 import { useProjectTerminals } from "./chat/workspace/useProjectTerminals";
@@ -271,17 +291,14 @@ export function ChatPage(props: ChatPageProps) {
   const isAgentDevExecutionMode = isAgentDevMode(settings.system.executionMode);
   const workdir = settings.system.workdir.trim();
   const activeAgentPrompt = useMemo(() => {
-    const activeTemplate = settings.agents.find(
-      (template) => template.enabled && template.prompt.trim(),
-    );
-    return activeTemplate?.prompt.trim() ?? "";
-  }, [settings.agents]);
+    return resolveEffectivePromptSettings(settings, "").globalPrompt;
+  }, [settings]);
   // The sidebar store owns all sidebar domain state (conversation list,
   // workdirs, running set); ChatPage only issues imperative calls and keeps a
   // few narrow selector subscriptions.
   const sidebarStore = useMemo(() => createSidebarStore(createGuiSidebarBackend()), []);
-  const startNewConversationActionRef = useRef<(options?: { workdir?: string }) => void>(
-    () => undefined,
+  const startNewConversationActionRef = useRef<(options?: { workdir?: string }) => string>(
+    () => "",
   );
   const prepareComposerForConversationChangeActionRef = useRef<() => void>(() => undefined);
   const {
@@ -340,6 +357,10 @@ export function ChatPage(props: ChatPageProps) {
     startNewConversationActionRef,
     prepareComposerForConversationChangeActionRef,
   });
+  const [workspaceRootRevision, setWorkspaceRootRevision] = useState(0);
+  const handleWorkspaceDirectoriesMounted = useCallback(() => {
+    setWorkspaceRootRevision((revision) => revision + 1);
+  }, []);
   useEffect(() => {
     sidebarStore.start();
     return () => {
@@ -355,6 +376,19 @@ export function ChatPage(props: ChatPageProps) {
   // The only page-level subscription to the sidebar list: ChatPage's own
   // render needs (draft detection, pending-item effect, workspace root).
   const historyItems = useSidebarSelector(sidebarStore, selectConversations);
+  const mentionableConversations = useMemo(
+    () =>
+      historyItems
+        .filter((item) => !item.isPending)
+        .map(({ id, title, cwd, updatedAt, messageCount }) => ({
+          id,
+          title,
+          cwd,
+          updatedAt,
+          messageCount,
+        })),
+    [historyItems],
+  );
   const sidebarConversationsById = useSidebarSelector(sidebarStore, (s) => s.byId);
   const {
     canShareHistory,
@@ -510,9 +544,11 @@ export function ChatPage(props: ChatPageProps) {
     finishGatewayRunMirror,
   } = useGatewayRunMirrorCoordinator();
 
-  // 用量环读数：与 WebUI 同一把共享扫描器（deriveContextUsageTokens），
-  // 历史项 + 流式实时轮次（live store 每帧批量提交）联合倒扫。经订阅源
-  // 直达环组件，流式读数逐帧更新而不回流 ChatPage。
+  // 用量环读数：运行中直读 TokenLedger（消息落定即更新，不逐帧估算流式
+  // 文本，优先级与理由见 useContextUsageTokensSource 内注释）；账本无读数
+  // 或空闲时用与 WebUI 同源的 deriveContextUsageTokens 倒扫历史项（运行中
+  // 补上 live 尾部）。经订阅源直达环组件，读数变化只重渲染环本身而不回流
+  // ChatPage。
   const contextUsageRingRunning = isSending || compactionStatus.phase === "running";
   const contextUsageTokensSource = useContextUsageTokensSource({
     isRunning: contextUsageRingRunning,
@@ -629,6 +665,15 @@ export function ChatPage(props: ChatPageProps) {
     currentConversationPersistedCwd ||
     currentConversationRuntimeWorkdir ||
     (isAgentMode ? activeWorkspaceProjectPath || workdir : "");
+  const searchMentionableConversations = useCallback(
+    (query: string) =>
+      searchMentionConversations({
+        query,
+        currentConversationId,
+        currentWorkdir: displayedConversationWorkdir,
+      }),
+    [currentConversationId, displayedConversationWorkdir],
+  );
   const activeWorkspaceResources = useMemo(
     () => resolveWorkspaceResources(settings, displayedConversationWorkdir),
     [displayedConversationWorkdir, settings],
@@ -643,6 +688,7 @@ export function ChatPage(props: ChatPageProps) {
     selectedSkillNames,
     skillsEnabled,
   );
+  const mentionApps = useMentionApps(activeWorkspaceResources.mcpServers, isAgentMode);
   const terminalProjectPath = isAgentMode ? activeWorkspaceProjectPath.trim() : "";
   const terminalProjectPathKey = terminalProjectPath
     ? workspaceProjectPathKey(terminalProjectPath)
@@ -820,6 +866,7 @@ export function ChatPage(props: ChatPageProps) {
   }
 
   const composerDraftCacheRef = useRef(conversationRuntimeRegistry.drafts);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The optional conversation defaults to the latest id stored in the stable ref.
   const cacheActiveComposerDraft = useCallback(
     (conversationId = currentConversationIdRef.current) => {
       const key = conversationId.trim();
@@ -835,6 +882,7 @@ export function ChatPage(props: ChatPageProps) {
   const prepareComposerForConversationChange = useCallback(() => {
     cacheActiveComposerDraft();
   }, [cacheActiveComposerDraft]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The optional conversation defaults to the latest id stored in the stable ref.
   const clearCachedComposerDraft = useCallback(
     (conversationId = currentConversationIdRef.current) => {
       conversationRuntimeRegistry.drafts.delete(conversationId);
@@ -892,6 +940,110 @@ export function ChatPage(props: ChatPageProps) {
   });
   stopConversationActionRef.current = stopConversation;
 
+  // 对话式计划审批(对齐 Codex):计划提交即终止规划 run,用户以消息或按钮
+  // 回应。批准 = 关 plan 开关 + 暂存执行续轮;退回 = 反馈暂存为普通用户消息。
+  // 两者都走"暂存 → run 消失后冲刷"路径:send 在会话恰在发送/加载时会拒绝
+  // (返回 false),直发会静默丢消息——冲刷按结果重新暂存,直到真正发出。
+  // 卡片按钮、输入框批准短语、WebUI plan_decision 三个入口共用这两条路径。
+  const pendingPlanContinuationsRef = useRef(new Map<string, string>());
+  const pendingPlanFeedbackRef = useRef(new Map<string, string>());
+  const planDecisionSendsInFlightRef = useRef(new Set<string>());
+  const planDecisionRetryCountsRef = useRef(new Map<string, number>());
+  // handleSend 点击时采样(该回调刻意不依赖 settings):短语批准只在 plan 开关
+  // 仍开着时生效,防止被弃置的陈旧待决计划之后被一句"好的/ok"意外复活。
+  const planModeEnabledRef = useRef(false);
+  planModeEnabledRef.current = settings.chatRuntimeControls.planModeEnabled === true;
+  const [planContinuationVersion, setPlanContinuationVersion] = useState(0);
+  useEffect(() => {
+    registerPlanDecisionHandlers({
+      onApprove: ({ conversationId }) => {
+        setSettings((prev) =>
+          prev.chatRuntimeControls.planModeEnabled
+            ? {
+                ...prev,
+                chatRuntimeControls: { ...prev.chatRuntimeControls, planModeEnabled: false },
+              }
+            : prev,
+        );
+        pendingPlanContinuationsRef.current.set(conversationId, t("chat.planMode.executePrompt"));
+        planDecisionRetryCountsRef.current.delete(conversationId);
+        setPlanContinuationVersion((version) => version + 1);
+      },
+      onReject: ({ conversationId, feedback }) => {
+        pendingPlanFeedbackRef.current.set(conversationId, feedback);
+        planDecisionRetryCountsRef.current.delete(conversationId);
+        setPlanContinuationVersion((version) => version + 1);
+      },
+    });
+    return () => registerPlanDecisionHandlers(null);
+  }, [setSettings, t]);
+  // 冲刷暂存的计划应答消息(规划 run 已"提交即终止",但打断/排队等场景下会话
+  // 可能仍在发送):
+  // - 退回反馈:会话空闲即发(模型留在 plan mode 修订);
+  // - 执行续轮:还需 plan 开关已关(settings 已 flush,避免续轮又被"只能收紧"
+  //   合并锁回只读)。
+  // send 返回 false / 抛错时重新暂存;运行集变化(run 结束)是主要重试信号,
+  // 另排一次短延迟兜底 bump(覆盖 hydrating 等与运行集无关的拒绝)。兜底限次:
+  // 永久性失败(会话加载失败等)不得退化成秒级重试死循环——超限后消息仍留在
+  // 暂存 map,由下一次运行集变化或新应答触发再试。in-flight 集防并发重复发送。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: planContinuationVersion 是刻意的重跑触发器(应答写入 ref 后 bump)
+  useEffect(() => {
+    const scheduleFlushRetry = (conversationId: string) => {
+      const attempts = planDecisionRetryCountsRef.current.get(conversationId) ?? 0;
+      if (attempts >= 5) return;
+      planDecisionRetryCountsRef.current.set(conversationId, attempts + 1);
+      window.setTimeout(() => setPlanContinuationVersion((version) => version + 1), 1_000);
+    };
+    const flushPlanSends = (
+      store: Map<string, string>,
+      buildOverrides: (conversationId: string, text: string) => Parameters<SendChatAction>[0],
+    ) => {
+      for (const [conversationId, text] of store) {
+        if (runningConversationIds.has(conversationId)) continue;
+        if (planDecisionSendsInFlightRef.current.has(conversationId)) continue;
+        planDecisionSendsInFlightRef.current.add(conversationId);
+        store.delete(conversationId);
+        void sendActionRef
+          .current(buildOverrides(conversationId, text))
+          .then((accepted) => {
+            // 竞态失败(会话恰在发送/加载)时重新暂存并排一次兜底重试;期间若
+            // 有更新的同会话应答入了 map,保留新值。
+            if (accepted) {
+              planDecisionRetryCountsRef.current.delete(conversationId);
+            } else if (!store.has(conversationId)) {
+              store.set(conversationId, text);
+              scheduleFlushRetry(conversationId);
+            }
+          })
+          .catch((error) => {
+            console.warn("plan decision message send failed", error);
+            if (!store.has(conversationId)) {
+              store.set(conversationId, text);
+              scheduleFlushRetry(conversationId);
+            }
+          })
+          .finally(() => {
+            planDecisionSendsInFlightRef.current.delete(conversationId);
+          });
+      }
+    };
+    flushPlanSends(pendingPlanFeedbackRef.current, (conversationId, feedback) => ({
+      conversationIdOverride: conversationId,
+      textOverride: feedback,
+      preserveComposerOnStart: true,
+    }));
+    if (settings.chatRuntimeControls.planModeEnabled) return;
+    flushPlanSends(pendingPlanContinuationsRef.current, (conversationId, prompt) => ({
+      conversationIdOverride: conversationId,
+      textOverride: prompt,
+      preserveComposerOnStart: true,
+      runtimeControlsOverride: {
+        ...settings.chatRuntimeControls,
+        planModeEnabled: false,
+      },
+    }));
+  }, [planContinuationVersion, runningConversationIds, settings.chatRuntimeControls]);
+
   // Queue snapshots publish on queue mutation only; after a gateway
   // reconnect (new session) the gateway's in-memory queue view is empty, so
   // republish the current queue for every conversation that has one.
@@ -929,6 +1081,18 @@ export function ChatPage(props: ChatPageProps) {
     ],
   );
 
+  // 会话瞬态交互的统一 prune 清理:本页与 useConversationHistoryActions 两条
+  // prune 路径共用,保证生命周期裁决一致。计划审批刻意不在此列——待决计划的
+  // 设计就是跨 run 存活(规划 run 提交即终止),空闲运行时缓存被逐出不等于会话
+  // 销毁,回到会话后卡片必须仍可批准;真正删除会话时才连批准态一起清(见
+  // handleConversationDeleted)。MCP 激活集清了只损失一次重新检索,可清。
+  const cancelConversationTransientInteractions = useCallback((conversationId: string) => {
+    cancelPendingAskUserQuestionsForConversation(conversationId);
+    cancelPendingToolApprovalsForConversation(conversationId);
+    clearMcpToolActivation(conversationId);
+  }, []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Queue and runtime maps are mutable registries intentionally sampled at prune time through refs.
   const pruneIdleConversationCaches = useCallback(
     (extraKeepIds: Iterable<string> = []) => {
       const queuedConversationIds = getQueuedConversationIds(queuedChatTurnsRef.current);
@@ -944,8 +1108,7 @@ export function ChatPage(props: ChatPageProps) {
         onPruneConversation: (conversationId) => {
           deleteConversationLocalCaches(conversationId);
           subagentStoresRef.current.dispose(conversationId);
-          cancelPendingAskUserQuestionsForConversation(conversationId);
-          cancelPendingToolApprovalsForConversation(conversationId);
+          cancelConversationTransientInteractions(conversationId);
         },
       });
     },
@@ -955,6 +1118,7 @@ export function ChatPage(props: ChatPageProps) {
       deleteConversationLocalCaches,
       isConversationRunning,
       conversationPersistenceCursorRef,
+      cancelConversationTransientInteractions,
     ],
   );
 
@@ -1016,6 +1180,13 @@ export function ChatPage(props: ChatPageProps) {
     disposeSubagentsForConversation: (conversationId) => {
       subagentStoresRef.current.dispose(conversationId);
     },
+    cancelConversationTransientInteractions,
+    cancelPlanDecisionsForConversation: (conversationId) => {
+      pendingPlanContinuationsRef.current.delete(conversationId);
+      pendingPlanFeedbackRef.current.delete(conversationId);
+      planDecisionRetryCountsRef.current.delete(conversationId);
+      cancelPendingPlanDecisionsForConversation(conversationId);
+    },
     getDefaultNewConversationWorkdir: () =>
       isAgentMode ? activeWorkspaceProjectPath || undefined : undefined,
     resolveConversationSelectedModel: (json) =>
@@ -1055,6 +1226,7 @@ export function ChatPage(props: ChatPageProps) {
     startNewConversationActionRef,
   });
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Runtime and persistence registries are intentionally sampled through refs when the visible workspace inputs change.
   useEffect(() => {
     const nextWorkdir = activeWorkspaceProjectPath.trim();
     if (!isAgentMode || !nextWorkdir) {
@@ -1154,8 +1326,9 @@ export function ChatPage(props: ChatPageProps) {
     currentConversationIdRef.current = currentConversationId;
     // Per-conversation pending uploads are restored inside usePendingUploads
     // when its conversationId param changes.
-  }, [currentConversationId]);
+  }, [currentConversationId, currentConversationIdRef]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The runtime cache is a mutable registry sampled when the visible conversation summary inputs change.
   useEffect(() => {
     const currentItem = historyItems.find((item) => item.id === currentConversationId);
     if (currentItem) {
@@ -1205,6 +1378,7 @@ export function ChatPage(props: ChatPageProps) {
     currentConversationId,
     currentConversationSessionId,
     historyItems,
+    isConversationRunning,
     isSending,
     activeSelectedModel,
     displayedConversationWorkdir,
@@ -1242,6 +1416,7 @@ export function ChatPage(props: ChatPageProps) {
     previousHistoryIdsRef.current = nextIds;
   }, [currentConversationId, historyItems, historyScopeKey, isSending]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Composer content is sampled through its ref; the effect is driven by persisted snapshot changes and run state.
   useEffect(() => {
     const currentItem = historyItems.find((item) => item.id === currentConversationId);
     if (!currentItem || currentItem.isPending) {
@@ -1274,6 +1449,7 @@ export function ChatPage(props: ChatPageProps) {
     currentConversationId,
     currentConversationHydrationPhase,
     historyItems,
+    isConversationRunning,
     isSending,
     openController,
     pendingUploadedFiles,
@@ -1350,7 +1526,6 @@ export function ChatPage(props: ChatPageProps) {
     availableSkills,
     skillsRootDir,
     refreshSkills,
-    activeAgentPrompt,
     ensureTunnelToolTab,
     ensureSshTunnelToolTab,
     persistConversation,
@@ -1369,9 +1544,10 @@ export function ChatPage(props: ChatPageProps) {
   const resolveManualCompactionPromptInputs = useCallback(
     async (input: { isCurrentConversation: boolean; workdir?: string }) => {
       if (!input.isCurrentConversation) {
-        return { skillsPrompt: "", memoryPrompt: "" };
+        return { activeAgentPrompt, skillsPrompt: "", memoryPrompt: "" };
       }
       const promptWorkdir = input.workdir?.trim() ?? "";
+      const effectivePrompt = resolveEffectivePromptSettings(settings, promptWorkdir).prompt;
       const resources = resolveWorkspaceResources(settings, promptWorkdir);
       let skillsPrompt = "";
       if (resources.skillsEnabled && isAgentMode && resources.skillNames.length > 0) {
@@ -1395,9 +1571,9 @@ export function ChatPage(props: ChatPageProps) {
           memoryPrompt = "";
         }
       }
-      return { skillsPrompt, memoryPrompt };
+      return { activeAgentPrompt: effectivePrompt, skillsPrompt, memoryPrompt };
     },
-    [availableSkills, isAgentMode, settings, skillsRootDir],
+    [activeAgentPrompt, availableSkills, isAgentMode, settings, skillsRootDir],
   );
 
   const handleManualCompact = useManualCompaction({
@@ -1424,7 +1600,6 @@ export function ChatPage(props: ChatPageProps) {
     finishGatewayRunMirror,
     persistConversation,
     setErrorMessage,
-    activeAgentPrompt,
     resolveManualCompactionPromptInputs,
   });
   manualCompactActionRef.current = handleManualCompact;
@@ -1437,6 +1612,7 @@ export function ChatPage(props: ChatPageProps) {
   );
   // Shared by the current-conversation controller and every background pane
   // controller: all actions route by explicit conversationId through refs.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Controller methods deliberately route through latest-action refs; the runtime registry itself is stable for the page lifetime.
   const conversationControllerActions = useMemo<ConversationControllerActions>(
     () => ({
       async hydrate({ conversationId }) {
@@ -1720,7 +1896,7 @@ export function ChatPage(props: ChatPageProps) {
         unlistenFeedback();
       }
     };
-  }, []);
+  }, [composerRef, setActiveView]);
 
   // 托盘菜单同步：任一输入变化即重建模型推送（syncTrayMenu 内部按 JSON 签名
   // 去抖），300ms 尾随防抖吸收流式期间侧栏 upsert 引起的高频变化。
@@ -1772,6 +1948,7 @@ export function ChatPage(props: ChatPageProps) {
     [removeSharedHistoryItems],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Runtime/edit state is intentionally sampled through refs at click time.
   const handleSend = useCallback(() => {
     const conversationId = currentConversationIdRef.current.trim();
     const runtimeEntry = conversationRuntimeCacheRef.current.get(conversationId);
@@ -1781,12 +1958,40 @@ export function ChatPage(props: ChatPageProps) {
       }
       return;
     }
+    // 对话式计划审批:会话有待决计划时,纯批准短语("同意/开始/ok"等)即批准
+    // (等同点卡片按钮);其他输入就是普通消息(修改意见),照常发送——规划 run
+    // 已结束,消息直接开启新一轮 plan mode 修订,不经队列。
+    // 短语批准要求 plan 开关仍开着:正常流程中提交后开关保持开启(批准才关);
+    // 用户手动关掉 pill 即视为弃置当前计划,之后的"好的/ok"是普通消息,不得
+    // 把陈旧计划复活成执行续轮。显式批准仍可走卡片按钮(不受开关限制)。
+    if (conversationId && planModeEnabledRef.current) {
+      const pendingPlan = getPendingPlanForConversation(conversationId);
+      if (pendingPlan) {
+        const text = composerRef.current?.getText().trim() ?? "";
+        if (text && isPlanApprovalMessage(text)) {
+          const outcome = answerPlanDecision(
+            pendingPlan.toolCallId,
+            { decision: "approve" },
+            { conversationId },
+          );
+          if (outcome.ok) {
+            composerRef.current?.clear();
+            return;
+          }
+        }
+      }
+    }
     if (conversationId && (isConversationRunning(conversationId) || runtimeEntry?.isSending)) {
       enqueueCurrentComposerTurn("end");
       return;
     }
     void sendActionRef.current();
-  }, [enqueueCurrentComposerTurn, isConversationRunning]);
+  }, [
+    composerRef,
+    enqueueCurrentComposerTurn,
+    isConversationRunning,
+    requestQueuedChatTurnProcessing,
+  ]);
 
   const handleComposerBusyChange = useCallback((isBusy: boolean) => {
     composerBusyRef.current = isBusy;
@@ -1864,7 +2069,24 @@ export function ChatPage(props: ChatPageProps) {
     addNotify,
     setErrorMessage,
     t,
+    onWorkspaceDirectoriesMounted: handleWorkspaceDirectoriesMounted,
   });
+  const pickWorkspaceFolder = useCallback(
+    async (targetConversationId?: string, initialWorkdir?: string) => {
+      try {
+        const selected = await invoke<string | null>("system_pick_folder", {
+          initial_workdir:
+            initialWorkdir?.trim() || displayedConversationWorkdir.trim() || undefined,
+        });
+        const folderPath = selected?.trim();
+        if (!folderPath) return;
+        await importUploadZonePaths([folderPath], targetConversationId);
+      } catch (error) {
+        setErrorMessage(asErrorMessage(error, t("chat.workspaceMountDropFailed")));
+      }
+    },
+    [displayedConversationWorkdir, importUploadZonePaths, t],
+  );
   // Late-bound hover focus keeps visual feedback and keyboard context aligned.
   // The final upload owner is read directly from the composer under the drop
   // point, so routing never depends on this asynchronous focus transition.
@@ -1987,6 +2209,9 @@ export function ChatPage(props: ChatPageProps) {
       inputPlaceholder: composerPlaceholder,
       workdir: displayedConversationWorkdir,
       enabledSkills: enabledComposerSkills,
+      mentionableConversations,
+      searchMentionableConversations,
+      mentionApps,
       executionMode: settings.system.executionMode,
       hasModels,
       currentModelLabel,
@@ -2004,6 +2229,7 @@ export function ChatPage(props: ChatPageProps) {
       thinkingAlwaysOn: chatRuntimeThinkingAlwaysOn,
       contextUsageTokensSource,
       contextWindow: currentModelContextWindow,
+      contextDisplayMode: settings.customSettings.composerContextDisplay,
       gitClient: tauriGitClient,
       workspaceActivityClient: tauriWorkspaceActivityClient,
       onOpenWorktree: handleOpenWorktree,
@@ -2015,6 +2241,7 @@ export function ChatPage(props: ChatPageProps) {
       onOpenSettings,
       onChatRuntimeControlsChange: handleChatRuntimeControlsChange,
       onPickReadableFiles: pickReadableFiles,
+      onPickWorkspaceFolder: pickWorkspaceFolder,
       onPasteFiles: importReadableFiles,
       onLoadUploadedImagePreview: loadComposerUploadedImagePreview,
       loadHistoryPrompts: loadComposerHistoryPrompts,
@@ -2164,20 +2391,21 @@ export function ChatPage(props: ChatPageProps) {
     [workspaceProjects],
   );
 
-  // Workspace drops create a draft conversation through the legacy pipeline;
-  // once the fresh conversation becomes current, the sync effect opens its
-  // pane at the remembered target instead of rebinding the focused pane.
-  const pendingWorkspaceOpenRef = useRef<{
-    target: Exclude<WorkbenchDropTarget, { kind: "pane-center" }>;
-    projectId: string;
-    projectPathKey: string;
-  } | null>(null);
+  // Workspace drops await the exact draft id returned by the legacy creation
+  // path. The sync effect only pauses for that identified draft, so it cannot
+  // consume the target on an unrelated current-conversation update.
+  const workspaceDropSequenceRef = useRef(0);
+  const pendingWorkspaceDropRef = useRef<PendingWorkspaceDropOperation | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The mutable runtime cache ref intentionally supplies the latest draft workdir without changing the drag handler identity.
   const handleWorkbenchDropCommit = useCallback(
     (commit: WorkbenchDropCommit) => {
       // Stale layout revision (focus/structure changed mid-drag): cancel the
       // transaction instead of replaying stale geometry.
-      if (commit.revision !== workbench.layoutRef.current.revision) return;
+      if (commit.revision !== workbench.layoutRef.current.revision) {
+        addNotify("error", t("workbench.dropStateChanged"));
+        return;
+      }
       const { payload, target } = commit;
       if (payload.kind === "workspace") {
         if (target.kind === "pane-center") return;
@@ -2187,12 +2415,66 @@ export function ChatPage(props: ChatPageProps) {
           (entry) => workspaceProjectPathKey(entry.path) === pathKey,
         );
         if (!project) return;
-        pendingWorkspaceOpenRef.current = {
-          target,
-          projectId: project.id,
+        const operationId = workspaceDropSequenceRef.current + 1;
+        workspaceDropSequenceRef.current = operationId;
+        pendingWorkspaceDropRef.current = {
+          operationId,
           projectPathKey: pathKey,
+          conversationId: null,
         };
-        void handleNewConversationForProject(project);
+        void commitWorkspaceDropConversation({
+          revision: commit.revision,
+          target,
+          project: { projectId: project.id, projectPathKey: pathKey },
+          startConversation: () => handleNewConversationForProject(project),
+          onConversationCreated: (conversationId) => {
+            const pending = pendingWorkspaceDropRef.current;
+            if (pending?.operationId === operationId) {
+              pendingWorkspaceDropRef.current = { ...pending, conversationId };
+            }
+          },
+          currentRevision: () => workbench.layoutRef.current.revision,
+          conversationMatchesProject: (conversationId) => {
+            const draftWorkdir =
+              conversationRuntimeCacheRef.current.get(conversationId)?.workdir?.trim() || "";
+            return Boolean(draftWorkdir) && workspaceProjectPathKey(draftWorkdir) === pathKey;
+          },
+          paneIdForConversation: workbench.paneIdForConversation,
+          openConversation: workbench.openConversation,
+        })
+          .then((result) => {
+            if (pendingWorkspaceDropRef.current?.operationId === operationId) {
+              pendingWorkspaceDropRef.current = null;
+            }
+            if (result.kind === "opened") return;
+            if (result.kind === "already-open") {
+              const paneId = workbench.paneIdForConversation(result.conversationId);
+              if (paneId) handleWorkbenchFocusPane(paneId);
+              return;
+            }
+            // not-created/stale/identity-mismatch/rejected:暂停窗口内被 defer
+            // 掉的会话切换必须补一次同步,且项目身份取当前会话自己的解析——
+            // identity-mismatch 的定义就是草稿 workdir 不属于拖入项目,绝不能
+            // 拿拖入项目的 ProjectRef 强绑聚焦 Pane(checkpoint 授权根、文件
+            // 投放作用域都会跟着错位)。
+            workbench.syncCurrentConversation(
+              currentConversationIdRef.current,
+              conversationSurfaceProject,
+            );
+            if (result.kind === "stale" || result.kind === "identity-mismatch") {
+              addNotify("error", t("workbench.dropStateChanged"));
+            }
+          })
+          .catch((error) => {
+            if (pendingWorkspaceDropRef.current?.operationId === operationId) {
+              pendingWorkspaceDropRef.current = null;
+            }
+            workbench.syncCurrentConversation(
+              currentConversationIdRef.current,
+              conversationSurfaceProject,
+            );
+            addNotify("error", asErrorMessage(error, t("workbench.workspaceDropFailed")));
+          });
         return;
       }
       if (payload.kind === "conversation") {
@@ -2202,6 +2484,7 @@ export function ChatPage(props: ChatPageProps) {
           // conversation's own pane, meaning "focus me".
           if (existingPaneId && target.paneId === existingPaneId) {
             handleWorkbenchFocusPane(existingPaneId);
+            addNotify("success", t("workbench.conversationAlreadyOpen"));
           }
           return;
         }
@@ -2257,9 +2540,12 @@ export function ChatPage(props: ChatPageProps) {
     },
     [
       archivedWorkspaceProjectPathKeys,
+      addNotify,
+      conversationSurfaceProject,
       handleNewConversationForProject,
       handleWorkbenchFocusPane,
       selectWorkbenchConversation,
+      t,
       workbench,
       workspaceProjects,
     ],
@@ -2270,16 +2556,36 @@ export function ChatPage(props: ChatPageProps) {
     layoutRef: workbench.layoutRef,
     geometryRef: workbenchGeometryRef,
     onCommit: handleWorkbenchDropCommit,
+    onUnavailable: (reason: WorkbenchDragUnavailableReason) => {
+      addNotify(
+        "error",
+        t(
+          reason === "geometry-unavailable"
+            ? "workbench.dropStateChanged"
+            : "workbench.noSpaceForSplit",
+        ),
+      );
+    },
   });
 
   const handleConversationWorkbenchDragIntent = useCallback(
-    (item: SidebarConversation, event: { pointerId: number; clientX: number; clientY: number }) => {
+    (
+      item: SidebarConversation,
+      event: {
+        pointerId: number;
+        clientX: number;
+        clientY: number;
+        currentTarget?: EventTarget | null;
+      },
+    ) => {
       beginWorkbenchDrag(
         {
           kind: "conversation",
           conversationId: item.id,
           project: workbenchProjectForConversation(item),
           title: item.title,
+          cwd: item.cwd,
+          updatedAt: item.updatedAt,
         },
         event,
       );
@@ -2290,7 +2596,15 @@ export function ChatPage(props: ChatPageProps) {
   // Right Dock 终端 tab 拖出:既有会话进入画板。dock 的 tab 只列本地会话;
   // SSH 会话从 workspace overlay 的 shell tab 拖出(handleSshTerminalTabDragIntent)。
   const handleTerminalTabWorkbenchDragIntent = useCallback(
-    (session: TerminalSession, event: { pointerId: number; clientX: number; clientY: number }) => {
+    (
+      session: TerminalSession,
+      event: {
+        pointerId: number;
+        clientX: number;
+        clientY: number;
+        currentTarget?: EventTarget | null;
+      },
+    ) => {
       const projectPathKey = session.projectPathKey || workspaceProjectPathKey(session.cwd);
       const project = workspaceProjects.find(
         (entry) => workspaceProjectPathKey(entry.path) === projectPathKey,
@@ -2318,7 +2632,12 @@ export function ChatPage(props: ChatPageProps) {
 
   // 空态"新建终端"按钮拖出:落点新建终端 Pane(几何先行,PTY 由宿主异步建)。
   const handleNewTerminalWorkbenchDragIntent = useCallback(
-    (event: { pointerId: number; clientX: number; clientY: number }) => {
+    (event: {
+      pointerId: number;
+      clientX: number;
+      clientY: number;
+      currentTarget?: EventTarget | null;
+    }) => {
       if (!terminalProjectPath) return;
       const project = workspaceProjects.find(
         (entry) => workspaceProjectPathKey(entry.path) === terminalProjectPathKey,
@@ -2372,7 +2691,15 @@ export function ChatPage(props: ChatPageProps) {
   }, [handleWorkbenchClosePane, workbench]);
 
   const handleProjectWorkbenchDragIntent = useCallback(
-    (project: WorkspaceProject, event: { pointerId: number; clientX: number; clientY: number }) => {
+    (
+      project: WorkspaceProject,
+      event: {
+        pointerId: number;
+        clientX: number;
+        clientY: number;
+        currentTarget?: EventTarget | null;
+      },
+    ) => {
       beginWorkbenchDrag(
         {
           kind: "workspace",
@@ -2488,6 +2815,55 @@ export function ChatPage(props: ChatPageProps) {
     ],
   );
 
+  const handleOpenNewTerminalInWorkbenchSplit = useCallback(() => {
+    const target = resolveWorkbenchAutoDockTarget();
+    if (!target) {
+      addNotify("error", t("workbench.noSpaceForSplit"));
+      return;
+    }
+    if (!terminalProjectPath) return;
+    const project = workspaceProjects.find(
+      (entry) => workspaceProjectPathKey(entry.path) === terminalProjectPathKey,
+    );
+    commitTerminalDrop(
+      {
+        kind: "newTerminal",
+        project: {
+          projectId: project?.id ?? `project:${terminalProjectPathKey}`,
+          projectPathKey: terminalProjectPathKey,
+        },
+        title: t("projectTools.newTerminal"),
+      },
+      target,
+      {
+        layout: workbench.layoutRef.current,
+        sessions: terminalSessionsRef.current,
+        lease: terminalPaneLease,
+        bindings: terminalPaneBindings,
+        resolveProjectPath: (ref) =>
+          workspaceProjects.find((entry) => entry.id === ref.projectId)?.path ??
+          workspaceProjects.find(
+            (entry) => workspaceProjectPathKey(entry.path) === ref.projectPathKey,
+          )?.path ??
+          null,
+        createSurfaceId: createTerminalSurfaceId,
+        authorizeAutoLaunch: terminalPaneAutoLaunch.authorize,
+        openTerminalSurface: workbench.openTerminalSurface,
+        movePane: workbench.movePane,
+        focusPane: handleWorkbenchFocusPane,
+      },
+    );
+  }, [
+    addNotify,
+    handleWorkbenchFocusPane,
+    resolveWorkbenchAutoDockTarget,
+    t,
+    terminalProjectPath,
+    terminalProjectPathKey,
+    workbench,
+    workspaceProjects,
+  ]);
+
   // Native file drag hover: focus the conversation pane under the cursor for
   // visual and keyboard continuity. Final attachment ownership is carried by
   // the composer's data-file-upload-conversation-id marker at drop time.
@@ -2532,37 +2908,22 @@ export function ChatPage(props: ChatPageProps) {
       return;
     }
     workbenchPendingSelectRef.current = null;
-    const previousSynced = lastWorkbenchSyncedConversationRef.current;
-    lastWorkbenchSyncedConversationRef.current = currentConversationId;
-
-    // Workspace drop: the fresh draft conversation opens a NEW pane at the
-    // remembered drop target instead of rebinding the focused pane. The
-    // pending intent is one-shot and verified against the draft's workdir so
-    // a failed directory check can never misplace a later conversation.
-    const pendingWorkspaceOpen = pendingWorkspaceOpenRef.current;
-    if (pendingWorkspaceOpen && previousSynced !== currentConversationId) {
-      pendingWorkspaceOpenRef.current = null;
-      const draftWorkdir =
-        conversationRuntimeCacheRef.current.get(currentConversationId)?.workdir?.trim() || "";
-      const hasNoPane = !workbench.paneIdForConversation(currentConversationId);
-      if (
-        hasNoPane &&
-        draftWorkdir &&
-        workspaceProjectPathKey(draftWorkdir) === pendingWorkspaceOpen.projectPathKey
-      ) {
-        const opened = workbench.openConversation(
-          {
-            conversationId: currentConversationId,
-            project: {
-              projectId: pendingWorkspaceOpen.projectId,
-              projectPathKey: pendingWorkspaceOpen.projectPathKey,
-            },
-          },
-          pendingWorkspaceOpen.target,
-        );
-        if (opened) return;
-      }
+    // Workspace drop: keep normal sync paused for the whole operation, not
+    // merely its first render. Once startConversation resolves, the exact
+    // draft id replaces the temporary project-key match.
+    const pendingWorkspaceDrop = pendingWorkspaceDropRef.current;
+    const draftWorkdir =
+      conversationRuntimeCacheRef.current.get(currentConversationId)?.workdir?.trim() || "";
+    if (
+      shouldDeferWorkspaceDropConversationSync(
+        pendingWorkspaceDrop,
+        currentConversationId,
+        workspaceProjectPathKey(draftWorkdir),
+      )
+    ) {
+      return;
     }
+    lastWorkbenchSyncedConversationRef.current = currentConversationId;
     workbench.syncCurrentConversation(currentConversationId, conversationSurfaceProject);
   }, [currentConversationId, conversationSurfaceProject, conversationRuntimeCacheRef, workbench]);
 
@@ -2678,6 +3039,12 @@ export function ChatPage(props: ChatPageProps) {
       }
     }
   }, [workbench.layout]);
+  // 布局对账:终端 drop 事务在宿主挂载前同步占约,Pane 若在宿主接手
+  // release 前被关闭,租约会永久悬挂(dock 里永远隐藏该终端)。宿主持有
+  // 的租约在其卸载 cleanup 中先于本 effect 释放,不受影响。
+  useEffect(() => {
+    releaseOrphanTerminalPaneLeases(terminalPaneLease, workbench.layout);
+  }, [workbench.layout]);
   useEffect(
     () => () => {
       for (const controller of backgroundControllersRef.current.values()) {
@@ -2707,6 +3074,26 @@ export function ChatPage(props: ChatPageProps) {
     const paneSelectedValue = paneSelectedModel
       ? toModelValue(paneSelectedModel.customProviderId, paneSelectedModel.model)
       : undefined;
+    const paneProvider = paneSelectedModel
+      ? settings.customProviders.find((entry) => entry.id === paneSelectedModel.customProviderId)
+      : undefined;
+    const paneRuntimeControls = normalizeChatRuntimeControlsForProvider(
+      settings.chatRuntimeControls,
+      {
+        providerId: paneProvider?.type,
+        requestFormat: paneProvider?.requestFormat,
+        modelId: paneSelectedModel?.model,
+      },
+    );
+    const paneReasoningOptions = getChatRuntimeReasoningLevelsForProvider({
+      providerId: paneProvider?.type,
+      requestFormat: paneProvider?.requestFormat,
+      modelId: paneSelectedModel?.model,
+    });
+    const paneThinkingAlwaysOn = isThinkingAlwaysOnForModel(
+      paneProvider?.type ?? "claude_code",
+      paneSelectedModel?.model,
+    );
     const paneModelLabel = (() => {
       if (!paneSelectedModel) return t("chat.selectModel");
       const option = modelOptions.find((entry) => entry.value === paneSelectedValue);
@@ -2833,12 +3220,20 @@ export function ChatPage(props: ChatPageProps) {
         inputPlaceholder: t("chat.inputHint"),
         workdir: workspaceRoot ?? "",
         enabledSkills: enabledComposerSkills,
+        mentionableConversations,
+        searchMentionableConversations: (query) =>
+          searchMentionConversations({
+            query,
+            currentConversationId: conversationId,
+            currentWorkdir: workspaceRoot ?? "",
+          }),
+        mentionApps,
         executionMode: settings.system.executionMode,
         hasModels,
         currentModelLabel: paneModelLabel,
         modelOptions,
         selectedValue: paneSelectedValue,
-        chatRuntimeControls: chatRuntimeControlsForCurrentProvider,
+        chatRuntimeControls: paneRuntimeControls,
         commandSafetyMode: settings.system.commandSafetyMode,
         onCommandSafetyModeChange: (mode) =>
           setSettings((prev) =>
@@ -2846,10 +3241,11 @@ export function ChatPage(props: ChatPageProps) {
               ? prev
               : updateSystem(prev, { commandSafetyMode: mode }),
           ),
-        reasoningOptions: chatRuntimeReasoningOptions,
-        thinkingAlwaysOn: chatRuntimeThinkingAlwaysOn,
+        reasoningOptions: paneReasoningOptions,
+        thinkingAlwaysOn: paneThinkingAlwaysOn,
         contextUsageTokensSource: paneContextUsageTokensSource,
         contextWindow: paneContextWindow,
+        contextDisplayMode: settings.customSettings.composerContextDisplay,
         gitClient: tauriGitClient,
         workspaceActivityClient: tauriWorkspaceActivityClient,
         onOpenWorktree: handleOpenWorktree,
@@ -2863,6 +3259,9 @@ export function ChatPage(props: ChatPageProps) {
         onOpenSettings,
         onChatRuntimeControlsChange: focusGuard(handleChatRuntimeControlsChange),
         onPickReadableFiles: focusGuard(pickReadableFiles),
+        onPickWorkspaceFolder: focusGuard(() => {
+          void pickWorkspaceFolder(conversationId, workspaceRoot ?? "");
+        }),
         // Paste must not wait for pane focus: Cmd+Alt+Arrow / Tab can leave
         // the caret in this composer while currentConversationIdRef is still
         // the focused pane. Same explicit target as native drop.
@@ -2899,7 +3298,21 @@ export function ChatPage(props: ChatPageProps) {
             },
             binding:
               surface.conversationId === currentConversationId
-                ? primaryPaneBinding
+                ? {
+                    ...primaryPaneBinding,
+                    composer: {
+                      ...primaryPaneBinding.composer,
+                      // Keep Desktop aligned with Web: history hydration is a
+                      // real disabled state even when the workbench has more
+                      // than one pane, so typing cannot race stale history.
+                      isInputDisabled:
+                        isCompactionRunning ||
+                        isConversationHydrationFailed ||
+                        isImportingPastedText ||
+                        isUploadingFiles ||
+                        isConversationHydrating,
+                    },
+                  }
                 : buildBackgroundPaneBinding(surface),
           },
         ];
@@ -3000,7 +3413,12 @@ export function ChatPage(props: ChatPageProps) {
         onDragHandlePointerDown={(event) => {
           beginWorkbenchDrag(
             { kind: "pane", paneId: pane.paneId, surfaceKey: surfaceIdentityKey(surface), title },
-            { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY },
+            {
+              pointerId: event.pointerId,
+              clientX: event.clientX,
+              clientY: event.clientY,
+              currentTarget: event.currentTarget,
+            },
           );
         }}
       />
@@ -3057,10 +3475,20 @@ export function ChatPage(props: ChatPageProps) {
           const host = (
             <Suspense fallback={<PaneLoadingSkeleton label={t("app.loading")} />}>
               <RestorableConversationPaneHost
-                ref={isCurrent ? conversationPaneHostRef : undefined}
+                ref={
+                  isCurrent
+                    ? (handle) => {
+                        // Callback ref assigns on attach and ignores the null
+                        // detach. Swapping an object ref between two mounted
+                        // hosts is order-dependent: the outgoing pane's detach
+                        // can run after the incoming attach and leave
+                        // composerRef permanently null, so Enter in the newly
+                        // focused pane sends an empty draft.
+                        if (handle) conversationPaneHostRef.current = handle;
+                      }
+                    : undefined
+                }
                 paneId={pane.paneId}
-                conversationId={conversationId}
-                project={surface.project}
                 title={sidebarConversationsById.get(conversationId)?.title}
                 deferHydration={!paneContext.isFocused}
               />
@@ -3095,12 +3523,7 @@ export function ChatPage(props: ChatPageProps) {
   ) : (
     <ConversationPaneHostEnvironmentProvider value={conversationPaneHostEnvironment}>
       <Suspense fallback={<PaneLoadingSkeleton label={t("app.loading")} />}>
-        <ConversationPaneHost
-          ref={conversationPaneHostRef}
-          paneId="root-conversation-pane"
-          conversationId={currentConversationId}
-          project={conversationSurfaceProject}
-        />
+        <ConversationPaneHost ref={conversationPaneHostRef} paneId="root-conversation-pane" />
       </Suspense>
     </ConversationPaneHostEnvironmentProvider>
   );
@@ -3134,6 +3557,7 @@ export function ChatPage(props: ChatPageProps) {
       {/* ---- Left column: navigation/sidebar ---- */}
       <ChatSidebarContainer
         store={sidebarStore}
+        approvalStore={conversationRuntimeRegistry.approvals}
         currentConversationId={currentConversationId}
         isOpen={sidebarOpen}
         fontScale={settings.customSettings.fontScale.sidebar}
@@ -3227,14 +3651,12 @@ export function ChatPage(props: ChatPageProps) {
             ) : null
           }
           trailingActions={
-            <>
-              <ProjectToolsPanelToggle
-                isOpen={rightDockOpen}
-                sessionCount={projectTerminalSessions.length}
-                disabledMessage={terminalDisabledMessage}
-                onToggle={() => setRightDockOpen((open) => !open)}
-              />
-            </>
+            <ProjectToolsPanelToggle
+              isOpen={rightDockOpen}
+              sessionCount={projectTerminalSessions.length}
+              disabledMessage={terminalDisabledMessage}
+              onToggle={() => setRightDockOpen((open) => !open)}
+            />
           }
           overlay={<NotifyToast items={notifyItems} onDismiss={dismissNotify} />}
         />
@@ -3355,6 +3777,9 @@ export function ChatPage(props: ChatPageProps) {
         fontScale={settings.customSettings.fontScale.rightDock}
         projectPathKey={terminalProjectPathKey}
         cwd={terminalProjectPath}
+        workspaceProject={activeWorkspaceProject}
+        workspaceProjectRootClient={desktopWorkspaceProjectRootClient}
+        workspaceRootRevision={workspaceRootRevision}
         sessions={terminalSessions}
         sessionsLoaded={terminalSessionsLoaded}
         leasedSessionIds={leasedDockSessionIds}
@@ -3388,6 +3813,9 @@ export function ChatPage(props: ChatPageProps) {
         }
         onOpenTerminalInWorkbench={
           sessionWorkbench.enabled ? handleOpenTerminalInWorkbenchSplit : undefined
+        }
+        onOpenNewTerminalInWorkbench={
+          sessionWorkbench.enabled ? handleOpenNewTerminalInWorkbenchSplit : undefined
         }
         onSessionGhost={verifyTerminalSessionAlive}
         onInsertFileMention={handleRightDockInsertFileMention}

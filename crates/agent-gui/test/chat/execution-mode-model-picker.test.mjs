@@ -84,7 +84,9 @@ test("model selection closes the popover while group controls keep it open", () 
 
 test("model pickers search models and providers", () => {
   for (const source of pickerSources) {
-    assert.match(source, /initialFocus=\{searchInputRef\}/);
+    assert.match(source, /initialFocus=\{resolveModelPickerInitialFocus\}/);
+    assert.match(source, /openType === "touch"/);
+    assert.match(source, /searchInputRef\.current/);
     assert.match(source, /placeholder=\{t\("chat\.searchModel"\)\}/);
     assert.match(source, /\w+\.model\.toLowerCase\(\)\.includes\(normalizedSearch\)/);
     assert.match(source, /\w+\.providerName\.toLowerCase\(\)\.includes\(normalizedSearch\)/);
@@ -111,10 +113,28 @@ test("provider groups reveal the edit affordance before the count on hover", () 
 
 test("upload stays leftmost before model controls in the composer toolbar", () => {
   assert.match(composerSource, /<ComposerModelControls/);
-  assert.match(composerSource, /<RuntimeControlTooltip label=\{uploadTooltip\}>/);
+  // 上传入口是 Codex 风格的 + 菜单。触发键按菜单可用性禁用(aria-label 用
+  // addMenuTooltip),上传专属限制(需要 workdir 等)下沉到上传菜单项自身——
+  // plan 开关不依赖上传前置条件,不得被 uploadDisabled 连坐锁死。
+  assert.match(composerSource, /aria-label=\{addMenuTooltip\}/);
+  assert.match(composerSource, /disabled=\{composerAddMenuDisabled\}/);
+  assert.match(composerSource, /onSelect=\{onPickReadableFiles\}\s+disabled=\{uploadDisabled\}/);
+  assert.match(composerSource, /onSelect=\{onPickWorkspaceFolder\}\s+disabled=\{uploadDisabled\}/);
+  assert.match(composerSource, /chat\.upload\.files/);
+  assert.match(composerSource, /chat\.upload\.folder/);
+  assert.match(composerSource, /<FolderOpen/);
+  assert.doesNotMatch(composerSource, /chat\.upload\.filesAndFolders/);
+  assert.match(composerSource, /<CommandSafetyModeSelector/);
   assert.ok(
-    composerSource.indexOf("<RuntimeControlTooltip label={uploadTooltip}>") <
+    composerSource.indexOf("aria-label={addMenuTooltip}") <
+      composerSource.indexOf("<CommandSafetyModeSelector"),
+  );
+  assert.ok(
+    composerSource.indexOf("<CommandSafetyModeSelector") <
       composerSource.indexOf("<ComposerModelControls"),
+  );
+  assert.ok(
+    composerSource.indexOf("<ComposerModelControls") < composerSource.indexOf("<GitBranchSelector"),
   );
   assert.doesNotMatch(headerSource, /model-selector-trigger|Popover\.Root|currentModelLabel/);
 
@@ -122,9 +142,12 @@ test("upload stays leftmost before model controls in the composer toolbar", () =
     assert.match(source, /aria-label=\{t\("chat\.runtime\.controls"\)\}/);
     assert.match(source, /nativeWebSearchEnabled: !chatRuntimeControls\.nativeWebSearchEnabled/);
     assert.match(source, /thinkingEnabled: !chatRuntimeControls\.thinkingEnabled/);
-    assert.match(source, /onChatRuntimeControlsChange\(\{ reasoning:/);
-    assert.match(source, /reasoningOptions\.length > 0 \? "grid-cols-3" : "grid-cols-2"/);
-    assert.match(source, /className="h-8 w-full min-w-0 gap-0\.5/);
+    assert.match(source, /thinkingEnabled: true, reasoning: level/);
+    assert.match(source, /thinkingEnabled: false/);
+    assert.match(source, /type="range"/);
+    assert.match(source, /model-runtime-effort/);
+    assert.doesNotMatch(source, /from "@liveagent\/ui\/components\/ui\/select"/);
+    assert.doesNotMatch(source, /from "@liveagent\/ui\/components\/ui\/switch"/);
   }
 });
 

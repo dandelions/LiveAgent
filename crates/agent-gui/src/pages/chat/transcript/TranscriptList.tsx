@@ -1,6 +1,7 @@
 import { ContextCheckpointCard } from "@liveagent/ui/components/chat/ContextCheckpointCard";
 import { normalizeLiveToolStatus } from "@liveagent/ui/lib/chat/assistantStatus";
 import type { ChatFileLink } from "@liveagent/ui/lib/chat/chatFileLinks";
+import type { ConversationMentionReference } from "@liveagent/ui/lib/chat/mentionReferences";
 import type { PendingUploadedFile } from "@liveagent/ui/lib/chat/uploadedFiles";
 import { useCommitDetailsLoader } from "@liveagent/ui/lib/chat/useCommitDetailsLoader";
 import type { GitClient } from "@liveagent/ui/lib/git/types";
@@ -48,8 +49,11 @@ function buildVersionedTranscriptLayoutKey(viewportWidth: number, contentWidth: 
 
 // Measured row heights survive conversation switches: saved on unmount,
 // restored (width-gated) on the next open so the switch lays out with exact
-// heights instead of estimates.
-const transcriptMeasurementsLru = createTranscriptMeasurementsLru();
+// heights instead of estimates. Persisted so revisited conversations skip
+// the estimate→measure correction churn across app restarts too.
+const transcriptMeasurementsLru = createTranscriptMeasurementsLru({
+  persistNamespace: "gui-transcript",
+});
 
 const SummaryCard = memo(function SummaryCard(props: { item: RenderSummaryCard }) {
   const { item } = props;
@@ -94,6 +98,7 @@ export type TranscriptListProps = {
     messageRef: HistoryMessageRef,
     text: string,
     attachments: PendingUploadedFile[],
+    referencedConversations: ConversationMentionReference[],
   ) => void;
   onBranchConversation?: (messageRef: HistoryMessageRef) => void;
   // Fires once per mount, when the first layout has settled (scroll offset
@@ -223,6 +228,17 @@ export const TranscriptList = memo(function TranscriptList(props: TranscriptList
     // virtualizer's bottom correction and leaves live growth to useScrollFollow.
     anchorTo: viewportFollowing ? "start" : "end",
     scrollEndThreshold: 8,
+    // Above-viewport estimate corrections are absorbed into the layout
+    // origin instead of written to scrollTop: on WKWebView the compositor
+    // owns the viewport during a wheel gesture and can silently swallow
+    // programmatic scrolls, leaving the virtualizer rendering a window the
+    // viewport never reached (a blank band until the next scroll). The debt
+    // settles with one verified write when scrolling is idle.
+    scrollAnchoring: "origin",
+    // WKWebView paints compositor scrolls ahead of the main thread; keep
+    // roughly a half viewport of pre-rendered rows toward the scroll
+    // direction so fast wheel ticks reveal content instead of blank space.
+    directionalOverscanPx: 480,
     rangeExtractor: extractVirtualRange,
   });
 
