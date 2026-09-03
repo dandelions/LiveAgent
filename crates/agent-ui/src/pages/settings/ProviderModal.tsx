@@ -3,6 +3,7 @@ import {
   type CodexRequestFormat,
   type CustomProvider,
   getDefaultUsageQueryConfig,
+  normalizeProviderModelConfigs,
   PROVIDER_RETRY_DEFAULT_MAX_RETRIES,
   PROVIDER_RETRY_MAX_RETRIES_LIMITS,
   type PromptCacheHintMode,
@@ -14,10 +15,15 @@ import { useConfirmDialog } from "@liveagent/ui/components/ui/confirm-dialog";
 import { useVerticalListReorder } from "@liveagent/ui/components/ui/useVerticalListReorder";
 import { useLocale } from "@liveagent/ui/i18n/index";
 import {
+  buildCliIdentityHeaders,
+  type CliIdentityProviderId,
   CustomHeaderImportError,
   type CustomHeaderImportErrorCode,
   type CustomHeaderImportIssue,
   getCustomHeaderKeyPresets,
+  isReservedCustomHeaderKey,
+  isValidCustomHeaderKey,
+  isValidCustomHeaderValue,
   mergeImportedCustomHeaders,
   parseCustomHeadersImport,
 } from "@liveagent/ui/lib/providers/customHeaders";
@@ -28,6 +34,7 @@ import {
 } from "@liveagent/ui/lib/providers/modelVendor";
 import {
   applyModelBulkActiveState,
+  applyModelInputModalitiesMode,
   applyUsageQueryModePreset,
   buildProviderModelsFetchKey,
   clampUsageQueryTimeoutSecs,
@@ -36,11 +43,13 @@ import {
   detectCodingPlanProvider,
   fetchModelsFromApi,
   getModelBulkActionCounts,
+  getModelInputModalitiesMode,
   getPersistedUsageQueryProviderId,
   isGatewayWebuiRuntime,
+  type ModelInputModalitiesMode,
   matchBalanceProviders,
   mergeFetchedModels,
-  normalizeFetchedModels,
+  providerSupportsModelInputModalitiesOverride,
   requiresCustomUsageQueryConfirmation,
   serializeUsageQueryDraft,
 } from "@liveagent/ui/pages/settings/providerUtils";
@@ -134,12 +143,28 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
   const [customHeaders, setCustomHeaders] = useState(() =>
     (initialData?.customHeaders ?? []).map((header) => ({ ...header })),
   );
+  // 只有真会发出去的头才参与请求与去重 key：半截键名/保留头在 mergeCustomHeaders
+  // 里本就会被丢掉，让它们触发重新拉取只是白等 900ms 换回同一份结果。
+  const effectiveCustomHeaders = useMemo(
+    () =>
+      customHeaders.filter(
+        (header) =>
+          isValidCustomHeaderKey(header.key) &&
+          isValidCustomHeaderValue(header.value) &&
+          !isReservedCustomHeaderKey(header.key),
+      ),
+    [customHeaders],
+  );
   const [headerImportOpen, setHeaderImportOpen] = useState(false);
   const [headerImportText, setHeaderImportText] = useState("");
   const [headerImportError, setHeaderImportError] = useState<HeaderImportErrorCode | null>(null);
   const [headerImportSummary, setHeaderImportSummary] = useState<HeaderImportSummary | null>(null);
   const [models, setModels] = useState<ProviderModelConfig[]>(() =>
-    normalizeFetchedModels(initialData?.models ?? [], providerType),
+    // 弹窗初始化处理的是已持久化的模型配置，必须走持久化归一化（保留
+    // contextWindow/maxOutputToken/limitsSource/inputModalities 等用户字段）；
+    // normalizeFetchedModels 只用于供应商 API 刷新结果（如 Gemini 的
+    // inputTokenLimit 字段形状），混用会在“打开并保存”往返中重置用户配置。
+    normalizeProviderModelConfigs(initialData?.models ?? [], providerType),
   );
   const [modelOrder, setModelOrder] = useState<string[] | undefined>(() =>
     initialData?.modelOrder ? [...initialData.modelOrder] : undefined,
@@ -301,6 +326,7 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
           isFullUrl,
           modelsUrl,
           providerId: initialData?.id,
+          customHeaders: effectiveCustomHeaders,
         });
         const mergedModels = mergeFetchedModels(list, modelsRef.current);
         commitModelsWithNewRowsRef.current(mergedModels);
@@ -310,7 +336,7 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
         setFetchingModels(false);
       }
     },
-    [initialData?.id, isFullUrl, modelsUrl, providerType, useSystemProxy],
+    [effectiveCustomHeaders, initialData?.id, isFullUrl, modelsUrl, providerType, useSystemProxy],
   );
 
   useEffect(() => {
@@ -323,6 +349,7 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
       useSystemProxy,
       isFullUrl,
       trimModelsUrl,
+      effectiveCustomHeaders,
     );
     if ((!trimUrl && !trimModelsUrl) || !trimKey) return;
     if (key === prevFetchKey.current) return;
@@ -336,7 +363,15 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [apiKeyForRequest, baseUrl, doFetch, isFullUrl, modelsUrl, useSystemProxy]);
+  }, [
+    apiKeyForRequest,
+    baseUrl,
+    doFetch,
+    effectiveCustomHeaders,
+    isFullUrl,
+    modelsUrl,
+    useSystemProxy,
+  ]);
 
   useEffect(() => {
     if (!modelOrder) return;
@@ -562,8 +597,24 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
   const editingModelMaxOutputToken = editingModel
     ? parsePositiveInteger(editingModel.maxOutputToken)
     : null;
+  const canOverrideModelInputModalities =
+    providerSupportsModelInputModalitiesOverride(providerType);
+  const editingModelInputModalitiesMode = editingModel
+    ? getModelInputModalitiesMode(editingModel.model)
+    : "auto";
   const canSaveEditingModel =
     editingModelContextWindow !== null && editingModelMaxOutputToken !== null;
+
+  function setEditingModelInputModalitiesMode(mode: ModelInputModalitiesMode) {
+    setEditingModel((prev) =>
+      prev
+        ? {
+            ...prev,
+            model: applyModelInputModalitiesMode(prev.model, mode),
+          }
+        : prev,
+    );
+  }
 
   function saveInlineModelSettings() {
     if (
@@ -633,6 +684,22 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
     setHeaderImportOpen(false);
     setHeaderImportText("");
     setHeaderImportError(null);
+  }
+
+  // 一键模拟：把选中 CLI 的身份头并入现有列表。走与「导入」同一条合并路径，
+  // 同名头覆盖、其余保留，用户手工加的业务头不会被这一下清掉。
+  function applyCliIdentityHeaders(identity: CliIdentityProviderId) {
+    const merged = mergeImportedCustomHeaders(customHeaders, buildCliIdentityHeaders(identity));
+    setCustomHeaders(merged.headers);
+    setHeaderSuggest(null);
+    setHeaderValidationSubmitted(false);
+    setHeaderImportOpen(false);
+    setHeaderImportError(null);
+    setHeaderImportSummary({
+      importedCount: merged.importedCount,
+      overwrittenCount: merged.overwrittenCount,
+      issues: [],
+    });
   }
 
   function handleImportCustomHeaders() {
@@ -904,15 +971,18 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
     apiKeyForRequest,
     apiKeyIsRedactedDisplay,
     applyHeaderSuggestion,
+    applyCliIdentityHeaders,
     applyModelBulkState,
     baseUrl,
     canSaveEditingModel,
+    canOverrideModelInputModalities,
     cancelCustomHeaderImport,
     commitUsageTimeoutInput,
     customHeaders,
     draggingModelId,
     editingModel,
     editingModelContextWindow,
+    editingModelInputModalitiesMode,
     editingModelMaxOutputToken,
     exitModelBulkMode,
     fetchError,
@@ -973,6 +1043,7 @@ function useProviderModalController({ providerType, initialData, onSave, onClose
     setApiKey,
     setBaseUrl,
     setEditingModel,
+    setEditingModelInputModalitiesMode,
     setHeaderImportError,
     setHeaderImportOpen,
     setHeaderImportSummary,

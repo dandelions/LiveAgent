@@ -463,6 +463,11 @@ export const EN_US_SETTINGS_TRANSLATIONS = {
   "settings.customHeaderKeyPlaceholder": "Header name",
   "settings.addCustomHeader": "Add",
   "settings.importCustomHeaders": "Import",
+  "settings.cliIdentityHeaders": "Mimic CLI",
+  "settings.cliIdentityHeadersHint": "Fill in official CLI identity headers",
+  "settings.cliIdentity.claude_code": "Claude Code",
+  "settings.cliIdentity.codex": "Codex",
+  "settings.cliIdentity.xai": "Grok",
   "settings.customHeaderImportLabel": "JSON / cURL",
   "settings.customHeaderImportPlaceholder": "Paste JSON or cURL",
   "settings.cancelCustomHeaderImport": "Cancel",
@@ -635,6 +640,16 @@ export const EN_US_SETTINGS_TRANSLATIONS = {
   "settings.estimatedLimitsBadge": "Estimated",
   "settings.contextWindow": "Context Window",
   "settings.maxOutputToken": "Max Output Token",
+  "settings.modelInputModalities": "Input capabilities",
+  "settings.modelInputModalitiesAuto": "Auto-detect (recommended)",
+  "settings.modelInputModalitiesText": "Text only",
+  "settings.modelInputModalitiesTextImage": "Text and images",
+  "settings.modelInputModalitiesHint":
+    "Uses the model name and built-in catalog by default. Override only when the provider capability differs.",
+  "settings.modelModalityImage": "Supports image input",
+  "settings.modelModalityAudio": "Supports audio input",
+  "settings.modelModalityVideo": "Supports video input",
+  "settings.modelModalityPdf": "Supports PDF input",
   "settings.positiveIntegerRequired": "Please enter a positive integer",
   "settings.add": "Add",
   "settings.cancel": "Cancel",
@@ -667,6 +682,12 @@ export const EN_US_SETTINGS_TRANSLATIONS = {
   "settings.commitMessageModelHint":
     "Model used to generate commit messages in Git review. Follows the current chat model when unselected or unavailable.",
   "settings.customSettingsModelEmpty": "No active models are configured for the current providers.",
+  "settings.promptClarifyTitle": "Clarify prompt",
+  "settings.promptClarifyToggleHint":
+    "The composer's Clarify prompt button refines a draft through follow-up questions. Turning this off hides the button on both the desktop and web composers.",
+  "settings.promptClarifyModel": "Clarify model",
+  "settings.promptClarifyModelHint":
+    "Model used for clarify questions and the final prompt. Follows the current chat model when unselected or unavailable.",
   "settings.composerContextDisplay": "Context usage display",
   "settings.composerContextDisplayHint":
     "Choose how the composer shows context usage. Every mode keeps the manual compaction entry at ≥50% usage.",
@@ -1322,4 +1343,8 @@ export const EN_US_SETTINGS_TRANSLATIONS = {
   "settings.cuaDriver.groupBehavior": "Behavior",
   "settings.cuaDriver.permissionsChecking": "Checking permissions…",
   "settings.cuaDriver.permissionsUnknown": "Status unavailable",
+  "settings.cuaDriver.desktopOnlyInstall":
+    "Install from the desktop app: the script is downloaded and run on the desktop host, and the person at that machine has to review the full command first.",
+  "settings.cuaDriver.desktopOnlyGrant":
+    "Grant from the desktop app: the system permission dialogs only appear on the desktop host's screen.",
 } as const satisfies Record<string, string>;

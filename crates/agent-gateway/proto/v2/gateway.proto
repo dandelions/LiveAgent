@@ -67,6 +67,8 @@ message GatewayEnvelope {
     CheckpointRequest checkpoint = 98;
     TrajectoryFetchRequest trajectory_fetch = 99;
     InstalledAppsListRequest installed_apps_list = 100;
+    ClarifyTurnRequest clarify_turn = 101;
+    CuaDriverRequest cua_driver = 102;
   }
 
   // Legacy tunnel control/frame payloads (pre-rewrite protocol) and the
@@ -147,6 +149,8 @@ message AgentEnvelope {
     CheckpointResponse checkpoint_resp = 103;
     TrajectoryFetchResponse trajectory_fetch_resp = 104;
     InstalledAppsListResponse installed_apps_list_resp = 105;
+    ClarifyTurnResponse clarify_turn_resp = 106;
+    CuaDriverResponse cua_driver_resp = 107;
   }
 
   // Legacy tunnel control/frame payloads (pre-rewrite protocol) and the
@@ -170,12 +174,30 @@ message ChatRuntimeControls {
   bool plan_mode_enabled = 4;
 }
 
+// 澄清轮次（Web 计划 2）：浏览器经 gateway 转发到桌面 agent 的一次纯文本补全。
+// messages 走 JSON 字符串（ClarifyMessage[]，见 agent-ui clarifyTypes），system
+// 提示词（含工作区上下文）已在 Web 侧拼入 messages，无需单独字段；provider/
+// model/runtime 由 Web 当前选中下发，桌面端按 provider_id 查本地配置构造 runtime。
+message ClarifyTurnRequest {
+  string messages_json = 1;
+  string provider_id = 2;
+  string model = 3;
+  ChatRuntimeControls runtime_controls = 4;
+}
+
+message ClarifyTurnResponse {
+  string final_text = 1;
+  string error_code = 2;
+  string error_message = 3;
+}
+
 message ChatUploadedFile {
   string relative_path = 1;
   string absolute_path = 2;
   string file_name = 3;
   string kind = 4;
   int64 size_bytes = 5;
+  string dedupe_key = 6;
 }
 
 message UploadReadableFile {
@@ -1116,6 +1138,26 @@ message InstalledAppsListResponse {
   repeated InstalledAppEntry apps = 1;
 }
 
+// Computer Use（CUA）驱动的只读引导状态，供 WebUI 的 Computer Use 设置页
+// 展示桌面宿主上装没装 cua-driver、macOS 的 TCC 授权给了没有。Gateway 只
+// 直通转发，不自己探测。
+//
+// 安装与授权**有意不在这条通道上**：安装是在宿主上联网下载并执行 shell
+// 脚本，授权会在宿主屏幕上弹 macOS 系统对话框——浏览器这端的人既确认不了
+// 前者的命令全文，也点不到后者的弹窗，只能在桌面端做。
+message CuaDriverRequest {
+  // "probe" | "permissions_status"。写动作不走这里，网关侧亦按白名单拒绝。
+  string action = 1;
+}
+
+message CuaDriverResponse {
+  string action = 1;
+  // 与桌面 invoke 同一份序列化：services/cua_driver 的 CuaDriverProbe /
+  // CuaDriverPermissions（camelCase）。走 JSON 而不是在 proto 里再刻一份
+  // 结构化镜像，是为了让两端拿到的就是同一个对象，不会各自漂移。
+  string result_json = 2;
+}
+
 message FsRoot {
   string id = 1;
   string path = 2;
@@ -1294,6 +1336,18 @@ message ErrorResponse {
   string message = 2;
 }
 
+message ProviderCustomHeader {
+  string name = 1;
+  string value = 2;
+}
+
+// 包一层 message 只为拿到字段存在性：repeated 无法区分「草稿没带」与「草稿把头
+// 清空了」，而这两种情况在已保存供应商分支上的处理相反（前者沿用落库的头，
+// 后者按空集发请求）。与 is_full_url 的 optional 同一套三态语义。
+message ProviderCustomHeaders {
+  repeated ProviderCustomHeader headers = 1;
+}
+
 message ProviderModelsRequest {
   string provider_type = 1;
   string base_url = 2;
@@ -1305,6 +1359,9 @@ message ProviderModelsRequest {
   string provider_id = 6;
   // 当前草稿是否把 base_url 作为完整聊天端点解释；未提供时沿用已保存配置。
   optional bool is_full_url = 7;
+  // 用户在供应商设置里显式配置的自定义请求头；未提供时沿用已保存配置。
+  // 鉴权头与 host/content-length 等仍由落地侧的保留头名单兜底，不可被覆盖。
+  ProviderCustomHeaders custom_headers = 8;
 }
 
 message ProviderModelsResponse {

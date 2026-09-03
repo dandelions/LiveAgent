@@ -511,16 +511,27 @@ pub async fn handle_provider_models(
 ) -> Result<proto::ProviderModelsResponse, String> {
     let provider_type = request.provider_type.trim().to_string();
     let request_api_key = request.api_key.trim().to_string();
+    // message 字段带存在性：未设置=草稿没带头，沿用落库配置；设置了（哪怕是空
+    // 列表）=草稿的头就是权威值。
+    let request_custom_headers = request.custom_headers.as_ref().map(|headers| {
+        headers
+            .headers
+            .iter()
+            .map(|header| (header.name.clone(), header.value.clone()))
+            .collect::<Vec<_>>()
+    });
     let config = if request_api_key.is_empty() {
         let provider_id = request.provider_id.trim().to_string();
         let expected_provider_type = provider_type.clone();
         let is_full_url = request.is_full_url;
+        let custom_headers = request_custom_headers.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let conn = open_db()?;
             resolve_stored_provider_models_config(
                 &provider_id,
                 &expected_provider_type,
                 is_full_url,
+                custom_headers,
                 load_providers(&conn)?,
             )
         })
@@ -535,6 +546,7 @@ pub async fn handle_provider_models(
             models_url: Some(request.models_url.trim().to_string())
                 .filter(|value| !value.is_empty()),
             is_full_url: request.is_full_url.unwrap_or(false),
+            custom_headers: request_custom_headers.unwrap_or_default(),
         }
     };
     let models_json = crate::services::provider_models::fetch_provider_models(
@@ -544,6 +556,7 @@ pub async fn handle_provider_models(
         config.use_system_proxy,
         config.models_url.as_deref(),
         config.is_full_url,
+        &config.custom_headers,
     )
     .await?;
     Ok(proto::ProviderModelsResponse { models_json })
@@ -557,12 +570,14 @@ struct ProviderModelsRequestConfig {
     use_system_proxy: bool,
     models_url: Option<String>,
     is_full_url: bool,
+    custom_headers: Vec<(String, String)>,
 }
 
 fn resolve_stored_provider_models_config(
     provider_id: &str,
     expected_provider_type: &str,
     is_full_url: Option<bool>,
+    custom_headers: Option<Vec<(String, String)>>,
     providers: Option<Value>,
 ) -> Result<ProviderModelsRequestConfig, String> {
     let provider_id = provider_id.trim();
@@ -617,6 +632,22 @@ fn resolve_stored_provider_models_config(
                 .get("isFullUrl")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
+        }),
+        custom_headers: custom_headers.unwrap_or_else(|| {
+            provider
+                .get("customHeaders")
+                .and_then(Value::as_array)
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|header| {
+                            let key = header.get("key").and_then(Value::as_str)?.trim();
+                            let value = header.get("value").and_then(Value::as_str)?;
+                            (!key.is_empty()).then(|| (key.to_string(), value.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
         }),
     })
 }
@@ -684,6 +715,41 @@ pub async fn handle_installed_apps_list(
                 icon_data_url: app.icon_data_url.unwrap_or_default(),
             })
             .collect(),
+    })
+}
+
+/// Computer Use 设置页的只读引导状态（WebUI）。两个 action 与桌面端的
+/// `cua_driver_probe` / `cua_driver_permissions_status` 两条命令一一对应，
+/// 返回的 JSON 就是那两条命令的返回值本身——设置页在两端读到的是同一个对象。
+///
+/// 只接只读 action：安装（联网执行安装脚本）与授权（在宿主屏幕上弹 TCC
+/// 对话框）是桌面本机动作，浏览器那端既确认不了命令全文也点不到弹窗，
+/// 网关侧同样按白名单拒绝，这里再兜一次底。
+pub async fn handle_cua_driver(
+    request: proto::CuaDriverRequest,
+) -> Result<proto::CuaDriverResponse, String> {
+    let action = request.action.trim().to_string();
+    let result = match action.as_str() {
+        "probe" => tauri::async_runtime::spawn_blocking(crate::services::cua_driver::probe)
+            .await
+            .map_err(|e| format!("gateway cua driver probe join failed: {e}"))
+            .and_then(|probe| {
+                serde_json::to_string(&probe).map_err(|e| format!("cua driver probe encode: {e}"))
+            })?,
+        "permissions_status" => {
+            tauri::async_runtime::spawn_blocking(crate::services::cua_driver::permissions_status)
+                .await
+                .map_err(|e| format!("gateway cua driver permissions join failed: {e}"))
+                .and_then(|permissions| {
+                    serde_json::to_string(&permissions)
+                        .map_err(|e| format!("cua driver permissions encode: {e}"))
+                })?
+        }
+        other => return Err(format!("unsupported cua driver action: {other}")),
+    };
+    Ok(proto::CuaDriverResponse {
+        action,
+        result_json: result,
     })
 }
 
@@ -1060,6 +1126,7 @@ pub async fn handle_upload_readable_files(
             .map(|file| proto::ChatUploadedFile {
                 relative_path: file.relative_path,
                 absolute_path: file.absolute_path,
+                dedupe_key: file.dedupe_key.unwrap_or_default(),
                 file_name: file.file_name,
                 kind: file.kind,
                 size_bytes: i64::try_from(file.size_bytes).unwrap_or(i64::MAX),
@@ -1879,8 +1946,14 @@ mod tests {
             "useSystemProxy": true
         }]);
         assert_eq!(
-            resolve_stored_provider_models_config("provider-a", "codex", None, Some(providers))
-                .expect("stored provider config"),
+            resolve_stored_provider_models_config(
+                "provider-a",
+                "codex",
+                None,
+                None,
+                Some(providers),
+            )
+            .expect("stored provider config"),
             super::ProviderModelsRequestConfig {
                 provider_type: "codex".to_string(),
                 base_url: "https://stored.example.com/v1/responses".to_string(),
@@ -1888,7 +1961,58 @@ mod tests {
                 use_system_proxy: true,
                 models_url: Some("https://stored.example.com/models".to_string()),
                 is_full_url: true,
+                custom_headers: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn provider_models_custom_headers_fall_back_to_stored_only_when_draft_omits_them() {
+        let providers = json!([{
+            "id": "provider-a",
+            "type": "codex",
+            "baseUrl": "https://stored.example.com",
+            "apiKey": "stored-secret",
+            "customHeaders": [{ "key": "User-Agent", "value": "stored-cli/1.0" }]
+        }]);
+
+        // 草稿没带请求头（proto 的 custom_headers 缺省）→ 沿用落库配置。
+        let inherited = resolve_stored_provider_models_config(
+            "provider-a",
+            "codex",
+            None,
+            None,
+            Some(providers.clone()),
+        )
+        .expect("stored provider config");
+        assert_eq!(
+            inherited.custom_headers,
+            vec![("User-Agent".to_string(), "stored-cli/1.0".to_string())]
+        );
+
+        // 草稿把请求头清空了 → 按空集发，绝不回落到落库配置（否则用户删不掉伪装头）。
+        let cleared = resolve_stored_provider_models_config(
+            "provider-a",
+            "codex",
+            None,
+            Some(Vec::new()),
+            Some(providers.clone()),
+        )
+        .expect("stored provider config");
+        assert!(cleared.custom_headers.is_empty());
+
+        // 草稿显式给了头 → 覆盖落库配置。
+        let overridden = resolve_stored_provider_models_config(
+            "provider-a",
+            "codex",
+            None,
+            Some(vec![("User-Agent".to_string(), "draft-cli/2.0".to_string())]),
+            Some(providers),
+        )
+        .expect("stored provider config");
+        assert_eq!(
+            overridden.custom_headers,
+            vec![("User-Agent".to_string(), "draft-cli/2.0".to_string())]
         );
     }
 
@@ -1905,6 +2029,7 @@ mod tests {
             "provider-a",
             "codex",
             Some(true),
+            None,
             Some(providers),
         )
         .expect("stored provider config with draft full URL mode");
@@ -1922,8 +2047,14 @@ mod tests {
             "apiKey": "stored-secret"
         }]);
         assert_eq!(
-            resolve_stored_provider_models_config("provider-a", "codex", None, Some(providers))
-                .expect_err("provider type mismatch"),
+            resolve_stored_provider_models_config(
+                "provider-a",
+                "codex",
+                None,
+                None,
+                Some(providers),
+            )
+            .expect_err("provider type mismatch"),
             "供应商类型与已保存配置不匹配"
         );
     }

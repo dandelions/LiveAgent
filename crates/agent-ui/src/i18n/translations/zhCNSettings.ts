@@ -443,6 +443,11 @@ export const ZH_CN_SETTINGS_TRANSLATIONS = {
   "settings.customHeaderKeyPlaceholder": "请求头名称",
   "settings.addCustomHeader": "添加",
   "settings.importCustomHeaders": "导入",
+  "settings.cliIdentityHeaders": "模拟 CLI",
+  "settings.cliIdentityHeadersHint": "一键写入官方 CLI 身份请求头",
+  "settings.cliIdentity.claude_code": "Claude Code",
+  "settings.cliIdentity.codex": "Codex",
+  "settings.cliIdentity.xai": "Grok",
   "settings.customHeaderImportLabel": "JSON / cURL",
   "settings.customHeaderImportPlaceholder": "粘贴 JSON 或 cURL",
   "settings.cancelCustomHeaderImport": "取消",
@@ -609,6 +614,16 @@ export const ZH_CN_SETTINGS_TRANSLATIONS = {
   "settings.estimatedLimitsBadge": "估计值",
   "settings.contextWindow": "Context Window",
   "settings.maxOutputToken": "Max Output Token",
+  "settings.modelInputModalities": "输入能力",
+  "settings.modelInputModalitiesAuto": "自动推断（推荐）",
+  "settings.modelInputModalitiesText": "仅文本",
+  "settings.modelInputModalitiesTextImage": "文本与图片",
+  "settings.modelInputModalitiesHint":
+    "默认按模型名称和内置目录推断；仅在供应商能力与推断不一致时手动覆盖。",
+  "settings.modelModalityImage": "支持图片输入",
+  "settings.modelModalityAudio": "支持音频输入",
+  "settings.modelModalityVideo": "支持视频输入",
+  "settings.modelModalityPdf": "支持 PDF 输入",
   "settings.positiveIntegerRequired": "请输入大于 0 的整数",
   "settings.add": "添加",
   "settings.cancel": "取消",
@@ -640,6 +655,12 @@ export const ZH_CN_SETTINGS_TRANSLATIONS = {
   "settings.commitMessageModelHint":
     "Git 审查中生成提交说明使用的模型，未选择或失效时跟随当前对话模型。",
   "settings.customSettingsModelEmpty": "当前 Provider 未配置模型。",
+  "settings.promptClarifyTitle": "澄清提示词",
+  "settings.promptClarifyToggleHint":
+    "输入框旁的「澄清提示词」按钮通过多轮追问完善提示词草稿。关闭后桌面端与 Web 端输入框都不再显示该按钮。",
+  "settings.promptClarifyModel": "澄清对话模型",
+  "settings.promptClarifyModelHint":
+    "澄清追问与生成终稿使用的模型，未选择或失效时跟随当前对话模型。",
   "settings.composerContextDisplay": "上下文占用展示",
   "settings.composerContextDisplayHint":
     "选择输入区展示上下文占用的方式。无论哪一档，占用 ≥50% 时都保留手动压缩入口。",
@@ -1258,4 +1279,8 @@ export const ZH_CN_SETTINGS_TRANSLATIONS = {
   "settings.cuaDriver.groupBehavior": "行为",
   "settings.cuaDriver.permissionsChecking": "正在检查授权…",
   "settings.cuaDriver.permissionsUnknown": "无法读取状态",
+  "settings.cuaDriver.desktopOnlyInstall":
+    "安装需要在桌面端完成：安装脚本在桌面主机上联网下载并执行，须由使用那台机器的人确认命令全文。",
+  "settings.cuaDriver.desktopOnlyGrant":
+    "授权需要在桌面端完成：系统授权对话框只会出现在桌面主机的屏幕上。",
 } as const satisfies Record<string, string>;
