@@ -1,4 +1,5 @@
 import { useLocale } from "@liveagent/ui/i18n/index";
+import { useDocumentHidden } from "@liveagent/ui/lib/shared/documentVisibility";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { useEffect, useState } from "react";
 import { canManualCompact, contextUsageRatio } from "../../lib/chat/contextUsage";
@@ -28,12 +29,16 @@ type StatGroup = {
 
 /** 运行中每秒重渲染一次，把 *RunningSinceAt 折算进显示值；空闲时零定时器。 */
 function useRunningHeartbeat(running: boolean): number {
+  const hidden = useDocumentHidden();
   const [, setBeat] = useState(0);
   useEffect(() => {
-    if (!running) return;
+    // 窗口不可见时不起心跳：这些帧用户看不到，代价却是每秒重渲染一次统计条
+    // （连带重建其中的 formatter、以及在长会话里重排可见行邻域）。重新可见时
+    // hidden 翻转会重启 effect，读数立刻回到当前值。
+    if (!running || hidden) return;
     const timer = setInterval(() => setBeat((beat) => beat + 1), HEARTBEAT_MS);
     return () => clearInterval(timer);
-  }, [running]);
+  }, [hidden, running]);
   return Date.now();
 }
 
@@ -202,41 +207,46 @@ export function ConversationStatsBar(props: {
 
   return (
     // role="status" 提供语义；数字变化不做 aria-live 播报（流式期间会刷屏）。
-    // overflow-hidden 兜底：tooltip trigger 是 shrink-0，极窄时宁可裁剪也不撑破布局。
-    <div
-      role="status"
-      aria-live="off"
-      aria-label={fullText}
-      className="@container flex h-5 w-full items-center justify-center overflow-hidden"
-    >
-      <LabelTooltip label={tooltip}>
-        {compactAvailable ? (
-          <ConfirmActionPopover
-            title={t("chat.manualCompactTitle")}
-            description={t("chat.manualCompactDescription")}
-            confirmLabel={t("chat.manualCompactConfirm")}
-            tone="default"
-            side="top"
-            align="center"
-            open={confirmOpen}
-            onOpenChange={setConfirmOpen}
-            onConfirm={() => void onManualCompactConfirm?.()}
-          >
-            {(open) => (
-              <button
-                type="button"
-                onClick={open}
-                aria-label={t("chat.manualCompactTitle")}
-                className="flex min-w-0 cursor-pointer items-center rounded-full px-1.5 outline-hidden transition-[background-color] hover:bg-muted/50 focus-visible:bg-muted/50"
-              >
-                {row}
-              </button>
-            )}
-          </ConfirmActionPopover>
-        ) : (
-          row
-        )}
-      </LabelTooltip>
+    <div role="status" aria-live="off" aria-label={fullText} className="relative h-5 w-full">
+      {/* 毛玻璃裙边：读数浮在会滚动的正文上方，正文滚进输入区下面时会和底下的
+          文字重叠到难以辨认，输入卡片圆角外侧的弧形缺口也会漏出正文。裙边与
+          卡片同宽，上探 2rem（= 卡片 rounded-4xl 的半径）藏到卡片身后，把弧形
+          缺口一并盖住；-z-10 让它压在卡片之下、正文之上。空态占位分支不带这层。 */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 -top-8 bottom-0 -z-10 bg-background/70 backdrop-blur-md"
+      />
+      {/* overflow-hidden 兜底：tooltip trigger 是 shrink-0，极窄时宁可裁剪也不撑破布局。 */}
+      <div className="@container flex h-5 w-full items-center justify-center overflow-hidden">
+        <LabelTooltip label={tooltip}>
+          {compactAvailable ? (
+            <ConfirmActionPopover
+              title={t("chat.manualCompactTitle")}
+              description={t("chat.manualCompactDescription")}
+              confirmLabel={t("chat.manualCompactConfirm")}
+              tone="default"
+              side="top"
+              align="center"
+              open={confirmOpen}
+              onOpenChange={setConfirmOpen}
+              onConfirm={() => void onManualCompactConfirm?.()}
+            >
+              {(open) => (
+                <button
+                  type="button"
+                  onClick={open}
+                  aria-label={t("chat.manualCompactTitle")}
+                  className="flex min-w-0 cursor-pointer items-center rounded-full px-1.5 outline-hidden transition-[background-color] hover:bg-muted/50 focus-visible:bg-muted/50"
+                >
+                  {row}
+                </button>
+              )}
+            </ConfirmActionPopover>
+          ) : (
+            row
+          )}
+        </LabelTooltip>
+      </div>
     </div>
   );
 }

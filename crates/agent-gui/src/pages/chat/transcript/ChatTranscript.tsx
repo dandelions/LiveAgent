@@ -140,6 +140,12 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
     shouldReserveTranscriptBottomSpace &&
     shouldDeferTranscriptReveal &&
     settledConversationId !== conversationId;
+  // Loading overlays own the stage while mounted. The width handles suspend
+  // behind them (an opaque skeleton leaves nothing to grab, and a focusable
+  // separator must not hide under a blocking layer) and come back in the very
+  // commit the overlay leaves, re-measured against the pane as it is then —
+  // no unrelated layout change is needed to wake them (#749).
+  const isTranscriptBusy = isHistorySwitching || isTranscriptSettling;
 
   useLayoutEffect(() => {
     followRef.current = scrollFollowHandle;
@@ -257,7 +263,11 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
       >
         <div
           className={cn(
-            "mx-auto w-full max-w-(--chat-transcript-content-width) px-5 py-4 [overflow-anchor:none]",
+            // The assistant rows no longer reserve a 40px avatar column, so the
+            // transcript column gives that width back instead of widening the
+            // reading measure. Keeps assistant text at its original width and
+            // aligned with the composer, which is tuned off the same variable.
+            "mx-auto w-full max-w-[calc(var(--chat-transcript-content-width,768px)-2.5rem)] px-5 py-4 [overflow-anchor:none]",
             // Empty states center against the scroll viewport (the pane), not
             // the window: a viewport-height min-height overflows half-height
             // panes in vertical splits and shifts the hero content.
@@ -328,6 +338,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
         onWidthChange={onContentWidthChange}
         resizeLabel={resizeTranscriptLabel}
         resetLabel={resetTranscriptWidthLabel}
+        suspended={isTranscriptBusy}
       />
       {!showNoModelsState && !showStartChatState && !isTranscriptSettling ? (
         <FloorNavRail
@@ -390,7 +401,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
             document.body,
           )
         : null}
-      {isHistorySwitching || isTranscriptSettling ? <HistorySwitchLoadingOverlay /> : null}
+      {isTranscriptBusy ? <HistorySwitchLoadingOverlay /> : null}
     </div>
   );
 });

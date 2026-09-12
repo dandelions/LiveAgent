@@ -6,6 +6,8 @@ import type {
 import { createTextComposerDraft } from "@liveagent/ui/lib/chat/composerDraft";
 import type { ConversationMentionReference } from "@liveagent/ui/lib/chat/mentionReferences";
 import type { PendingUploadedFile } from "@liveagent/ui/lib/chat/uploadedFiles";
+import type { SidebarShortcutId } from "@liveagent/ui/lib/settings/sidebarShortcuts";
+import type { ConversationOpenOptions } from "@liveagent/ui/lib/sidebar/openController";
 import type { SidebarStore } from "@liveagent/ui/lib/sidebar/store";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 
@@ -23,6 +25,8 @@ import { isMobileSidebarLayout } from "./historyUtils";
 import type { SendChatFn } from "./types";
 
 type CreateGatewayConversationActionsOptions = {
+  activateSearchConversationWorkspace: (cwd?: string) => void;
+  clearSearchConversationWorkspace: () => void;
   activeView: ApplicationViewId;
   activeWorkspaceProjectPath: string;
   api: GatewayWebSocketClient | null;
@@ -44,7 +48,10 @@ type CreateGatewayConversationActionsOptions = {
   isConversationBusy: (conversationId: string) => boolean;
   isLocalDraftConversationId: (conversationId: string) => boolean;
   markVisibleConversationRevision: () => number;
-  openController: { cancel: () => void; open: (conversationId: string) => void };
+  openController: {
+    cancel: () => void;
+    open: (conversationId: string, options?: ConversationOpenOptions) => void;
+  };
   pendingDisplayedConversationAutoBottomRef: MutableRefObject<string | null>;
   prepareComposerForConversationChange: () => void;
   protectedConversationRef: MutableRefObject<string>;
@@ -89,6 +96,7 @@ export function createGatewayConversationActions(options: CreateGatewayConversat
     options.composerDraftOwnerRef.current = "";
     options.composerRef.current?.clear();
     const nextWorkdir = startOptions?.workdir?.trim() || "";
+    if (!options.isAgentMode || nextWorkdir) options.clearSearchConversationWorkspace();
     if (nextWorkdir) options.conversationWorkdirsRef.current.set(nextConversationId, nextWorkdir);
     options.conversationIdRef.current = nextConversationId;
     options.selectedHistoryIdRef.current = nextConversationId;
@@ -118,11 +126,26 @@ export function createGatewayConversationActions(options: CreateGatewayConversat
     });
   };
 
-  const handleSidebarSelectConversation = (id: string) => {
+  const handleSidebarSelectConversation = (id: string, openOptions?: ConversationOpenOptions) => {
     if (isMobileSidebarLayout()) options.setSidebarOpen(false);
     options.setActiveView("chat");
     const targetConversationId = id.trim();
     if (!targetConversationId) return;
+    if (openOptions?.source === "search") {
+      options.openController.open(targetConversationId, {
+        source: "search",
+        beforeCommit: (conversation) => {
+          options.activateSearchConversationWorkspace(conversation.cwd);
+          options.sidebarStore.upsertLocal(conversation, { reveal: true });
+          options.prepareComposerForConversationChange();
+        },
+        afterCommit: () => {
+          options.restoreCachedComposerDraft(targetConversationId);
+          openOptions.afterCommit?.();
+        },
+      });
+      return;
+    }
     const currentConversationId = options.getVisibleComposerConversationId().trim();
     if (currentConversationId !== targetConversationId) {
       options.prepareComposerForConversationChange();
@@ -186,7 +209,7 @@ export function createGatewayConversationActions(options: CreateGatewayConversat
       });
     }
   };
-  const openHub = (view: "skills-hub" | "mcp-hub") => {
+  const openHub = (view: Exclude<ApplicationViewId, "chat">) => {
     options.setRightDockOpen(false);
     if (isMobileSidebarLayout()) options.setSidebarOpen(false);
     options.cacheVisibleComposerDraft();
@@ -262,8 +285,7 @@ export function createGatewayConversationActions(options: CreateGatewayConversat
     handleSidebarConversationsRemoved,
     handleSidebarLocalDraftDeleted,
     handleSidebarNewConversation,
-    handleSidebarOpenMcpHub: () => openHub("mcp-hub"),
-    handleSidebarOpenSkillsHub: () => openHub("skills-hub"),
+    handleSidebarOpenResourceHub: (resource: SidebarShortcutId) => openHub(`${resource}-hub`),
     handleSidebarSelectConversation,
     startNewConversation,
   };

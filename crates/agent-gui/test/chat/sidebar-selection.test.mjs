@@ -134,17 +134,19 @@ test("conversation rename suppresses the menu's return-focus without changing do
     "utf8",
   );
 
-  // HistoryRow's rename entry arms the one-shot flag. ProjectRow now opens the
-  // project-settings flow instead of owning a second inline rename path.
-  assert.equal((source.match(/suppressMenuReturnFocusRef\.current = true;/g) ?? []).length, 1);
+  // Two menus in this file mount an inline input on select and so must arm the
+  // one-shot flag: HistoryRow's conversation rename and ProjectGroupHeader's
+  // group rename. ProjectRow opens the project-settings flow instead of owning
+  // a third inline rename path.
+  assert.equal((source.match(/suppressMenuReturnFocusRef\.current = true;/g) ?? []).length, 2);
   assert.equal((source.match(/onSelect=\{handleStartRenamingFromMenu\}/g) ?? []).length, 1);
   assert.equal((source.match(/onSelect=\{\(\) => onConfigureProject\(project\)\}/g) ?? []).length, 1);
-  // The conversation dropdown consumes the flag declaratively via Base UI's
-  // finalFocus, keeping the default trigger return-focus for every other close.
-  assert.equal((source.match(/finalFocus=\{\(\) => \{/g) ?? []).length, 1);
+  // Both dropdowns consume the flag declaratively via Base UI's finalFocus,
+  // keeping the default trigger return-focus for every other close.
+  assert.equal((source.match(/finalFocus=\{\(\) => \{/g) ?? []).length, 2);
   assert.equal(
     (source.match(/suppressMenuReturnFocusRef\.current = false;\s*return false;/g) ?? []).length,
-    1,
+    2,
   );
   // Double-click rename keeps the plain path, and the retired blur-swallowing
   // guard must not come back — blur either skips once (Enter/Escape) or commits.

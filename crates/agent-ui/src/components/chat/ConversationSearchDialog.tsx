@@ -11,8 +11,10 @@ import {
   type PersistedConversationSearchResult,
   searchPersistedConversations,
 } from "@liveagent/ui/lib/chat/conversationSearch";
+import { cachedDateTimeFormat } from "@liveagent/ui/lib/shared/intlFormatters";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ConversationOpenOptions } from "../../lib/sidebar/openController";
 import type { SidebarConversation } from "../../lib/sidebar/types";
 
 type ConversationSearchDialogProps = {
@@ -20,7 +22,7 @@ type ConversationSearchDialogProps = {
   onOpenChange: (open: boolean) => void;
   conversations: readonly SidebarConversation[];
   currentWorkdir?: string;
-  onSelectConversation: (id: string) => void;
+  onSelectConversation: (id: string, options?: ConversationOpenOptions) => void;
 };
 
 type SearchStatus = "idle" | "loading" | "ready" | "error";
@@ -46,7 +48,7 @@ function toSearchResult(item: SidebarConversation): PersistedConversationSearchR
 
 function formatUpdatedAt(value: number | undefined, locale: string) {
   if (!value || !Number.isFinite(value)) return "";
-  return new Intl.DateTimeFormat(locale, {
+  return cachedDateTimeFormat(locale, "search-updated-at", {
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -190,7 +192,9 @@ export function ConversationSearchDialog({
 
   const selectConversation = (id: string) => {
     onOpenChange(false);
-    onSelectConversation(id);
+    const isLocalDraft =
+      !normalizedQuery && conversations.some((item) => item.id === id && item.isPending);
+    onSelectConversation(id, isLocalDraft ? undefined : { source: "search" });
   };
 
   return (

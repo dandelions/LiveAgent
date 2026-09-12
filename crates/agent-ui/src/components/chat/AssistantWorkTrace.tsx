@@ -1,5 +1,6 @@
 import { ChevronDown } from "@liveagent/ui/components/IconSet";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import { isDocumentHidden } from "@liveagent/ui/lib/shared/documentVisibility";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from "react";
 import { LazyCollapse } from "./LazyCollapse";
@@ -120,7 +121,12 @@ export function AssistantWorkTrace({
       if (startedAt !== null) setElapsedMs(Math.max(0, Date.now() - startedAt));
     };
     updateElapsed();
-    const timer = window.setInterval(updateElapsed, 1_000);
+    // 不可见时停表：work trace 的秒表只服务于"看着它跑"的观感，隐藏窗口里的
+    // 每秒重渲染纯属白烧 CPU；重新可见时 effect 重跑，读数立即补上。
+    const timer = window.setInterval(() => {
+      if (isDocumentHidden()) return;
+      updateElapsed();
+    }, 1_000);
     return () => window.clearInterval(timer);
   }, [durationMs, running]);
 
@@ -170,7 +176,11 @@ export function AssistantWorkTrace({
 
       {hasDetails ? (
         <LazyCollapse className="[contain:layout_paint]" open={expanded}>
-          {() => <div className="mt-1 [scrollbar-gutter:stable]">{children}</div>}
+          {() => (
+            // 行距由本容器统一负责：各行组件不再自带 pb/my，
+            // 否则不同行类型会凑出不同的间隙。
+            <div className="mt-1 space-y-2 [scrollbar-gutter:stable]">{children}</div>
+          )}
         </LazyCollapse>
       ) : null}
       {running && hasDetails && !expanded && collapsedTail ? (

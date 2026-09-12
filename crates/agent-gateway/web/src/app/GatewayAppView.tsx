@@ -245,8 +245,7 @@ export function GatewayAppView({ viewModel }: { viewModel: GatewayAppViewModel }
     handleSidebarConversationsRemoved,
     handleSidebarLocalDraftDeleted,
     handleSidebarNewConversation,
-    handleSidebarOpenMcpHub,
-    handleSidebarOpenSkillsHub,
+    handleSidebarOpenResourceHub,
     handleSidebarProjectsCollapsedChange,
     handleSidebarRecentCollapsedChange,
     handleSidebarSelectConversation,
@@ -856,6 +855,9 @@ export function GatewayAppView({ viewModel }: { viewModel: GatewayAppViewModel }
             settings.locale === "en-US" ? "Resize conversation content" : "调整对话正文宽度"
           }
           resetLabel={settings.locale === "en-US" ? "Double-click to reset" : "双击恢复默认宽度"}
+          // The history overlay below is a blocking panel layer above the
+          // handles; suspend them for exactly as long as it is mounted (#749).
+          suspended={conversationOpenState.showOverlay}
         />
         {displayedTranscriptRowCount > 0 && !conversationOpenState.showOverlay ? (
           <FloorNavRail
@@ -1266,6 +1268,20 @@ export function GatewayAppView({ viewModel }: { viewModel: GatewayAppViewModel }
 
           <div className="gateway-editor-host">
             <GatewaySidebarContainer
+              pinnedOrder={settings.system.sidebarPinnedOrder}
+              onReorderPinned={(sidebarPinnedOrder) =>
+                setSettings((previous) => ({
+                  ...previous,
+                  system: { ...previous.system, sidebarPinnedOrder },
+                }))
+              }
+              projectOrder={settings.system.workspaceProjectOrder}
+              onReorderProjects={(workspaceProjectOrder) =>
+                setSettings((previous) => ({
+                  ...previous,
+                  system: { ...previous.system, workspaceProjectOrder },
+                }))
+              }
               store={sidebarStore}
               approvalConversationIds={approvalConversationIds}
               transientRunningConversations={manualCompactTransientConversations}
@@ -1276,7 +1292,7 @@ export function GatewayAppView({ viewModel }: { viewModel: GatewayAppViewModel }
               showProjects={isAgentMode && status?.online === true}
               projects={workspaceProjects}
               workspaceProjectGroups={settings.system.workspaceProjectGroups}
-              activeProjectId={activeWorkspaceProject?.id}
+              activeProjectId={activeWorkspaceProject?.id ?? ""}
               missingProjectPathKeys={missingWorkspaceProjectPathKeys}
               projectsCollapsed={settings.customSettings.chatSidebar.projectsCollapsed}
               workspaceFolderDropActive={workspaceFolderDropActive}
@@ -1325,9 +1341,9 @@ export function GatewayAppView({ viewModel }: { viewModel: GatewayAppViewModel }
               onLocalDraftDeleted={handleSidebarLocalDraftDeleted}
               onConversationsRemoved={handleSidebarConversationsRemoved}
               onCloseSidebar={() => setSidebarOpen(false)}
-              onOpenSettings={() => openSettings()}
-              onOpenSkillsHub={handleSidebarOpenSkillsHub}
-              onOpenMcpHub={handleSidebarOpenMcpHub}
+              sidebarShortcuts={settings.customSettings.sidebarShortcuts}
+              onOpenSettings={openSettings}
+              onOpenResourceHub={handleSidebarOpenResourceHub}
             />
 
             {shareConversation ? (
@@ -1573,6 +1589,7 @@ export function GatewayAppView({ viewModel }: { viewModel: GatewayAppViewModel }
                                     ? "Double-click to reset"
                                     : "双击恢复默认宽度"
                                 }
+                                suspended={conversationOpenState.showOverlay}
                               />
                               {displayedTranscriptRowCount > 0 &&
                               !conversationOpenState.showOverlay ? (

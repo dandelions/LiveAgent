@@ -12,6 +12,7 @@ import {
   memo,
   type ReactElement,
   type ReactNode,
+  useId,
   useMemo,
   useState,
 } from "react";
@@ -32,6 +33,10 @@ import {
   parseChatFileLink,
 } from "../lib/chat/chatFileLinks";
 import {
+  rememberExternalLinkConfirmation,
+  shouldSkipExternalLinkConfirmation,
+} from "../lib/externalLinkPreference";
+import {
   getCollapsedCodeBlockPreview,
   resolveCodeBlockRenderPolicy,
 } from "../lib/markdownCodeBlockPolicy";
@@ -39,6 +44,7 @@ import { normalizeLatexDelimiters } from "../lib/normalizeLatexDelimiters";
 import { cn } from "../lib/shared/utils";
 import { MermaidFullscreenButton } from "./MarkdownMermaidFullscreen";
 import { Button } from "./ui/button";
+import { Checkbox } from "./ui/checkbox";
 import { CopyButton } from "./ui/copy-button";
 import {
   Dialog,
@@ -341,6 +347,7 @@ function MarkdownImageFallback(props: MarkdownImageFallbackProps) {
 }
 
 export const markdownComponents: Components = {
+  a: MarkdownExternalLink,
   img: MarkdownImageFallback,
   pre: CollapsibleCodePre,
 };
@@ -383,7 +390,12 @@ function MarkdownExternalLink(props: MarkdownAnchorFallbackProps) {
         data-streamdown="link"
         title={title}
         onClick={() => {
-          if (!incomplete) setModalOpen(true);
+          if (incomplete) return;
+          if (shouldSkipExternalLinkConfirmation()) {
+            void openExternalLink(href, () => window.open(href, "_blank", "noreferrer"));
+          } else {
+            setModalOpen(true);
+          }
         }}
       >
         {children}
@@ -559,10 +571,25 @@ const streamdownTranslations = {
   viewFullscreen: "全屏查看",
 } satisfies Partial<StreamdownTranslations>;
 
+async function openExternalLink(url: string, fallback: () => void) {
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.error("Failed to open external link via opener", error);
+    fallback();
+  }
+}
+
 export function ExternalLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafetyModalProps) {
   if (!isOpen || typeof document === "undefined") {
     return null;
   }
+  return <ExternalLinkDialog key={url} onClose={onClose} onConfirm={onConfirm} url={url} />;
+}
+
+function ExternalLinkDialog({ onClose, onConfirm, url }: Omit<LinkSafetyModalProps, "isOpen">) {
+  const [dontRemind, setDontRemind] = useState(false);
+  const checkboxId = useId();
 
   const handleCopyLink = async () => {
     try {
@@ -573,18 +600,16 @@ export function ExternalLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafet
   };
 
   const handleOpenLink = async () => {
+    if (dontRemind) rememberExternalLinkConfirmation();
     try {
-      await openUrl(url);
-    } catch (error) {
-      console.error("Failed to open external link via opener", error);
-      onConfirm();
+      await openExternalLink(url, onConfirm);
     } finally {
       onClose();
     }
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent
         className="max-w-md p-0"
         closeLabel={streamdownTranslations.close}
@@ -613,7 +638,14 @@ export function ExternalLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafet
               {url}
             </p>
           </div>
-          <DialogActions className="mt-4">
+          <DialogActions className="mt-4 max-sm:flex max-sm:flex-wrap max-sm:[&>button]:w-auto">
+            <label
+              htmlFor={checkboxId}
+              className="mr-auto flex shrink-0 cursor-pointer items-center gap-2 text-xs text-muted-foreground"
+            >
+              <Checkbox id={checkboxId} checked={dontRemind} onCheckedChange={setDontRemind} />
+              <span>不再提醒</span>
+            </label>
             <Button
               type="button"
               variant="ghost"
@@ -650,7 +682,7 @@ const MARKDOWN_EMBED_CLASSNAME = cn(
   "[&_[data-streamdown='mermaid-block-actions']]:gap-2 [&_[data-streamdown='mermaid-block-actions']]:rounded-none [&_[data-streamdown='mermaid-block-actions']]:border-0 [&_[data-streamdown='mermaid-block-actions']]:bg-transparent [&_[data-streamdown='mermaid-block-actions']]:p-0 [&_[data-streamdown='mermaid-block-actions']]:shadow-none [&_[data-streamdown='mermaid-block-actions']]:backdrop-blur-none",
   "[&_[data-streamdown='mermaid-block-actions']_svg]:size-3 [&_[data-streamdown='mermaid-block']_button>svg]:size-3",
   "[&_[data-streamdown='table-wrapper']]:my-4 [&_[data-streamdown='table-wrapper']]:!w-full [&_[data-streamdown='table-wrapper']]:min-w-0 [&_[data-streamdown='table-wrapper']]:gap-0 [&_[data-streamdown='table-wrapper']]:rounded-none [&_[data-streamdown='table-wrapper']]:border-0 [&_[data-streamdown='table-wrapper']]:bg-transparent [&_[data-streamdown='table-wrapper']]:p-0 [&_[data-streamdown='table-wrapper']]:shadow-none [&_[data-streamdown='table-wrapper']]:outline-none [&_[data-streamdown='table-wrapper']]:ring-0",
-  "[&_[data-streamdown='table-wrapper']>div:last-child]:!w-full [&_[data-streamdown='table-wrapper']>div:last-child]:min-w-0 [&_[data-streamdown='table-wrapper']>div:last-child]:overflow-x-auto [&_[data-streamdown='table-wrapper']>div:last-child]:overflow-y-hidden [&_[data-streamdown='table-wrapper']>div:last-child]:rounded-none [&_[data-streamdown='table-wrapper']>div:last-child]:border-0 [&_[data-streamdown='table-wrapper']>div:last-child]:bg-transparent [&_[data-streamdown='table-wrapper']>div:last-child]:p-0 [&_[data-streamdown='table-wrapper']>div:last-child]:shadow-none [&_[data-streamdown='table-wrapper']>div:last-child]:outline-none [&_[data-streamdown='table-wrapper']>div:last-child]:ring-0",
+  "[&_[data-streamdown='table-wrapper']>div:last-child]:!w-full [&_[data-streamdown='table-wrapper']>div:last-child]:min-w-0 [&_[data-streamdown='table-wrapper']>div:last-child]:overflow-x-auto [&_[data-streamdown='table-wrapper']>div:last-child]:overflow-y-hidden [&_[data-streamdown='table-wrapper']>div:last-child]:[contain:layout_paint_style] [&_[data-streamdown='table-wrapper']>div:last-child]:rounded-none [&_[data-streamdown='table-wrapper']>div:last-child]:border-0 [&_[data-streamdown='table-wrapper']>div:last-child]:bg-transparent [&_[data-streamdown='table-wrapper']>div:last-child]:p-0 [&_[data-streamdown='table-wrapper']>div:last-child]:shadow-none [&_[data-streamdown='table-wrapper']>div:last-child]:outline-none [&_[data-streamdown='table-wrapper']>div:last-child]:ring-0",
   "[&_table]:my-2 [&_table]:!w-full [&_table]:!min-w-full [&_table]:max-w-none [&_table]:table-auto [&_table]:border-collapse [&_table]:rounded-none [&_table]:border-0 [&_table]:bg-transparent [&_table]:shadow-none [&_table]:outline-none [&_table]:ring-0",
   "[&_thead]:bg-transparent [&_tbody]:bg-transparent [&_tr]:border-b [&_tr]:border-border/50 [&_tr]:bg-transparent [&_tbody_tr:last-child]:border-b-0",
   "[&_th]:border-0 [&_th]:px-0 [&_th]:py-2 [&_th]:pr-8 [&_th]:text-left [&_th]:align-bottom [&_th]:font-semibold [&_th]:tracking-[-0.01em] [&_th]:text-foreground",

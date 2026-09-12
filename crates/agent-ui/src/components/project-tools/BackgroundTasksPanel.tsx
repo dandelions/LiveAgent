@@ -9,6 +9,7 @@ import {
   Trash2,
 } from "@liveagent/ui/components/IconSet";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import { isDocumentHidden } from "@liveagent/ui/lib/shared/documentVisibility";
 import {
   memo,
   type MouseEvent as ReactMouseEvent,
@@ -178,11 +179,13 @@ function BackgroundTaskLogDialog(props: {
     >
       <DialogContent
         layout="bottom-sheet-mobile"
-        className="flex h-[85dvh] flex-col p-0 sm:h-[min(80dvh,36rem)]"
+        // 显式声明宽度：这是唯一依赖 primitive 默认值的调用点，默认值从
+        // max-w-lg 收到 max-w-md 后它会被动变窄 64px，而它承载等宽终端日志。
+        className="flex h-[85dvh] max-w-lg flex-col p-0 sm:h-[min(80dvh,36rem)]"
         closeLabel={t("projectTools.close")}
         showCloseButton
       >
-        <DialogHeader className="flex-row items-center gap-2 px-4 py-3">
+        <DialogHeader className="flex-row items-center gap-2 py-3">
           <div className="min-w-0 flex-1">
             <DialogTitle className="truncate text-sm">{processDisplayName(process)}</DialogTitle>
             <DialogDescription
@@ -211,7 +214,7 @@ function BackgroundTaskLogDialog(props: {
         </DialogHeader>
 
         {error ? (
-          <DialogSubheader className="border-destructive/20 bg-destructive/10 px-4 py-2 text-xs text-destructive">
+          <DialogSubheader className="border-destructive/20 bg-destructive/10 py-2 text-xs text-destructive">
             {error}
           </DialogSubheader>
         ) : null}
@@ -492,7 +495,11 @@ export const BackgroundTasksPanel = memo(function BackgroundTasksPanel(
 
   useEffect(() => {
     if (!active || !hasRunning) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    // 与面板的 30s reconcile 同一口径：窗口不可见时这一秒一跳只是白烧 CPU。
+    const timer = window.setInterval(() => {
+      if (isDocumentHidden()) return;
+      setNow(Date.now());
+    }, 1000);
     setNow(Date.now());
     return () => window.clearInterval(timer);
   }, [active, hasRunning]);
