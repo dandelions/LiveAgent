@@ -1,5 +1,6 @@
 import { t as translate } from "@liveagent/ui/i18n/index";
 import { useComposerSkillSelection } from "@liveagent/ui/lib/chat/useComposerActions";
+import { useThinkingLiveVersion } from "@liveagent/ui/lib/models/useThinkingLive";
 import { useChatSkills } from "@liveagent/ui/lib/skills/useChatSkills";
 import type { Dispatch, SetStateAction } from "react";
 import { useCallback, useMemo } from "react";
@@ -62,6 +63,9 @@ export function useGatewayChatConfiguration({
       (item) => item.id === activeSelectedModel.customProviderId,
     );
   }, [activeSelectedModel, settings.customProviders]);
+  // 运行期思考档位补充到达会改变档位列表/恒开判定，版本号计入依赖使 memo 跟进。
+  const thinkingLiveVersion = useThinkingLiveVersion();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: thinkingLiveVersion 是刻意的失效信号，运行期档位补充到达后重算。
   const chatRuntimeReasoningOptions = useMemo(
     () =>
       getChatRuntimeReasoningLevelsForProvider({
@@ -69,16 +73,25 @@ export function useGatewayChatConfiguration({
         requestFormat: currentChatProvider?.requestFormat,
         modelId: activeSelectedModel?.model,
       }),
-    [activeSelectedModel?.model, currentChatProvider?.requestFormat, currentChatProvider?.type],
+    [
+      activeSelectedModel?.model,
+      currentChatProvider?.requestFormat,
+      currentChatProvider?.type,
+      thinkingLiveVersion,
+    ],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: thinkingLiveVersion 是刻意的失效信号，运行期档位补充到达后重算。
   const chatRuntimeThinkingAlwaysOn = useMemo(
     () =>
       isThinkingAlwaysOnForModel(
         currentChatProvider?.type ?? "claude_code",
         activeSelectedModel?.model,
       ),
-    [activeSelectedModel?.model, currentChatProvider?.type],
+    [activeSelectedModel?.model, currentChatProvider?.type, thinkingLiveVersion],
   );
+  // normalizeChatRuntimeControlsForProvider 会按模型档位表钳制当前选中档：档位表
+  // 随运行期补充变化时，选中档必须同步重钳，否则出现「选中档不在选项里」。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: thinkingLiveVersion 是刻意的失效信号，运行期档位补充到达后重钳当前档。
   const chatRuntimeControlsForCurrentProvider = useMemo(
     () =>
       normalizeChatRuntimeControlsForProvider(settings.chatRuntimeControls, {
@@ -91,6 +104,7 @@ export function useGatewayChatConfiguration({
       currentChatProvider?.requestFormat,
       currentChatProvider?.type,
       settings.chatRuntimeControls,
+      thinkingLiveVersion,
     ],
   );
   const handleChatRuntimeControlsChange = useCallback(

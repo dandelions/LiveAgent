@@ -1,3 +1,4 @@
+import { useThinkingLiveVersion } from "@liveagent/ui/lib/models/useThinkingLive";
 import type { SidebarStore } from "@liveagent/ui/lib/sidebar/store";
 import type { SidebarConversation } from "@liveagent/ui/lib/sidebar/types";
 import { type MutableRefObject, useCallback, useEffect, useMemo } from "react";
@@ -60,8 +61,12 @@ export function useChatModelSelection(params: UseChatModelSelectionParams) {
   } = params;
 
   const modelOptions = useMemo(
-    () => buildModelOptions(settings, { floatSelectedFirst: false }),
-    [settings],
+    () =>
+      buildModelOptions(
+        { customProviders: settings.customProviders },
+        { floatSelectedFirst: false },
+      ),
+    [settings.customProviders],
   );
   const activeSelectedModel = resolveActiveModelSelection(
     settings,
@@ -150,22 +155,29 @@ export function useChatModelSelection(params: UseChatModelSelectionParams) {
     }),
     [currentChatModelId, currentChatProvider?.requestFormat, currentChatProvider?.type],
   );
+  // 运行期思考档位补充到达会改变档位列表/恒开判定，版本号计入依赖使 memo 跟进。
+  const thinkingLiveVersion = useThinkingLiveVersion();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: thinkingLiveVersion 是刻意的失效信号，运行期档位补充到达后重算。
   const chatRuntimeReasoningOptions = useMemo(
     () => getChatRuntimeReasoningLevelsForProvider(chatRuntimeReasoningParams),
-    [chatRuntimeReasoningParams],
+    [chatRuntimeReasoningParams, thinkingLiveVersion],
   );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: thinkingLiveVersion 是刻意的失效信号，运行期档位补充到达后重算。
   const chatRuntimeThinkingAlwaysOn = useMemo(
     () =>
       isThinkingAlwaysOnForModel(currentChatProvider?.type ?? "claude_code", currentChatModelId),
-    [currentChatModelId, currentChatProvider?.type],
+    [currentChatModelId, currentChatProvider?.type, thinkingLiveVersion],
   );
+  // normalizeChatRuntimeControlsForProvider 会按模型档位表钳制当前选中档：档位表
+  // 随运行期补充变化时，选中档必须同步重钳，否则出现「选中档不在选项里」。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: thinkingLiveVersion 是刻意的失效信号，运行期档位补充到达后重钳当前档。
   const chatRuntimeControlsForCurrentProvider = useMemo(
     () =>
       normalizeChatRuntimeControlsForProvider(
         settings.chatRuntimeControls,
         chatRuntimeReasoningParams,
       ),
-    [chatRuntimeReasoningParams, settings.chatRuntimeControls],
+    [chatRuntimeReasoningParams, settings.chatRuntimeControls, thinkingLiveVersion],
   );
   const handleChatRuntimeControlsChange = useCallback(
     (patch: Partial<ChatRuntimeControls>) => {

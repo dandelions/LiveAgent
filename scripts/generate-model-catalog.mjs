@@ -58,6 +58,9 @@ const MIN_CODEX_MODELS = 5;
 // "tencent" (coding plan) host third-party models (glm/kimi/MiniMax/deepseek
 // deployments with platform-clamped limits), so they come last and their
 // copies of another vendor's models are dropped in favor of the official ones.
+// The runtime thinking supplement mirrors this order as
+// OFFICIAL_SECTION_ORDER in crates/agent-ui/src/lib/models/thinkingLive.ts —
+// keep both lists in sync when adding or removing sources here.
 const SECTIONS = [
   { key: "anthropic", sources: ["anthropic"], min: 8 },
   { key: "google", sources: ["google"], min: 15 },
@@ -67,7 +70,10 @@ const SECTIONS = [
   // zai (Z.AI, international brand) is a superset of zhipuai with identical
   // ids and limits for the overlap; keep the domestic brand as the key.
   { key: "zhipuai", sources: ["zai", "zhipuai"], min: 10 },
-  { key: "moonshotai", sources: ["moonshotai-cn", "moonshotai"], min: 8 },
+  // Kimi 下架了 k2-0711/0905-preview、k2-thinking(-turbo)、k2-turbo-preview、
+  // k2.5 等老模型后，上游 moonshot 分区只剩 4 个现役模型（kimi-k3、kimi-k2.6、
+  // kimi-k2.7-code(-highspeed)）；min 给 1 个余量容忍后续继续下架。
+  { key: "moonshotai", sources: ["moonshotai-cn", "moonshotai"], min: 3 },
   { key: "minimax", sources: ["minimax-cn", "minimax"], min: 5 },
   { key: "stepfun", sources: ["stepfun"], min: 4 },
   { key: "xiaomi", sources: ["xiaomi"], min: 4 },
