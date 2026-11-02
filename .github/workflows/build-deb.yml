@@ -80,10 +80,25 @@ jobs:
           workspaces: crates/agent-gui/src-tauri
 
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile --filter liveagent...
+        run: pnpm install --frozen-lockfile --filter liveagent... --filter @liveagent/gateway-webui...
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: crates/agent-gateway/go.mod
+          cache-dependency-path: crates/agent-gateway/go.sum
+
+      - name: Prepare locked K-brain external binaries
+        env:
+          TAURI_ENV_TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: pnpm --dir crates/agent-gui prepare:kbrain:release
+
+      - name: Verify staged K-brain binaries and Tauri packaging contract
+        run: node scripts/release/verify-kbrain-packaging.mjs --target x86_64-unknown-linux-gnu --binary-dir crates/agent-gui/src-tauri/binaries
 
       - name: Build Linux deb bundle
         working-directory: crates/agent-gui
+        env:
+          TAURI_ENV_TARGET_TRIPLE: x86_64-unknown-linux-gnu
         run: |
           pnpm tauri build \
             --config '{"bundle":{"createUpdaterArtifacts":false}}' \
