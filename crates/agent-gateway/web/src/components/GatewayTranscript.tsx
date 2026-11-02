@@ -3,6 +3,7 @@ import {
   LiveAssistantStatus,
 } from "@liveagent/ui/components/chat/AssistantBubble";
 import { ChatEmptyState } from "@liveagent/ui/components/chat/ChatEmptyState";
+import { ChatFileLinkContextMenuHost } from "@liveagent/ui/components/chat/ChatFileLinkContextMenu";
 import { ContextCheckpointCard } from "@liveagent/ui/components/chat/ContextCheckpointCard";
 import { EditableUserMessageBubble } from "@liveagent/ui/components/chat/EditableUserMessageBubble";
 import { RetryDetailsBlock } from "@liveagent/ui/components/chat/RetryDetailsBlock";
@@ -16,6 +17,7 @@ import { useLocale } from "@liveagent/ui/i18n/LocaleContext";
 import { normalizeLiveToolStatus } from "@liveagent/ui/lib/chat/assistantStatus";
 import type { ChatFileLink } from "@liveagent/ui/lib/chat/chatFileLinks";
 import type { ConversationMentionReference } from "@liveagent/ui/lib/chat/mentionReferences";
+import type { ReplyShareSource } from "@liveagent/ui/lib/chat/replyShare";
 import {
   type PendingUploadedFile,
   splitUserAttachmentsForDisplay,
@@ -26,6 +28,7 @@ import {
   type CommitDetailsLoader,
   UserMessageContent,
 } from "@liveagent/ui/lib/chat/userMessageContent";
+import { chatDuration } from "@liveagent/ui/lib/chat/workTiming";
 import type { GitClient } from "@liveagent/ui/lib/git/types";
 import { copyTextToClipboard } from "@liveagent/ui/lib/shared/clipboard";
 import { cn } from "@liveagent/ui/lib/shared/utils";
@@ -61,6 +64,7 @@ import type { HistoryMessageRef } from "@/lib/chat/conversationState";
 import { getRoundText } from "@/lib/chat/uiMessages";
 import { DEFAULT_CHAT_TRANSCRIPT_WIDTH } from "@/lib/settings";
 import { extractLiveRange } from "@/lib/transcript-virtual/liveRangeExtractor";
+import { findLiveTurnStartTimestamp } from "../lib/chat/transcript/rows";
 import type { RetryAttemptRecord, TranscriptRow } from "../lib/chat/transcript/types";
 import {
   GATEWAY_CHAT_COLUMN_CLASS,
@@ -142,7 +146,7 @@ const TRANSCRIPT_ROW_GAP = 18;
 // persisted snapshots outlive releases, and stale heights keyed only by
 // widths would seed wrong layouts (and scroll-compensation churn) after an
 // upgrade. Mirrors the GUI's versioned key.
-const TRANSCRIPT_MEASUREMENT_LAYOUT_VERSION = "gateway-rows-v1";
+const TRANSCRIPT_MEASUREMENT_LAYOUT_VERSION = "gateway-rows-v2";
 
 function buildVersionedTranscriptLayoutKey(viewportWidth: number, contentWidth: number) {
   const layoutKey = buildTranscriptLayoutKey(viewportWidth, contentWidth);
@@ -414,6 +418,11 @@ const GatewayAssistantMessageActions = memo(function GatewayAssistantMessageActi
     [row.rounds, showUsage],
   );
   const retryMessageRef = retryTarget?.messageRef;
+  const retryPrompt = retryTarget?.text;
+  const shareSource = useMemo<ReplyShareSource>(
+    () => ({ reply: replyText, prompt: retryPrompt, timestamp: row.timestamp }),
+    [replyText, retryPrompt, row.timestamp],
+  );
   const retryDisabled = isStreaming || !onResendFromEdit || !retryMessageRef;
   const retryTitle = retryMessageRef
     ? t("chat.retry")
@@ -459,6 +468,7 @@ const GatewayAssistantMessageActions = memo(function GatewayAssistantMessageActi
       onBranch={() => {
         if (retryMessageRef) onBranchConversation?.(retryMessageRef);
       }}
+      shareSource={shareSource}
       withAvatarSpacer
       alwaysShowActions
     />
@@ -962,10 +972,7 @@ const GatewayTranscriptListRegion = memo(function GatewayTranscriptListRegion(pr
           const isLatestLiveAssistant = rowIndex === liveAssistantIndex;
           const isLatestLiveStreaming = isStreaming && isLatestLiveAssistant;
           const retryTarget = findRetryTarget(rows, rowIndex);
-          const durationMs =
-            row.timestamp !== undefined && retryTarget?.timestamp !== undefined
-              ? Math.max(0, row.timestamp - retryTarget.timestamp)
-              : undefined;
+          const durationMs = chatDuration(retryTarget?.timestamp, row.timestamp);
           return (
             <article
               key={virtualRow.key}
@@ -987,6 +994,9 @@ const GatewayTranscriptListRegion = memo(function GatewayTranscriptListRegion(pr
                   toolStatus={isLatestLiveStreaming ? displayedToolStatus : null}
                   toolStatusVariant={displayedToolStatusIsCompaction ? "compaction" : "default"}
                   durationMs={durationMs}
+                  startedAtMs={
+                    isLatestLiveStreaming ? findLiveTurnStartTimestamp(rows, rowIndex) : undefined
+                  }
                   readOnly={readOnly}
                   redactToolContent={redactToolContent}
                   workdir={workspaceRoot}
@@ -1195,6 +1205,7 @@ export function GatewayTranscript({
         ) : null}
       </div>
       <div className="col-2 h-gateway-transcript-bottom-spacer-h" />
+      <ChatFileLinkContextMenuHost />
     </div>
   );
 }

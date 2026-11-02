@@ -30,6 +30,31 @@ impl GatewayController {
         envelope: proto::GatewayEnvelope,
     ) -> Result<(), String> {
         let request_id = envelope.request_id.clone();
+        if matches!(
+            envelope.payload.as_ref(),
+            Some(
+                proto::gateway_envelope::Payload::HistoryList(_)
+                    | proto::gateway_envelope::Payload::HistoryWorkdirs(_)
+                    | proto::gateway_envelope::Payload::HistoryGet(_)
+                    | proto::gateway_envelope::Payload::HistoryRename(_)
+                    | proto::gateway_envelope::Payload::HistoryPin(_)
+                    | proto::gateway_envelope::Payload::HistorySetCwd(_)
+                    | proto::gateway_envelope::Payload::HistoryDelete(_)
+            )
+        ) {
+            let controller = Arc::clone(self);
+            tauri::async_runtime::spawn(async move {
+                if let Some(payload) = envelope.payload {
+                    if let Err(error) = controller
+                        .handle_kbrain_history_request(request_id, &payload)
+                        .await
+                    {
+                        eprintln!("gateway K-brain history request failed: {error}");
+                    }
+                }
+            });
+            return Ok(());
+        }
 
         match envelope.payload {
             Some(proto::gateway_envelope::Payload::Ping(ping)) => {
@@ -100,10 +125,26 @@ impl GatewayController {
             Some(proto::gateway_envelope::Payload::ChatIngressAck(ack)) => {
                 self.handle_chat_ingress_ack(request_id, ack).await
             }
+            Some(proto::gateway_envelope::Payload::Planning(request)) => {
+                let result =
+                    crate::services::planning::handle_request(&self.app_handle, request).await;
+                match result {
+                    Ok(response) => {
+                        self.send_agent_envelope(proto::AgentEnvelope {
+                            request_id,
+                            timestamp: now_unix_seconds(),
+                            payload: Some(proto::agent_envelope::Payload::PlanningResp(response)),
+                        })
+                        .await
+                    }
+                    Err(error) => self.send_error_response(request_id, 400, error).await,
+                }
+            }
             Some(proto::gateway_envelope::Payload::CronManage(request)) => {
                 // Successful apply actions broadcast their own snapshot via the
                 // AutomationStore notifier; no extra refresh is needed here.
                 match gateway_bridge::handle_cron_manage(
+                    self.app_handle.clone(),
                     Arc::clone(&self.automation_store),
                     request,
                 )
@@ -537,7 +578,7 @@ impl GatewayController {
                 Ok(())
             }
             Some(proto::gateway_envelope::Payload::ProviderList(_request)) => {
-                match gateway_bridge::handle_provider_list().await {
+                match gateway_bridge::handle_provider_list(self.app_handle.clone()).await {
                     Ok(response) => {
                         self.send_agent_envelope(proto::AgentEnvelope {
                             request_id,
@@ -571,7 +612,8 @@ impl GatewayController {
                 Ok(())
             }
             Some(proto::gateway_envelope::Payload::ProviderModels(request)) => {
-                match gateway_bridge::handle_provider_models(request).await {
+                match gateway_bridge::handle_provider_models(self.app_handle.clone(), request).await
+                {
                     Ok(response) => {
                         self.send_agent_envelope(proto::AgentEnvelope {
                             request_id,
@@ -585,8 +627,69 @@ impl GatewayController {
                     Err(error) => self.send_error_response(request_id, 502, error).await,
                 }
             }
+            Some(proto::gateway_envelope::Payload::PromptTemplateList(_))
+            | Some(proto::gateway_envelope::Payload::PromptTemplateExpand(_)) => {
+                // 提示词模板已并入指令目录（slash_command_list）与 ChatRequest.prompt_command，
+                // Gateway 也不再放行这两条通道；保留 proto 字段只为兼容。
+                self.send_error_response(
+                    request_id,
+                    410,
+                    "prompt template requests are retired; use slash_command_list and prompt_command"
+                        .to_string(),
+                )
+                .await
+            }
+            // 以下三类都要等 K-brain 或 WebView 回应，一律 spawn，避免卡住单线程的分发循环。
+            Some(proto::gateway_envelope::Payload::SlashCommandList(request)) => {
+                let controller = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    let result = match gateway_bridge::handle_slash_command_list(
+                        controller.app_handle.clone(),
+                        request,
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            controller
+                                .send_agent_envelope(proto::AgentEnvelope {
+                                    request_id: request_id.clone(),
+                                    timestamp: now_unix_seconds(),
+                                    payload: Some(
+                                        proto::agent_envelope::Payload::SlashCommandListResp(
+                                            response,
+                                        ),
+                                    ),
+                                })
+                                .await
+                        }
+                        Err(error) => controller.send_error_response(request_id, 502, error).await,
+                    };
+                    if let Err(error) = result {
+                        eprintln!("handle slash command list failed: {error}");
+                    }
+                });
+                Ok(())
+            }
+            Some(proto::gateway_envelope::Payload::GoalManage(request)) => {
+                let controller = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = controller.handle_goal_manage(request_id, request).await {
+                        eprintln!("handle goal manage failed: {error}");
+                    }
+                });
+                Ok(())
+            }
+            Some(proto::gateway_envelope::Payload::LoopManage(request)) => {
+                let controller = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = controller.handle_loop_manage(request_id, request).await {
+                        eprintln!("handle loop manage failed: {error}");
+                    }
+                });
+                Ok(())
+            }
             Some(proto::gateway_envelope::Payload::SettingsGet(_request)) => {
-                match self.current_settings_snapshot().await {
+                match self.settings_get_snapshot().await {
                     Ok(snapshot) => {
                         let settings_json = match serialize_settings_sync_payload(&snapshot) {
                             Ok(settings_json) => settings_json,
@@ -608,7 +711,85 @@ impl GatewayController {
             }
             Some(proto::gateway_envelope::Payload::SettingsUpdate(request)) => {
                 match parse_settings_sync_payload(&request.settings_json) {
-                    Ok(snapshot) => {
+                    Ok(mut snapshot) => {
+                        let sync_client = match take_settings_sync_client(&mut snapshot) {
+                            Ok(client) => client,
+                            Err(error) => {
+                                return self.send_error_response(request_id, 400, error).await;
+                            }
+                        };
+                        // The memory switch and the AI approval reviewer go to K-brain and
+                        // never into LiveAgent's own settings; an update carrying only
+                        // them ends here.
+                        let memory_switch = match kbrain_memory::take_switch_update(&mut snapshot) {
+                            Ok(switch) => switch,
+                            Err(error) => {
+                                return self.send_error_response(request_id, 400, error).await;
+                            }
+                        };
+                        let ai_approval =
+                            match kbrain_ai_approval::take_approval_update(&mut snapshot) {
+                                Ok(approval) => approval,
+                                Err(error) => {
+                                    return self.send_error_response(request_id, 400, error).await;
+                                }
+                            };
+                        if memory_switch.is_some() || ai_approval.is_some() {
+                            let Some(connection) = kbrain_memory::running_kbrain(&self.app_handle)
+                            else {
+                                return self
+                                    .send_error_response(
+                                        request_id,
+                                        503,
+                                        "K-brain backend is not running".to_string(),
+                                    )
+                                    .await;
+                            };
+                            let written = tauri::async_runtime::spawn_blocking(move || {
+                                if let Some(enabled) = memory_switch {
+                                    kbrain_memory::write_switch(&connection, enabled)?;
+                                }
+                                if let Some(approval) = &ai_approval {
+                                    kbrain_ai_approval::write_approval(&connection, approval)?;
+                                }
+                                Ok(())
+                            })
+                            .await
+                            .map_err(|error| format!("save K-brain settings join failed: {error}"))
+                            .and_then(|result| result);
+                            if let Err(error) = written {
+                                return self.send_error_response(request_id, 502, error).await;
+                            }
+                            if snapshot.as_object().is_some_and(|map| map.is_empty()) {
+                                // Nothing reaches LiveAgent settings, but the WebUI still
+                                // waits for this seq: let the frontend ack it in order.
+                                if sync_client.is_some() {
+                                    let ack_only = with_settings_sync_client(
+                                        Value::Object(serde_json::Map::new()),
+                                        sync_client.as_ref(),
+                                    );
+                                    if let Err(error) =
+                                        self.app_handle.emit(GATEWAY_SETTINGS_SYNC_EVENT, ack_only)
+                                    {
+                                        eprintln!("emit gateway settings sync ack failed: {error}");
+                                    }
+                                }
+                                return self
+                                    .send_agent_envelope(proto::AgentEnvelope {
+                                        request_id,
+                                        timestamp: now_unix_seconds(),
+                                        payload: Some(
+                                            proto::agent_envelope::Payload::SettingsUpdateResp(
+                                                proto::SettingsUpdateResponse {
+                                                    accepted: true,
+                                                    message: "ok".to_string(),
+                                                },
+                                            ),
+                                        ),
+                                    })
+                                    .await;
+                            }
+                        }
                         if snapshot.get(SSH_PATCH_FIELD).is_some() {
                             let patch_payload = snapshot.clone();
                             let apply_response =
@@ -643,8 +824,11 @@ impl GatewayController {
                                     .await;
                             }
 
-                            let fresh_snapshot = match self.current_settings_snapshot().await {
-                                Ok(snapshot) => snapshot,
+                            let (fresh_snapshot, stamp) = match self
+                                .current_settings_snapshot_stamped()
+                                .await
+                            {
+                                Ok(read) => read,
                                 Err(error) => {
                                     return self.send_error_response(request_id, 500, error).await;
                                 }
@@ -656,7 +840,9 @@ impl GatewayController {
                                     snapshot.clone(),
                                     merged_ssh,
                                 ) {
-                                    Ok(payload) => payload,
+                                    Ok(payload) => {
+                                        with_settings_sync_client(payload, sync_client.as_ref())
+                                    }
                                     Err(error) => {
                                         return self
                                             .send_error_response(request_id, 400, error)
@@ -675,7 +861,9 @@ impl GatewayController {
                                     )
                                     .await;
                             }
-                            if let Err(error) = self.publish_settings_sync(fresh_snapshot).await {
+                            if let Err(error) =
+                                self.publish_settings_sync(fresh_snapshot, stamp).await
+                            {
                                 eprintln!("publish gateway ssh settings sync failed: {error}");
                             }
                             return self
@@ -696,7 +884,9 @@ impl GatewayController {
 
                         let event_payload =
                             match build_local_settings_update_event_payload(snapshot.clone()) {
-                                Ok(payload) => payload,
+                                Ok(payload) => {
+                                    with_settings_sync_client(payload, sync_client.as_ref())
+                                }
                                 Err(error) => {
                                     return self.send_error_response(request_id, 400, error).await;
                                 }
@@ -711,12 +901,13 @@ impl GatewayController {
                         // {"theme":"dark"}). Overlay it onto the current full snapshot;
                         // storing it as-is would drop every other cached field and let
                         // rebuilt snapshots revert UI-only settings like theme.
-                        let current_snapshot = match self.current_settings_snapshot().await {
-                            Ok(snapshot) => snapshot,
-                            Err(error) => {
-                                return self.send_error_response(request_id, 500, error).await;
-                            }
-                        };
+                        let (current_snapshot, stamp) =
+                            match self.current_settings_snapshot_stamped().await {
+                                Ok(read) => read,
+                                Err(error) => {
+                                    return self.send_error_response(request_id, 500, error).await;
+                                }
+                            };
                         let removed_project_ids = match removed_workspace_project_ids(
                             &current_snapshot,
                             &public_update,
@@ -728,7 +919,7 @@ impl GatewayController {
                         };
                         let merged_snapshot = match merge_settings_update_into_snapshot(
                             current_snapshot,
-                            public_update,
+                            public_update.clone(),
                         ) {
                             Ok(payload) => payload,
                             Err(error) => {
@@ -743,7 +934,16 @@ impl GatewayController {
                         {
                             return self.send_error_response(request_id, 500, error).await;
                         }
-                        if let Err(error) = self.store_settings_snapshot(merged_snapshot) {
+                        // A frontend publish may land while this update was being merged:
+                        // overlay the update onto that newer snapshot rather than overwrite it.
+                        if let Err(error) = self
+                            .store_merged_settings_update(
+                                merged_snapshot,
+                                stamp.generation,
+                                &public_update,
+                            )
+                            .await
+                        {
                             return self.send_error_response(request_id, 500, error).await;
                         }
                         match self
@@ -923,8 +1123,15 @@ impl GatewayController {
             }
             Some(proto::gateway_envelope::Payload::ChatFileOpen(request)) => {
                 let sender = self.current_outbound_sender()?;
+                let controller = Arc::clone(self);
                 tauri::async_runtime::spawn(async move {
-                    let envelope = match gateway_bridge::handle_chat_file_open(request).await {
+                    let conversation_id = request.conversation_id.clone();
+                    let lookup_id = format!("{request_id}:chat-file-workdir");
+                    let current_workdir =
+                        || controller.kbrain_conversation_workdir(lookup_id, conversation_id);
+                    let result =
+                        gateway_bridge::handle_chat_file_open(request, current_workdir).await;
+                    let envelope = match result {
                         Ok(response) => proto::AgentEnvelope {
                             request_id,
                             timestamp: now_unix_seconds(),
@@ -1055,6 +1262,58 @@ impl GatewayController {
                     Err(error) => self.send_error_response(request_id, 500, error).await,
                 }
             }
+            Some(proto::gateway_envelope::Payload::PermissionRules(request)) => {
+                // 读写 K-brain 规则文件，spawn 出去，别占单线程调度循环。
+                let this = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    let result = match gateway_bridge::handle_permission_rules(
+                        this.app_handle.clone(),
+                        request,
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            this.send_agent_envelope(proto::AgentEnvelope {
+                                request_id: request_id.clone(),
+                                timestamp: now_unix_seconds(),
+                                payload: Some(proto::agent_envelope::Payload::PermissionRulesResp(
+                                    response,
+                                )),
+                            })
+                            .await
+                        }
+                        Err(error) => this.send_error_response(request_id, 400, error).await,
+                    };
+                    if let Err(error) = result {
+                        eprintln!("handle permission rules failed: {error}");
+                    }
+                });
+                Ok(())
+            }
+            Some(proto::gateway_envelope::Payload::ProxyDetect(request)) => {
+                // 检测要等握手超时（约 1.5s），测速最长 10s；spawn 出去，别让 Ping、
+                // 聊天探活（ChatPrepareTimeout 2s）在单线程调度循环里排队。
+                let this = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    let result = match gateway_bridge::handle_proxy_detect(request).await {
+                        Ok(response) => {
+                            this.send_agent_envelope(proto::AgentEnvelope {
+                                request_id: request_id.clone(),
+                                timestamp: now_unix_seconds(),
+                                payload: Some(proto::agent_envelope::Payload::ProxyDetectResp(
+                                    response,
+                                )),
+                            })
+                            .await
+                        }
+                        Err(error) => this.send_error_response(request_id, 400, error).await,
+                    };
+                    if let Err(error) = result {
+                        eprintln!("handle proxy detect failed: {error}");
+                    }
+                });
+                Ok(())
+            }
             Some(proto::gateway_envelope::Payload::UploadReadableFiles(request)) => {
                 match gateway_bridge::handle_upload_readable_files(request).await {
                     Ok(response) => {
@@ -1088,22 +1347,34 @@ impl GatewayController {
             Some(proto::gateway_envelope::Payload::UploadedImagePreview(request)) => {
                 self.spawn_uploaded_image_preview_response(request_id, request)
             }
+            // 记忆命令要等 K-brain 回应（手动整理可达 2 分钟），spawn 出去，避免卡住分发循环。
             Some(proto::gateway_envelope::Payload::MemoryManage(request)) => {
-                match gateway_bridge::handle_memory_manage(Arc::clone(&self.memory_store), request)
+                let controller = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    let result = match gateway_bridge::handle_memory_manage(
+                        controller.app_handle.clone(),
+                        request,
+                    )
                     .await
-                {
-                    Ok(response) => {
-                        self.send_agent_envelope(proto::AgentEnvelope {
-                            request_id,
-                            timestamp: now_unix_seconds(),
-                            payload: Some(proto::agent_envelope::Payload::MemoryManageResp(
-                                response,
-                            )),
-                        })
-                        .await
+                    {
+                        Ok(response) => {
+                            controller
+                                .send_agent_envelope(proto::AgentEnvelope {
+                                    request_id: request_id.clone(),
+                                    timestamp: now_unix_seconds(),
+                                    payload: Some(
+                                        proto::agent_envelope::Payload::MemoryManageResp(response),
+                                    ),
+                                })
+                                .await
+                        }
+                        Err(error) => controller.send_error_response(request_id, 500, error).await,
+                    };
+                    if let Err(error) = result {
+                        eprintln!("handle memory manage failed: {error}");
                     }
-                    Err(error) => self.send_error_response(request_id, 500, error).await,
-                }
+                });
+                Ok(())
             }
             Some(proto::gateway_envelope::Payload::SkillMetadataRead(request)) => {
                 match gateway_bridge::handle_skill_metadata_read(request).await {
@@ -1183,6 +1454,7 @@ impl GatewayController {
                     Err(error) => self.send_error_response(request_id, 500, error).await,
                 }
             }
+
             Some(proto::gateway_envelope::Payload::SftpRequest(request)) => {
                 match self.handle_sftp_request(request).await {
                     Ok(response) => {
@@ -1227,7 +1499,27 @@ impl GatewayController {
                 });
                 Ok(())
             }
+            Some(proto::gateway_envelope::Payload::HistoryResync(_)) => self
+                .send_error_response(
+                    request_id,
+                    400,
+                    "history resync is handled by the Gateway".to_string(),
+                )
+                .await,
             None => Ok(()),
         }
+    }
+}
+
+impl GatewayController {
+    pub(crate) async fn publish_planning_changed(&self, seq: u64) -> Result<(), String> {
+        self.send_agent_envelope(proto::AgentEnvelope {
+            request_id: String::new(),
+            timestamp: now_unix_seconds(),
+            payload: Some(proto::agent_envelope::Payload::PlanningChanged(
+                proto::PlanningChanged { seq },
+            )),
+        })
+        .await
     }
 }

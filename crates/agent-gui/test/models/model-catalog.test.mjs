@@ -81,9 +81,10 @@ test("generated catalog upholds the data invariants", () => {
 test("openai catalog prefers Codex metadata and keeps models.dev supplements", () => {
   // Codex models.json 的 context_window 是输入侧预算（272K），生成期换算成
   // 与目录其余分区一致的总窗口语义：272K + 128K（models.dev 输出补充）= 400K。
+  // gpt-5.4 left openai/codex models.json in the 2026-09-27 refresh; it now follows
+  // models.dev (1.05M total window) and is no longer a Codex-sourced model.
   for (const modelId of [
     "gpt-5.2",
-    "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.5",
     "gpt-5.6-luna",
@@ -153,6 +154,27 @@ test("normalizeModelIdCandidates yields the decorated-id chain in order without 
     "claude-sonnet-4-6",
   ]);
   assert.deepEqual(catalog.normalizeModelIdCandidates("grok-4.5"), ["grok-4.5"]);
+});
+
+test("normalizeModelIdCandidates strips a month-day date suffix only when no full date is present", () => {
+  // 中转站给官方模型加四位月日后缀（deepseek-ai/deepseek-v4-pro-0813）。
+  assert.deepEqual(catalog.normalizeModelIdCandidates("deepseek-ai/deepseek-v4-pro-0813"), [
+    "deepseek-ai/deepseek-v4-pro-0813",
+    "deepseek-ai/deepseek-v4-pro",
+    "deepseek-v4-pro-0813",
+    "deepseek-v4-pro",
+  ]);
+  // 年份、型号数字不是月日，不剥。
+  assert.deepEqual(catalog.normalizeModelIdCandidates("gpt-4o-2024"), ["gpt-4o-2024"]);
+  assert.deepEqual(catalog.normalizeModelIdCandidates("model-1345"), ["model-1345"]);
+});
+
+test("a dated relay id resolves to the catalog entry, an exact dated id keeps its own entry", () => {
+  const relayed = catalog.findCatalogModelAcrossProviders("deepseek-ai/deepseek-v4-pro-0813");
+  assert.equal(relayed?.id, "deepseek-v4-pro");
+  assert.equal(relayed?.contextWindow, 1000000);
+  assert.equal(catalog.findCatalogModelAcrossProviders("deepseek-r1-0528")?.id, "deepseek-r1-0528");
+  assert.equal(catalog.findCatalogModelAcrossProviders("deepseek-r1-0601")?.id, "deepseek-r1");
 });
 
 test("findCatalogModel resolves exact and decorated ids across providers", () => {

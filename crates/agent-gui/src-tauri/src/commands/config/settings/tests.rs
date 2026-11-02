@@ -167,6 +167,7 @@ mod tests {
             enable_web_ssh_terminal: false,
             enable_web_git: false,
             enable_web_tunnels: false,
+            ..RemoteSettingsPayload::default()
         });
 
         assert_eq!(normalized.gateway_url, "https://agent.cnweb.org");
@@ -240,6 +241,7 @@ mod tests {
                 enable_web_ssh_terminal: true,
                 enable_web_git: true,
                 enable_web_tunnels: true,
+                ..RemoteSettingsPayload::default()
             },
         )
         .expect("seed manual Agent ID");
@@ -1223,7 +1225,7 @@ mod tests {
         };
         let loaded = load_system(&conn).expect("load system");
 
-        assert_eq!(row_count, 14);
+        assert_eq!(row_count, 15);
         assert_eq!(
             keys,
             vec![
@@ -1232,6 +1234,7 @@ mod tests {
                 SYSTEM_BROWSER_AUTOMATION_MODE_KEY.to_string(),
                 SYSTEM_COMMAND_SAFETY_MODE_KEY.to_string(),
                 SYSTEM_CUA_ALLOW_SELF_TARGETING_KEY.to_string(),
+                SYSTEM_DEFAULT_TIME_ZONE_KEY.to_string(),
                 SYSTEM_EXECUTION_MODE_KEY.to_string(),
                 SYSTEM_HIDDEN_WORKSPACE_PROJECT_PATHS_KEY.to_string(),
                 SYSTEM_MISSING_WORKSPACE_PROJECT_PATHS_KEY.to_string(),
@@ -1253,8 +1256,9 @@ mod tests {
                 "missingWorkspaceProjectPaths": [],
                 "archivedWorkspaceProjectPaths": [],
                 "workspaceResourceSettings": {},
-                "commandSafetyMode": "auto",
+                "commandSafetyMode": "always",
                 "browserAutomationMode": "auto",
+                "defaultTimeZone": "",
                 "systemProxy": default_system_proxy_json(),
                 "workdir": default_workdir.clone(),
                 "toolPolicies": { "Bash": "ask", "server:docs-mcp": "deny" },
@@ -1588,8 +1592,9 @@ mod tests {
                 "missingWorkspaceProjectPaths": [],
                 "archivedWorkspaceProjectPaths": [],
                 "workspaceResourceSettings": {},
-                "commandSafetyMode": "auto",
+                "commandSafetyMode": "always",
                 "browserAutomationMode": "auto",
+                "defaultTimeZone": "",
                 "systemProxy": default_system_proxy_json(),
                 "workdir": "/tmp/liveagent-default-project",
                 "toolPolicies": null,
@@ -1644,8 +1649,9 @@ mod tests {
                 "missingWorkspaceProjectPaths": [],
                 "archivedWorkspaceProjectPaths": [],
                 "workspaceResourceSettings": {},
-                "commandSafetyMode": "auto",
+                "commandSafetyMode": "always",
                 "browserAutomationMode": "auto",
+                "defaultTimeZone": "",
                 "systemProxy": default_system_proxy_json(),
                 "workdir": "/tmp/liveagent-default-project",
                 "toolPolicies": null,
@@ -1670,18 +1676,25 @@ mod tests {
     // save_system 会把归一结果破坏性地写回磁盘。
     #[test]
     fn command_safety_mode_unrecognized_value_fails_closed_to_ask() {
-        // 缺失 / null / 空串:正常缺省形态,沿用 auto。
-        assert_eq!(normalize_command_safety_mode_value(None), json!("auto"));
+        // 缺失 / null / 空串:正常缺省形态,默认 always。
+        assert_eq!(normalize_command_safety_mode_value(None), json!("always"));
         assert_eq!(
             normalize_command_safety_mode_value(Some(&Value::Null)),
-            json!("auto")
+            json!("always")
         );
         assert_eq!(
             normalize_command_safety_mode_value(Some(&json!("   "))),
-            json!("auto")
+            json!("always")
+        );
+        // 已下线的"完全访问"(auto)迁移为"始终允许"。
+        assert_eq!(
+            normalize_command_safety_mode_value(Some(&json!(" auto "))),
+            json!("always")
         );
         // 合法值原样保留(含空白裁剪)。
-        for mode in ["ask", "auto", "sandbox", "sandboxOffline"] {
+        for mode in [
+            "ask", "autoEdit", "always", "autoReview", "sandbox", "sandboxOffline",
+        ] {
             assert_eq!(
                 normalize_command_safety_mode_value(Some(&json!(format!(" {mode} ")))),
                 json!(mode)
@@ -1704,8 +1717,13 @@ mod tests {
 
     #[test]
     fn load_system_with_defaults_returns_agent_mode_and_default_project() {        let conn = open_memory_db();
-        let loaded = load_system_with_defaults(&conn, "/tmp/liveagent-default-project")
+        let mut loaded = load_system_with_defaults(&conn, "/tmp/liveagent-default-project")
             .expect("load system");
+        let resolved = loaded
+            .as_object_mut()
+            .and_then(|map| map.remove(SYSTEM_RESOLVED_TIME_ZONE_KEY))
+            .expect("resolvedTimeZone injected");
+        assert_eq!(resolved, json!(os_time_zone()));
 
         assert_eq!(
             loaded,
@@ -1717,8 +1735,9 @@ mod tests {
                 "missingWorkspaceProjectPaths": [],
                 "archivedWorkspaceProjectPaths": [],
                 "workspaceResourceSettings": {},
-                "commandSafetyMode": "auto",
+                "commandSafetyMode": "always",
                 "browserAutomationMode": "auto",
+                "defaultTimeZone": "",
                 "systemProxy": default_system_proxy_json(),
                 "workdir": "/tmp/liveagent-default-project",
                 "workspaceProjects": [
@@ -1733,6 +1752,97 @@ mod tests {
                 ]
             })
         );
+    }
+
+    #[test]
+    fn normalize_default_time_zone_value_accepts_only_known_iana_zones() {
+        assert_eq!(normalize_default_time_zone_value(None), json!(""));
+        assert_eq!(
+            normalize_default_time_zone_value(Some(&json!(null))),
+            json!("")
+        );
+        assert_eq!(
+            normalize_default_time_zone_value(Some(&json!(8))),
+            json!("")
+        );
+        assert_eq!(
+            normalize_default_time_zone_value(Some(&json!("   "))),
+            json!("")
+        );
+        assert_eq!(
+            normalize_default_time_zone_value(Some(&json!("Mars/Olympus"))),
+            json!("")
+        );
+        assert_eq!(
+            normalize_default_time_zone_value(Some(&json!(" Asia/Shanghai "))),
+            json!("Asia/Shanghai")
+        );
+        assert_eq!(
+            normalize_default_time_zone_value(Some(&json!("UTC"))),
+            json!("UTC")
+        );
+    }
+
+    #[test]
+    fn resolve_default_time_zone_prefers_setting_then_os() {
+        assert_eq!(
+            resolve_default_time_zone(Some("America/New_York")),
+            "America/New_York"
+        );
+        assert_eq!(resolve_default_time_zone(Some("")), os_time_zone());
+        assert_eq!(
+            resolve_default_time_zone(Some("bogus/zone")),
+            os_time_zone()
+        );
+        assert_eq!(resolve_default_time_zone(None), os_time_zone());
+        assert!(os_time_zone().parse::<chrono_tz::Tz>().is_ok());
+    }
+
+    #[test]
+    fn save_system_persists_default_time_zone_without_resolved_value() {
+        let mut conn = open_memory_db();
+        save_system_with_default_workdir(
+            &mut conn,
+            json!({
+                "executionMode": "tools",
+                "defaultTimeZone": "Europe/Berlin",
+                "resolvedTimeZone": "Asia/Tokyo",
+            }),
+            "/tmp/liveagent-default-project",
+        )
+        .expect("save system");
+
+        let stored = load_system(&conn)
+            .expect("load system")
+            .expect("system rows");
+        assert_eq!(stored["defaultTimeZone"], json!("Europe/Berlin"));
+        assert!(stored.get(SYSTEM_RESOLVED_TIME_ZONE_KEY).is_none());
+        let resolved_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM system_settings WHERE setting_key = ?1",
+                params![SYSTEM_RESOLVED_TIME_ZONE_KEY],
+                |row| row.get(0),
+            )
+            .expect("count resolved rows");
+        assert_eq!(resolved_rows, 0);
+
+        let loaded = load_system_with_defaults(&conn, "/tmp/liveagent-default-project")
+            .expect("load system with defaults");
+        assert_eq!(loaded["defaultTimeZone"], json!("Europe/Berlin"));
+        assert_eq!(loaded["resolvedTimeZone"], json!(os_time_zone()));
+
+        save_system_with_default_workdir(
+            &mut conn,
+            json!({ "executionMode": "tools", "defaultTimeZone": "Nowhere/Invalid" }),
+            "/tmp/liveagent-default-project",
+        )
+        .expect("save system with invalid zone");
+        let loaded = load_system_with_defaults(&conn, "/tmp/liveagent-default-project")
+            .expect("reload system");
+        assert_eq!(loaded["defaultTimeZone"], json!(""));
+        let resolved = loaded["resolvedTimeZone"].as_str().expect("resolved zone");
+        assert!(!resolved.is_empty());
+        assert_eq!(resolved, os_time_zone());
     }
 
     #[test]
@@ -1906,6 +2016,85 @@ mod tests {
         assert_eq!(imported.len(), 1);
         assert_eq!(imported[0].provider_type, "codex");
         assert_eq!(imported[0].request_format, "openai-completions");
+    }
+
+    #[test]
+    fn imported_provider_headers_preserve_order_and_filter_unsafe_duplicates() {
+        let first = json!({
+            "extraHeaders": [
+                ["X-Trace", "one"],
+                ["X-Empty", ""],
+                ["X-Bad", "line\nfeed"]
+            ]
+        });
+        let second = json!({
+            "custom_headers": [
+                ["x-trace", "replacement"],
+                {"key": "X-Second", "value": "two"}
+            ]
+        });
+
+        let headers = imported_headers_from_values(&[&first, &second]);
+        assert_eq!(
+            headers,
+            vec![
+                ImportedProviderHeader { key: "X-Trace".into(), value: "one".into() },
+                ImportedProviderHeader { key: "X-Empty".into(), value: "".into() },
+                ImportedProviderHeader { key: "X-Second".into(), value: "two".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn ccs_imports_custom_headers_from_config_and_meta() {
+        let config = json!({
+            "env": {
+                "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+                "DEEPSEEK_API_KEY": "sk-deepseek"
+            },
+            "extra_headers": {"X-Config": "config-value"}
+        });
+        let meta = json!({
+            "customHeaders": [{"key": "X-Meta", "value": "meta-value"}]
+        });
+        let item = ccs_provider_from_value(
+            "deepseek-with-headers",
+            "deepseek",
+            "DeepSeek",
+            &config,
+            &meta,
+        )
+        .expect("provider should import");
+
+        assert_eq!(
+            item.custom_headers,
+            vec![
+                ImportedProviderHeader { key: "X-Config".into(), value: "config-value".into() },
+                ImportedProviderHeader { key: "X-Meta".into(), value: "meta-value".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn cherry_v1_imports_custom_headers() {
+        let provider = json!({
+            "id": "headers-provider",
+            "name": "Headers Provider",
+            "type": "openai",
+            "apiKey": "secret",
+            "apiHost": "https://example.test/v1",
+            "extra_headers": {"X-Provider": "provider-value"},
+            "models": [{"id": "chat-model", "endpoint_type": "openai-chat-completions", "type": ["text"]}]
+        });
+        let mut imported = Vec::new();
+
+        cherry_append_v1_provider(&provider, "1.9.9", &mut imported);
+
+        assert_eq!(imported.len(), 1);
+        assert_eq!(
+            imported[0].custom_headers,
+            vec![ImportedProviderHeader { key: "X-Provider".into(), value: "provider-value".into() }]
+        );
     }
 
     #[test]
@@ -2251,6 +2440,81 @@ mod tests {
         assert_eq!(providers[0].source_id, "cli-legacy");
         assert_eq!(providers[0].provider_type, "claude_code");
         assert_eq!(providers[0].base_url, "https://legacy.example.test");
+    }
+
+    #[test]
+    fn provider_import_acceptance_databases_match_frontend_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../test/fixtures/provider-import-acceptance.json"
+        )))
+        .expect("provider import fixture");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ccs_path = dir.path().join("cc-switch.db");
+        let ccs = &fixture["ccs"];
+        {
+            let conn = Connection::open(&ccs_path).expect("create CC Switch database");
+            conn.execute_batch(
+                "CREATE TABLE providers (id TEXT, app_type TEXT, name TEXT,
+                 settings_config TEXT, meta TEXT, sort_index INTEGER, created_at INTEGER);",
+            )
+            .expect("create providers table");
+            conn.execute(
+                "INSERT INTO providers VALUES (?1, ?2, ?3, ?4, ?5, 0, 1)",
+                rusqlite::params![
+                    ccs["id"].as_str(), ccs["appType"].as_str(), ccs["name"].as_str(),
+                    ccs["settingsConfig"].to_string(), ccs["meta"].to_string()
+                ],
+            )
+            .expect("insert CC Switch fixture");
+        }
+        let ccs_before = std::fs::read(&ccs_path).expect("read CC Switch database");
+        let imported = list_ccswitch_liveagent_providers_from_db(&ccs_path).expect("scan CC Switch");
+        assert_eq!(serde_json::to_value(imported).unwrap(), json!([ccs["expected"]]));
+        assert_eq!(std::fs::read(&ccs_path).unwrap(), ccs_before);
+
+        let cherry_path = dir.path().join("cherrystudio.sqlite");
+        let cherry = &fixture["cherry"];
+        {
+            let conn = Connection::open(&cherry_path).expect("create Cherry Studio database");
+            conn.execute_batch(
+                "CREATE TABLE user_provider (provider_id TEXT, name TEXT, endpoint_configs TEXT,
+                 default_chat_endpoint TEXT, api_keys TEXT, auth_config TEXT,
+                 provider_settings TEXT, is_enabled BOOLEAN, order_key INTEGER);
+                 CREATE TABLE user_model (provider_id TEXT, model_id TEXT, endpoint_types TEXT,
+                 capabilities TEXT, output_modalities TEXT, is_enabled BOOLEAN,
+                 is_hidden BOOLEAN, order_key INTEGER);",
+            )
+            .expect("create Cherry Studio tables");
+            conn.execute(
+                "INSERT INTO user_provider VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0)",
+                rusqlite::params![
+                    cherry["id"].as_str(), cherry["name"].as_str(),
+                    cherry["endpointConfigs"].to_string(), cherry["defaultChatEndpoint"].as_str(),
+                    cherry["apiKeys"].to_string(), cherry["authConfig"].to_string(),
+                    cherry["providerSettings"].to_string()
+                ],
+            )
+            .expect("insert Cherry Studio fixture");
+            for model in cherry["models"].as_array().unwrap() {
+                conn.execute(
+                    "INSERT INTO user_model VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+                    rusqlite::params![
+                        cherry["id"].as_str(), model["id"].as_str(),
+                        model["endpointTypes"].to_string(), model["capabilities"].to_string(),
+                        model["outputModalities"].to_string(), model["enabled"].as_bool(),
+                        model["hidden"].as_bool()
+                    ],
+                )
+                .expect("insert Cherry Studio model");
+            }
+        }
+        let cherry_before = std::fs::read(&cherry_path).expect("read Cherry Studio database");
+        let imported = cherry_scan_candidates(&[dir.path().to_path_buf()], true)
+            .expect("scan Cherry Studio data directory");
+        assert_eq!(imported.status, "success");
+        assert_eq!(serde_json::to_value(imported.providers).unwrap(), json!([cherry["expected"]]));
+        assert_eq!(std::fs::read(&cherry_path).unwrap(), cherry_before);
     }
 
     // ===== 配置备份：采集 / 校验 / 应用 =====

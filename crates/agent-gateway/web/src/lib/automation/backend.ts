@@ -10,6 +10,7 @@ import type {
   AutomationApplyInput,
   AutomationSnapshot,
   CronApplyResponse,
+  CronOccurrencesResponse,
   CronRunNowResponse,
   CronRunRecord,
   CronSnapshot,
@@ -61,6 +62,10 @@ export const backend = {
     return Array.isArray(payload.runs) ? payload.runs : [];
   },
 
+  cronOccurrences(from: number, to: number): Promise<CronOccurrencesResponse> {
+    return cronManage<CronOccurrencesResponse>("occurrences", undefined, { from, to });
+  },
+
   async clearRuns(taskId: string): Promise<number> {
     const payload = await cronManage<{ clearedCount?: number }>("clear_runs", taskId);
     return typeof payload.clearedCount === "number" ? payload.clearedCount : 0;
@@ -68,6 +73,18 @@ export const backend = {
 
   runNow(taskId: string): Promise<CronRunNowResponse> {
     return cronManage<CronRunNowResponse>("run_now", taskId);
+  },
+
+  async cancelRun(taskId: string, executionId?: string): Promise<void> {
+    await cronManage<{ ok?: boolean }>(
+      "cancel_run",
+      taskId,
+      executionId ? { executionId } : undefined,
+    );
+  },
+
+  canCancelRun(): boolean {
+    return true;
   },
 
   async validateCronExpression(expression: string): Promise<void> {

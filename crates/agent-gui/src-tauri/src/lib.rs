@@ -61,6 +61,10 @@ macro_rules! app_invoke_handler {
             commands::chat_history::chat_history_share_get,
             commands::chat_history::chat_history_share_set,
             commands::chat_history::chat_history_delete,
+            commands::chat_history::legacy_history_migration_page,
+            commands::chat_history::legacy_history_migration_signature,
+            commands::planning::planning_migrate_legacy,
+            commands::chat_history::pi_migration::pi_history_migration_page,
             // Trajectory (events ride the owning history segment)
             commands::chat_history::trajectory_append_events,
             commands::chat_history::trajectory_get_events,
@@ -204,11 +208,19 @@ macro_rules! app_invoke_handler {
             commands::hook::hook_run_http_requests,
             commands::hook::hook_cancel_scope,
             // Automation (cron tasks + hooks store)
+            commands::planning::planning_query,
+            commands::planning::planning_mutate,
+            commands::planning::planning_export,
+            commands::planning::planning_set_labels,
+            commands::planning::planning_notification_test,
+            commands::planning::planning_subscription,
+            commands::planning::planning_import,
             commands::cron::cron_validate_expression,
             commands::cron::automation_snapshot,
             commands::cron::automation_cron_apply,
             commands::cron::automation_hooks_apply,
             commands::cron::automation_list_runs,
+            commands::cron::automation_cron_occurrences,
             commands::cron::automation_clear_runs,
             commands::cron::automation_run_cron_now,
             commands::cron::automation_claim_prompt_runs,
@@ -234,6 +246,7 @@ macro_rules! app_invoke_handler {
             commands::terminal::terminal_answer_ssh_prompt,
             commands::terminal::terminal_cancel_ssh_prompt,
             commands::terminal::terminal_ssh_reconnect,
+            commands::terminal::terminal_ssh_enable_sftp,
             commands::terminal::terminal_ssh_latency,
             commands::terminal::terminal_ssh_exec,
             commands::terminal::terminal_ssh_local_forward_start,
@@ -297,18 +310,22 @@ macro_rules! app_invoke_handler {
             commands::git::git_stash_push,
             commands::git::git_stash_pop,
             commands::fonts::system_list_font_families,
+            commands::proxy_detect::system_proxy_detect,
+            commands::proxy_detect::system_proxy_test,
             commands::system::system_pick_folder,
             commands::system::system_resolve_dropped_workspace_folders,
             commands::system::system_classify_dropped_paths,
             commands::system::system_pick_file,
             commands::system::system_sandbox_capability,
             commands::system::system_save_preview_file,
+            commands::image_export::image_export_asset,
             commands::system::system_create_project_folder,
             commands::system::system_import_pasted_texts,
             commands::system::system_import_readable_file_paths,
             commands::system::system_import_uploaded_readable_files,
             commands::system::system_pick_readable_files,
             commands::system::system_read_uploaded_image_preview,
+            commands::system::system_upload_staging_base,
             commands::system::system_open_uploaded_image,
             commands::system::system_prepare_preview_file_save,
             commands::system::system_write_preview_file,
@@ -353,9 +370,11 @@ macro_rules! app_invoke_handler {
             commands::gateway::gateway_chat_release_lease,
             commands::gateway::gateway_chat_queue_respond,
             commands::gateway::gateway_clarify_respond,
+            commands::gateway::gateway_composer_action_respond,
             commands::gateway::gateway_clarify_delta,
             commands::gateway::gateway_publish_chat_queue_event,
             commands::gateway::gateway_publish_settings_sync,
+            commands::gateway::gateway_publish_history_sync_v2,
             commands::gateway::gateway_tunnel_state,
             commands::gateway::gateway_tunnel_create,
             commands::gateway::gateway_tunnel_update,
@@ -365,6 +384,7 @@ macro_rules! app_invoke_handler {
             commands::gateway::provider_usage_query,
             commands::gateway::provider_usage_test,
             services::proxy::proxy_get_server_info,
+            services::kbrain_backend::kbrain_backend_connection,
         ]
     };
 }
@@ -815,6 +835,10 @@ pub fn run() {
     // 非 Windows 平台为空操作。
     runtime::windows_sandbox::run_sandbox_launcher_if_requested();
 
+    // 必须先于任何 tauri::async_runtime 调用:换成栈更大的 tokio 运行时,
+    // 否则调试版处理 Gateway 消息时会撑爆默认 2 MiB 的 worker 栈。
+    runtime::async_runtime::install_tauri_async_runtime();
+
     let automation_store = Arc::new(
         services::automation::AutomationStore::open()
             .expect("failed to initialize LiveAgent automation store"),
@@ -846,7 +870,11 @@ pub fn run() {
     let browser_manager = Arc::new(services::browser::BrowserManager::default());
     // 扩展桥接：接受 LiveAgent 浏览器扩展的反向连接，Browser 工具优先驱动
     // 用户日常浏览器（复用登录态）；未连接时回退独立 profile 启动。
-    browser_manager.start_extension_bridge();
+    if !runtime::data_home::isolation_requested()
+        && std::env::var_os("LIVEAGENT_CONFIG_DIR").is_none()
+    {
+        browser_manager.start_extension_bridge();
+    }
 
     let builder = tauri::Builder::default();
     // dev 构建与已安装正式版共享 identifier；若 dev 也注册单实例，
@@ -860,8 +888,18 @@ pub fn run() {
 
     let app = builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_mcp_bridge::init())
+        .plugin(
+            tauri_plugin_mcp_bridge::Builder::new()
+                .base_port(
+                    std::env::var("LIVEAGENT_DEV_MCP_BRIDGE_PORT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(9223),
+                )
+                .build(),
+        )
         .plugin(
             tauri_plugin_window_state::Builder::new()
                 .with_state_flags(WINDOW_STATE_FLAGS)
@@ -883,6 +921,9 @@ pub fn run() {
         .manage(Arc::clone(&memory_store))
         .manage(Arc::clone(&provider_usage_service))
         .manage(Arc::clone(&power_activity))
+        .manage(Arc::new(
+            services::kbrain_backend::KBrainBackendState::default(),
+        ))
         .manage(Arc::new(runtime::shell_runner::ShellRunRegistry::default()))
         .manage(Arc::clone(&shell_session_manager))
         .manage(Arc::clone(&managed_process_registry))
@@ -950,7 +991,6 @@ pub fn run() {
                 let gateway_controller = Arc::new(services::gateway::GatewayController::new(
                     app.handle().clone(),
                     Arc::clone(&automation_store),
-                    Arc::clone(&memory_store),
                     Arc::clone(&provider_usage_service),
                     Arc::clone(&terminal_registry),
                     Arc::clone(&sftp_registry),
@@ -971,6 +1011,7 @@ pub fn run() {
                     scheduler: Arc::downgrade(&automation_scheduler),
                 });
                 Arc::clone(&automation_scheduler).start();
+                services::planning::start(app.handle().clone());
                 app.manage(Arc::clone(&gateway_controller));
                 if let Err(error) = gateway_controller.start() {
                     eprintln!("failed to start remote gateway controller: {error}");
@@ -1040,17 +1081,37 @@ pub fn run() {
                     ) {
                         eprintln!("failed to request terminal exit confirmation: {error}");
                     }
+                    api.prevent_exit();
+                    return;
                 }
-                api.prevent_exit();
-            } else {
-                // Real exit: reclaim every non-isolated managed process
-                // before the OS tears us down (Drop is not guaranteed).
+            }
+            {
+                // Stop our backend before other cleanup can block or the OS exits.
+                if let Some(backend) =
+                    _app.try_state::<Arc<services::kbrain_backend::KBrainBackendState>>()
+                {
+                    backend.shutdown_for_exit();
+                }
+                if let Some(gateway) = _app.try_state::<Arc<services::gateway::GatewayController>>() {
+                    gateway.shutdown_local_gateway();
+                }
                 terminal_registry.shutdown_cleanup();
                 shell_session_manager.shutdown_cleanup();
                 managed_process_registry.shutdown_cleanup();
                 git_clone_task_registry.shutdown_cleanup();
                 browser_manager.shutdown_cleanup();
                 power_activity.clear_all();
+            }
+        }
+        tauri::RunEvent::Exit => {
+            // Native macOS termination can bypass ExitRequested; Drop is not guaranteed.
+            if let Some(backend) =
+                _app.try_state::<Arc<services::kbrain_backend::KBrainBackendState>>()
+            {
+                backend.shutdown_for_exit();
+            }
+            if let Some(gateway) = _app.try_state::<Arc<services::gateway::GatewayController>>() {
+                gateway.shutdown_local_gateway();
             }
         }
         _ => {}

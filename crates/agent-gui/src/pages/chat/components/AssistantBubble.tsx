@@ -44,6 +44,7 @@ export const AssistantBubbleUnit = memo(function AssistantBubbleUnit(props: {
       key={entry.key}
       block={entry.block}
       isLive={row.live}
+      revealText={row.live}
       renderMode={row.renderMode}
       runningToolCallIds={entry.runningToolCallIds}
       thinkingOpen={row.live ? entry.thinkingOpen : false}
@@ -68,6 +69,7 @@ export const AssistantBubbleUnit = memo(function AssistantBubbleUnit(props: {
           <RoundBlockContent
             block={unit.block}
             isLive={row.live}
+            revealText={row.live}
             renderMode={row.renderMode}
             runningToolCallIds={unit.runningToolCallIds}
             thinkingOpen={unit.thinkingOpen}
@@ -87,6 +89,7 @@ export const AssistantBubbleUnit = memo(function AssistantBubbleUnit(props: {
             durationMs={unit.durationMs}
             hasDetails={workEntries.length > 0 || isCompactionRunning}
             running={row.live}
+            startedAtMs={unit.startedAtMs}
           >
             {workEntries.map((entry) => renderWorkEntry(entry))}
             {isCompactionRunning ? (

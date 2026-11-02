@@ -11,8 +11,8 @@ import {
 // 数据来自 catalog.generated.ts（构建期由 scripts/generate-model-catalog.mjs
 // 对 OpenAI 采用 Codex models.json 优先、models.dev 补充，其余供应商来自
 // models.dev；由 update-model-catalog.yml 定时刷新）。本文件与生成文件均由共享包提供。
-// 思考档位/API 选择/compat 等请求路径行为不归这里管——那些是流式运行时
-// （pi-ai）的领域；这里只回答"这个模型的窗口/输出上限与输入模态是什么"。
+// 思考档位/API 选择/compat 等请求路径行为不归这里管——这些属于流式运行时；
+// 这里只回答"这个模型的窗口/输出上限与输入模态是什么"。
 
 export { MODEL_CATALOG, MODEL_CATALOG_SNAPSHOT_DATE } from "./catalog.generated";
 export type { CatalogInputModality, CatalogModelEntry, CatalogProviderId };
@@ -79,16 +79,76 @@ export function normalizeModelIdCandidates(modelId: string): string[] {
   push(withoutAtVersion);
   const withoutContextSuffix = withoutAtVersion.replace(/\[1m\]$/i, "");
   push(withoutContextSuffix);
-  push(withoutContextSuffix.replace(/-20\d{6}$/, ""));
+  for (const candidate of withoutDateSuffix(withoutContextSuffix)) push(candidate);
   // 中转聚合商常在模型 id 前加自家路径前缀（bailian/deepseek-v4-pro、
   // openrouter/xxx 等），目录里存的是裸 id。放链尾——所有精确形态、
   // 全部分区都查空后才尝试剥前缀，避免裸段误撞目录里无关的同名模型。
   const lastSegment = withoutContextSuffix.split("/").pop() ?? "";
   if (lastSegment !== withoutContextSuffix) {
     push(lastSegment);
-    push(lastSegment.replace(/-20\d{6}$/, ""));
+    for (const candidate of withoutDateSuffix(lastSegment)) push(candidate);
   }
   return candidates;
+}
+
+// 日期后缀有两种写法：完整的 -20260115 和中转站常用的四位月日 -0813 /
+// -0731（deepseek-ai/deepseek-v4-pro-0813）。四位形态只在没有完整日期
+// 时才剥，且只认合法的月日，避免把 -2024 之类的年份或型号数字误当日期。
+function withoutDateSuffix(modelId: string): string[] {
+  const withoutFullDate = modelId.replace(/-20\d{6}$/, "");
+  if (withoutFullDate !== modelId) return [withoutFullDate];
+  const withoutMonthDay = modelId.replace(/-(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$/, "");
+  return withoutMonthDay !== modelId ? [withoutMonthDay] : [];
+}
+
+// ---------------------------------------------------------------------------
+// 生效目录：内置快照 + 运行期目录（catalogLive.ts）
+// ---------------------------------------------------------------------------
+// 运行期目录与快照出自同一个生成器（scripts/generate-model-catalog.mjs --json），
+// 分区裁决、归一化都已在生成期完成，这里只做两件事：远程分区整份替换同名快照
+// 分区；远程任何分区都没有的 id 从快照补回（上游下架/改名的模型可能仍在用户
+// 配置里，删掉会让它们退回兜底限额）。补回只看 id 是否全局出现，不涉及分区
+// 优先级，所以不会在客户端引入第二套裁决规则。
+export type RuntimeModelCatalog = {
+  snapshotDate: string;
+  sections: Partial<Record<CatalogProviderId, readonly CatalogModelEntry[]>>;
+};
+
+let effectiveCatalog: Record<CatalogProviderId, readonly CatalogModelEntry[]> = MODEL_CATALOG;
+
+export function getEffectiveModelCatalog(): Record<
+  CatalogProviderId,
+  readonly CatalogModelEntry[]
+> {
+  return effectiveCatalog;
+}
+
+/** 生效已校验的运行期目录；null 回到内置快照。调用方负责通知订阅者。 */
+export function applyRuntimeModelCatalog(runtime: RuntimeModelCatalog | null): void {
+  if (!runtime) {
+    effectiveCatalog = MODEL_CATALOG;
+  } else {
+    const remoteIds = new Set<string>();
+    for (const entries of Object.values(runtime.sections)) {
+      for (const entry of entries ?? []) remoteIds.add(entry.id.toLowerCase());
+    }
+    const next = {} as Record<CatalogProviderId, readonly CatalogModelEntry[]>;
+    for (const provider of CATALOG_PROVIDER_IDS) {
+      const remote = runtime.sections[provider];
+      if (!remote) {
+        next[provider] = MODEL_CATALOG[provider];
+        continue;
+      }
+      const backfill = MODEL_CATALOG[provider].filter(
+        (entry) => !remoteIds.has(entry.id.toLowerCase()),
+      );
+      next[provider] = [...remote, ...backfill].sort((a, b) =>
+        a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+      );
+    }
+    effectiveCatalog = next;
+  }
+  catalogIndexByProvider.clear();
 }
 
 const catalogIndexByProvider = new Map<CatalogProviderId, Map<string, CatalogModelEntry>>();
@@ -97,7 +157,7 @@ function getCatalogIndex(catalogProvider: CatalogProviderId): Map<string, Catalo
   let index = catalogIndexByProvider.get(catalogProvider);
   if (!index) {
     index = new Map();
-    for (const entry of MODEL_CATALOG[catalogProvider]) {
+    for (const entry of effectiveCatalog[catalogProvider]) {
       index.set(entry.id, entry);
       // 目录含混合大小写 id（MiniMax-M2/LongCat-2.0 等）：补小写别名，让候选链
       // 的 lower 候选可命中；生成期按小写去重保证别名不会跨条目歧义。
@@ -199,13 +259,26 @@ export function extractProviderDeclaredLimits(
       ? (obj.top_provider as Record<string, unknown>)
       : undefined;
 
+  const hasCamelCaseProviderLimits =
+    obj.maxOutputTokens != null ||
+    topProvider?.maxOutputTokens != null ||
+    topProvider?.maxOutputToken != null;
   const contextWindow =
-    asPositiveInt(obj.context_length) ?? asPositiveInt(topProvider?.context_length);
+    asPositiveInt(obj.context_length) ??
+    asPositiveInt(topProvider?.context_length) ??
+    (hasCamelCaseProviderLimits ? asPositiveInt(obj.contextWindow) : undefined) ??
+    (hasCamelCaseProviderLimits ? asPositiveInt(obj.context_window) : undefined) ??
+    (hasCamelCaseProviderLimits ? asPositiveInt(topProvider?.contextWindow) : undefined) ??
+    (hasCamelCaseProviderLimits ? asPositiveInt(topProvider?.context_window) : undefined);
   if (!contextWindow) return undefined;
 
   const maxOutputToken =
     asPositiveInt(topProvider?.max_completion_tokens) ??
     asPositiveInt(obj.max_completion_tokens) ??
+    asPositiveInt(topProvider?.maxOutputTokens) ??
+    asPositiveInt(topProvider?.maxOutputToken) ??
+    asPositiveInt(obj.maxOutputTokens) ??
+    asPositiveInt(obj.maxOutputToken) ??
     // 部分中转商不单独公布输出上限，仅给窗口——按目录同一规则钳到保守预留值。
     normalizeModelLimits({ contextWindow, maxOutputToken: contextWindow }).maxOutputToken;
 

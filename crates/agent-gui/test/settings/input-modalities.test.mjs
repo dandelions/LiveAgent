@@ -5,8 +5,8 @@ import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 // inputModalities（模型输入模态用户覆盖）的反漂移锁：
 // 1. normalizer 的过滤/补齐/规范顺序契约；
 // 2. 设置加载往返不丢字段；
-// 3. modelFactory 只在附件发送确实受 model.input 门控的分支（codex/gemini/
-//    deepseek）应用覆盖，anthropic 不适用（避免虚假能力声明）。
+// 3. modelFactory 对所有供应商（含 Anthropic 兼容）应用覆盖：K-brain 按模型条目的
+//    inputModalities 判定能否收图，与 API 类型无关（#1045）。
 const loader = createTsModuleLoader();
 const { normalizeInputModalities, normalizeProviderModelConfig, normalizeProviderModelConfigs } =
   loader.loadModule("src/lib/settings/index.ts");
@@ -106,7 +106,8 @@ test(
     assert.equal(providerSupportsModelInputModalitiesOverride("xai"), true);
     assert.equal(providerSupportsModelInputModalitiesOverride("gemini"), true);
     assert.equal(providerSupportsModelInputModalitiesOverride("deepseek"), true);
-    assert.equal(providerSupportsModelInputModalitiesOverride("claude_code"), false);
+    // #1045：Anthropic 兼容供应商同样可以手动开启图片输入。
+    assert.equal(providerSupportsModelInputModalitiesOverride("claude_code"), true);
   },
 );
 
@@ -137,19 +138,17 @@ test("modelFactory: gemini custom model honors the override", () => {
   assert.deepEqual(model.input, ["text"]);
 });
 
-test("modelFactory: deepseek infers image input from the model id and honors the override", () => {
-  // 官方《图像理解》指南只承诺 flash 家族吃图，Pro 与更早的模型不跟着放开。
+test("modelFactory: K-brain model descriptors use explicit modality overrides", () => {
   const flash = createModelFromConfig(
     "deepseek",
     "deepseek-v4-flash",
     "https://api.deepseek.com",
   );
-  assert.deepEqual(flash.input, ["text", "image"]);
+  assert.deepEqual(flash.input, ["text"]);
 
   const pro = createModelFromConfig("deepseek", "deepseek-v4-pro", "https://api.deepseek.com");
   assert.deepEqual(pro.input, ["text"]);
 
-  // 中转端点不吃图时用覆盖改回纯文本（覆盖优先于 id 推断）。
   const forcedText = createModelFromConfig(
     "deepseek",
     "deepseek-v4-flash",
@@ -164,7 +163,6 @@ test("modelFactory: deepseek infers image input from the model id and honors the
   );
   assert.deepEqual(forcedText.input, ["text"]);
 
-  // 反向：用户明确知道自家端点支持时，也能给 Pro 开图。
   const forcedImage = createModelFromConfig(
     "deepseek",
     "deepseek-v4-pro",
@@ -180,7 +178,7 @@ test("modelFactory: deepseek infers image input from the model id and honors the
   assert.deepEqual(forcedImage.input, ["text", "image"]);
 });
 
-test("modelFactory: anthropic custom model does not apply the override (attachments ignore model.input upstream)", () => {
+test("modelFactory: K-brain anthropic descriptor preserves explicit modalities", () => {
   const model = createModelFromConfig(
     "claude_code",
     "unknown-relay-claude-model",
@@ -193,7 +191,7 @@ test("modelFactory: anthropic custom model does not apply the override (attachme
       inputModalities: ["text", "image"],
     },
   );
-  assert.deepEqual(model.input, ["text"]);
+  assert.deepEqual(model.input, ["text", "image"]);
 });
 
 test("gemini persisted model survives the ProviderModal open/save round trip", () => {
@@ -217,14 +215,15 @@ test("gemini persisted model survives the ProviderModal open/save round trip", (
   });
 });
 
-test("gemini fetch-path normalization preserves the inputModalities override", () => {
-  // API 响应形状的条目（inputTokenLimit/outputTokenLimit）混有用户覆盖字段时，
-  // 刷新后覆盖不得丢失（此前 normalizeGeminiFetchedModels 重建对象会洗掉它）。
+test("gemini K-brain discovery normalization preserves the inputModalities override", () => {
+  // K-brain 已把供应商原始字段归一化为统一模型契约；前端只归一化该契约，
+  // 不再解析 Gemini 的原生 name/inputTokenLimit/outputTokenLimit 字段。
   const fetched = [
     {
-      name: "models/gemini-custom",
-      inputTokenLimit: 123456,
-      outputTokenLimit: 789,
+      id: "gemini-custom",
+      contextWindow: 123456,
+      maxOutputToken: 789,
+      limitsSource: "provider",
       inputModalities: ["image"],
     },
   ];

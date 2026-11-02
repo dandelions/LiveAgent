@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
+  Clock3,
   Folder,
   Plus,
   RefreshCw,
@@ -17,6 +18,7 @@ import {
   Trash2,
 } from "@liveagent/ui/components/IconSet";
 import { SettingsNotice } from "@liveagent/ui/components/settings/SettingsNotice";
+import { Badge } from "@liveagent/ui/components/ui/badge";
 import { Button, RefreshButton } from "@liveagent/ui/components/ui/button";
 import {
   Dialog,
@@ -38,19 +40,23 @@ import { Tabs, TabsList, TabsTrigger } from "@liveagent/ui/components/ui/tabs";
 import { Textarea } from "@liveagent/ui/components/ui/textarea";
 import { toast } from "@liveagent/ui/components/ui/toast-manager";
 import { useLocale } from "@liveagent/ui/i18n/index";
-import { buildModelOptions } from "@liveagent/ui/lib/models/modelOptions";
 import { cn } from "@liveagent/ui/lib/shared/utils";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { MemoryMeta } from "../../../lib/memory/api";
 import { MEMORY_TYPES, type MemoryType } from "../../../lib/memory/schema";
+import {
+  getResourceHostCapabilities,
+  type ResourceHostCapabilities,
+} from "../../../lib/resourceHost";
+import type { KBrainSettingsAdapter } from "../kbrainSettingsAdapter";
 import { ConfirmDeletePopover } from "../shared";
 import { MemorySettingsDrawer } from "./MemorySettingsDrawer";
+import { MemorySwitch } from "./MemorySwitch";
 import {
   entryKey,
   entryTitle,
   fallbackScopeQuotas,
   formatTime,
-  type MemoryModelOption,
   type MemoryTab,
   matchesFilter,
   memoryScopeLabel,
@@ -60,6 +66,10 @@ import {
   strongestQuotaLevel,
 } from "./panelModel";
 import { type MemoryCreateDraft, useMemoryPanelData } from "./useMemoryPanelData";
+
+// Pending-review tone. Amber is a Tailwind palette override until a warning semantic token exists.
+const PENDING_REVIEW_TEXT = "text-amber-700 dark:text-amber-300";
+const PENDING_REVIEW_FILL = "bg-amber-500/10";
 
 const EMPTY_CREATE_DRAFT: MemoryCreateDraft = {
   slug: "",
@@ -73,15 +83,19 @@ export function MemoryPanel(props: {
   workdir?: string;
   settings: AppSettings;
   setSettings: (updater: (prev: AppSettings) => AppSettings) => void;
+  resourceHost?: ResourceHostCapabilities;
+  kbrain?: KBrainSettingsAdapter;
 }) {
   const { t } = useLocale();
   const workdir = props.workdir?.trim() || undefined;
   const [tab, setTab] = useState<MemoryTab>("global");
   const [filter, setFilter] = useState("");
+  const [unreviewedOnly, setUnreviewedOnly] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const [refreshState, setRefreshState] = useState<"idle" | "refreshing">("idle");
   const [draft, setDraft] = useState<MemoryCreateDraft>(EMPTY_CREATE_DRAFT);
+  const resourceHost = props.resourceHost ?? getResourceHostCapabilities();
   const {
     entries,
     quota,
@@ -100,23 +114,16 @@ export function MemoryPanel(props: {
     acceptSelected,
     deleteSelected,
     wipeAll,
-    watchOrganizerRun,
-  } = useMemoryPanelData({ workdir, t });
-
-  const modelOptions = useMemo<MemoryModelOption[]>(
-    () =>
-      buildModelOptions(props.settings).map((option) => ({
-        value: option.value,
-        label: option.label,
-        providerName: option.providerName,
-        providerId: option.providerId,
-        providerType: option.providerType,
-      })),
-    [props.settings],
-  );
+    backendManaged: observedBackendManaged,
+  } = useMemoryPanelData({
+    workdir,
+    t,
+    backendManaged: resourceHost.memoryBackendManaged,
+  });
+  const backendManaged = resourceHost.memoryBackendManaged || observedBackendManaged;
 
   async function handleRefresh() {
-    if (refreshState !== "idle") return;
+    if (backendManaged || refreshState !== "idle") return;
     setRefreshState("refreshing");
     try {
       const refreshed = await reload();
@@ -127,17 +134,23 @@ export function MemoryPanel(props: {
     }
   }
 
+  // Journal entries cannot be accepted, so they never count as awaiting review.
+  const isVisible = useCallback(
+    (entry: MemoryMeta) =>
+      matchesFilter(entry, filter) &&
+      (!unreviewedOnly || (entry.unreviewed && entry.memoryType !== "daily")),
+    [filter, unreviewedOnly],
+  );
+
   const globalEntries = useMemo(() => {
     return entries
       .filter((entry) => entry.scope === "global" && entry.memoryType !== "daily")
-      .filter((entry) => matchesFilter(entry, filter));
-  }, [entries, filter]);
+      .filter(isVisible);
+  }, [entries, isVisible]);
 
   const dailyEntries = useMemo(() => {
-    return entries
-      .filter((entry) => entry.memoryType === "daily")
-      .filter((entry) => matchesFilter(entry, filter));
-  }, [entries, filter]);
+    return entries.filter((entry) => entry.memoryType === "daily").filter(isVisible);
+  }, [entries, isVisible]);
 
   const projectGroups = useMemo(() => {
     const groups = new Map<
@@ -151,7 +164,7 @@ export function MemoryPanel(props: {
     >();
     for (const entry of entries) {
       if (entry.scope !== "project" || entry.memoryType === "daily") continue;
-      if (!matchesFilter(entry, filter)) continue;
+      if (!isVisible(entry)) continue;
       const key = entry.workdirHash || entry.workdirPath || "unknown";
       const label = projectLabel(entry, t);
       const group = groups.get(key) ?? {
@@ -176,16 +189,40 @@ export function MemoryPanel(props: {
           ? a.label.localeCompare(b.label)
           : b.latestUpdatedAt - a.latestUpdatedAt,
       );
-  }, [entries, filter, t]);
+  }, [entries, isVisible, t]);
 
-  const projectEntryCount = entries.filter(
-    (entry) => entry.scope === "project" && entry.memoryType !== "daily",
-  ).length;
-  const globalEntryCount = entries.filter(
-    (entry) => entry.scope === "global" && entry.memoryType !== "daily",
-  ).length;
-  const dailyEntryCount = entries.filter((entry) => entry.memoryType === "daily").length;
-  const unreviewedCount = entries.filter((entry) => entry.unreviewed).length;
+  const isPendingReview = (entry: MemoryMeta) => entry.unreviewed && entry.memoryType !== "daily";
+  const countEntries = (predicate: (entry: MemoryMeta) => boolean) =>
+    entries.filter((entry) => predicate(entry) && (!unreviewedOnly || isPendingReview(entry)))
+      .length;
+  const isGlobalTabEntry = (entry: MemoryMeta) =>
+    entry.scope === "global" && entry.memoryType !== "daily";
+  const isProjectTabEntry = (entry: MemoryMeta) =>
+    entry.scope === "project" && entry.memoryType !== "daily";
+  const isJournalTabEntry = (entry: MemoryMeta) => entry.memoryType === "daily";
+  const projectEntryCount = countEntries(isProjectTabEntry);
+  const globalEntryCount = countEntries(isGlobalTabEntry);
+  const dailyEntryCount = countEntries(isJournalTabEntry);
+  const unreviewedCount = entries.filter(isPendingReview).length;
+
+  // Leave the filtered view once the last pending entry has been reviewed.
+  useEffect(() => {
+    if (unreviewedOnly && unreviewedCount === 0) setUnreviewedOnly(false);
+  }, [unreviewedOnly, unreviewedCount]);
+
+  function enableUnreviewedFilter() {
+    if (unreviewedCount === 0) return;
+    setUnreviewedOnly(true);
+    const tabHasPending: Record<MemoryTab, boolean> = {
+      global: entries.some((entry) => isGlobalTabEntry(entry) && isPendingReview(entry)),
+      project: entries.some((entry) => isProjectTabEntry(entry) && isPendingReview(entry)),
+      journal: false,
+    };
+    if (!tabHasPending[tab]) {
+      const next = (["global", "project"] as const).find((key) => tabHasPending[key]);
+      if (next) setTab(next);
+    }
+  }
   const quotaItems = useMemo(
     () => fallbackScopeQuotas(entries, quota, Boolean(workdir)),
     [entries, quota, workdir],
@@ -224,6 +261,14 @@ export function MemoryPanel(props: {
       >
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0 truncate text-xs font-semibold">{entryTitle(entry)}</div>
+          {isPendingReview(entry) ? (
+            <Badge
+              size="compact"
+              className={cn("ml-auto", PENDING_REVIEW_FILL, PENDING_REVIEW_TEXT)}
+            >
+              {t("settings.memoryUnreviewed")}
+            </Badge>
+          ) : null}
           <div className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-tiny text-muted-foreground">
             {memoryTypeLabel(entry.memoryType, t)}
           </div>
@@ -237,6 +282,7 @@ export function MemoryPanel(props: {
 
   function renderFlatEntries(items: MemoryMeta[], emptyKey: string) {
     if (items.length === 0) {
+      if (loading || error || backendManaged) return null;
       return (
         <div
           className={cn(
@@ -244,7 +290,7 @@ export function MemoryPanel(props: {
             "text-center text-xs text-muted-foreground",
           )}
         >
-          {t(emptyKey)}
+          {t(unreviewedOnly ? "settings.memoryNoUnreviewedEntries" : emptyKey)}
         </div>
       );
     }
@@ -260,6 +306,7 @@ export function MemoryPanel(props: {
         )}
       >
         <div className="shrink-0 space-y-3">
+          {props.kbrain ? <MemorySwitch kbrain={props.kbrain} /> : null}
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0 space-y-1">
               <div className="text-sm text-muted-foreground">
@@ -284,10 +331,10 @@ export function MemoryPanel(props: {
 
               <RefreshButton
                 aria-busy={loading || refreshState === "refreshing"}
+                disabled={backendManaged || loading || refreshState !== "idle"}
                 variant="outline"
                 size="sm"
                 onClick={() => void handleRefresh()}
-                disabled={loading || refreshState !== "idle"}
               >
                 <RefreshCw
                   className={cn(
@@ -299,6 +346,7 @@ export function MemoryPanel(props: {
               </RefreshButton>
               <Button
                 size="sm"
+                disabled={backendManaged}
                 onClick={() => {
                   setDraft({
                     ...EMPTY_CREATE_DRAFT,
@@ -314,6 +362,7 @@ export function MemoryPanel(props: {
               <Button
                 variant="outline"
                 size="icon-sm"
+                disabled={backendManaged}
                 title={t("settings.memoryOpenSettings")}
                 aria-label={t("settings.memoryOpenSettings")}
                 onClick={() => setSettingsDrawerOpen(true)}
@@ -324,14 +373,23 @@ export function MemoryPanel(props: {
           </div>
 
           {unreviewedCount > 0 ? (
-            <div
+            // Keep the shared Button for its focus ring and disabled handling. The amber
+            // tone stays as a caller override because there is no warning semantic token yet.
+            <Button
+              variant="ghost"
+              onClick={enableUnreviewedFilter}
               className={cn(
-                "mt-3 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2",
-                "text-xs text-amber-700 dark:text-amber-300",
+                "mt-3 h-auto w-full justify-start whitespace-normal rounded-lg px-3 text-left",
+                "font-normal text-xs",
+                "border border-amber-500/20 bg-amber-500/[0.06] hover:bg-amber-500/[0.1]",
+                PENDING_REVIEW_TEXT,
               )}
             >
               {unreviewedCount} {t("settings.memoryAwaitingReview")}
-            </div>
+              {unreviewedOnly ? null : (
+                <span className="ml-1 underline">{t("settings.memoryReviewNow")}</span>
+              )}
+            </Button>
           ) : null}
           {pathsInfo?.isInCloud ? (
             <div
@@ -373,7 +431,12 @@ export function MemoryPanel(props: {
               {t("settings.memoryQuotaWarningMessage")}
             </div>
           ) : null}
-          {error ? (
+          {backendManaged ? (
+            <SettingsNotice variant="warning" className="mt-3">
+              {t("settings.memoryBackendManaged")}
+            </SettingsNotice>
+          ) : null}
+          {error && !backendManaged ? (
             <SettingsNotice variant="multiline-error" className="mt-3">
               {error}
             </SettingsNotice>
@@ -438,6 +501,26 @@ export function MemoryPanel(props: {
                     placeholder={t("settings.memorySearchPlaceholder")}
                   />
                 </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-pressed={unreviewedOnly}
+                  title={t("settings.memoryFilterUnreviewed")}
+                  aria-label={t("settings.memoryFilterUnreviewed")}
+                  disabled={unreviewedCount === 0}
+                  onClick={() =>
+                    unreviewedOnly ? setUnreviewedOnly(false) : enableUnreviewedFilter()
+                  }
+                  className={cn(
+                    "shrink-0 gap-1",
+                    unreviewedOnly
+                      ? cn(PENDING_REVIEW_FILL, PENDING_REVIEW_TEXT, "hover:bg-amber-500/15")
+                      : "text-muted-foreground",
+                  )}
+                >
+                  <Clock3 className="size-3.5" />
+                  {unreviewedCount}
+                </Button>
               </div>
             </div>
 
@@ -452,14 +535,20 @@ export function MemoryPanel(props: {
               ) : tab === "journal" ? (
                 renderFlatEntries(dailyEntries, "settings.memoryNoJournalEntries")
               ) : projectGroups.length === 0 ? (
-                <div
-                  className={cn(
-                    "rounded-lg bg-settings-tile px-4 py-8",
-                    "text-center text-xs text-muted-foreground",
-                  )}
-                >
-                  {t("settings.memoryNoProjectEntries")}
-                </div>
+                loading || error || backendManaged ? null : (
+                  <div
+                    className={cn(
+                      "rounded-lg bg-settings-tile px-4 py-8",
+                      "text-center text-xs text-muted-foreground",
+                    )}
+                  >
+                    {t(
+                      unreviewedOnly
+                        ? "settings.memoryNoUnreviewedEntries"
+                        : "settings.memoryNoProjectEntries",
+                    )}
+                  </div>
+                )
               ) : (
                 <div className="space-y-2">
                   {projectGroups.map((group) => (
@@ -535,7 +624,7 @@ export function MemoryPanel(props: {
                           variant="outline"
                           size="sm"
                           onClick={acceptSelected}
-                          disabled={saving}
+                          disabled={backendManaged || saving}
                         >
                           <Check className="size-3.5" />
                           {t("settings.memoryAccept")}
@@ -552,7 +641,7 @@ export function MemoryPanel(props: {
                             onClick={open}
                             variant="ghost"
                             size="icon-sm"
-                            disabled={saving}
+                            disabled={backendManaged || saving}
                             aria-label={t("settings.memoryDelete")}
                           >
                             <Trash2 className="size-3.5" />
@@ -615,7 +704,7 @@ export function MemoryPanel(props: {
 
                 <div className="shrink-0 border-t border-border/40 p-4">
                   <div className="flex justify-end gap-3">
-                    <Button size="sm" onClick={saveSelected} disabled={saving}>
+                    <Button size="sm" onClick={saveSelected} disabled={backendManaged || saving}>
                       {t("settings.memorySave")}
                     </Button>
                   </div>
@@ -748,14 +837,14 @@ export function MemoryPanel(props: {
                 variant="outline"
                 size="sm"
                 onClick={() => setShowCreate(false)}
-                disabled={saving}
+                disabled={backendManaged || saving}
               >
                 {t("settings.memoryCancel")}
               </Button>
               <Button
                 size="sm"
                 onClick={handleCreateEntry}
-                disabled={saving || !draft.slug.trim() || !draft.body.trim()}
+                disabled={backendManaged || saving || !draft.slug.trim() || !draft.body.trim()}
               >
                 {t("settings.memorySave")}
               </Button>
@@ -767,18 +856,13 @@ export function MemoryPanel(props: {
       {settingsDrawerOpen ? (
         <MemorySettingsDrawer
           storagePath={pathsInfo?.root ?? "~/.liveagent/memory"}
-          modelOptions={modelOptions}
-          settings={props.settings}
-          setSettings={props.setSettings}
           workdir={workdir}
           saving={saving}
           t={t}
           onClose={() => setSettingsDrawerOpen(false)}
           onRequestWipe={wipeAll}
-          onOrganizerRunQueued={(runId) => watchOrganizerRun(runId)}
-          onMemoryChanged={() => {
-            void reload();
-          }}
+          backendManaged={backendManaged}
+          kbrain={resourceHost.isKbrain}
         />
       ) : null}
     </>

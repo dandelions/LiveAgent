@@ -33,6 +33,7 @@ import {
   SettingsToggleGroup,
   SettingsToggleGroupItem,
 } from "@liveagent/ui/components/settings/SettingsToggleGroup";
+import { preloadTimeZoneOptions } from "@liveagent/ui/components/settings/TimeZonePicker";
 import { Button } from "@liveagent/ui/components/ui/button";
 import {
   Dialog,
@@ -53,8 +54,10 @@ import {
   SettingsRow,
 } from "@liveagent/ui/pages/settings/shared";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-
+import { type DetectedProxy, DetectedProxyList } from "./DetectedProxyList";
+import { PlanningTimeZoneSetting } from "./PlanningTimeZoneSetting";
 import { SidebarShortcutsSection } from "./SidebarShortcutsSection";
+import { parseSystemProxyPortDraft } from "./systemProxyInput";
 
 const FONT_SCALE_OPTIONS = [0.9, 1, 1.1, 1.2] as const;
 type FontFamilySettingKey = "interfaceFontFamily" | "chatFontFamily" | "codeFontFamily";
@@ -124,7 +127,9 @@ function ProxySettingsRow({
 
 export function SystemSettingsForm(props: SettingsSectionProps) {
   const { settings, setSettings } = props;
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
+
+  useEffect(() => preloadTimeZoneOptions(locale), [locale]);
 
   const executionMode = settings.system.executionMode;
 
@@ -164,6 +169,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
     { key: "sidebar", label: t("settings.fontSizeSidebar") },
     { key: "chat", label: t("settings.fontSizeChat") },
     { key: "rightDock", label: t("settings.fontSizeRightDock") },
+    { key: "settings", label: t("settings.fontSizeSettings") },
   ];
 
   function getFontScaleLabel(value: number) {
@@ -298,7 +304,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
   // 会先把按钮变回可用，但落在禁用按钮上的这次 click 已被浏览器吞掉，需点两次。
   const effectiveProxyHost = (proxyHostDraft ?? systemProxy.host).trim();
   const effectiveProxyPort =
-    proxyPortDraft !== null ? Number.parseInt(proxyPortDraft, 10) : systemProxy.port;
+    proxyPortDraft !== null ? parseSystemProxyPortDraft(proxyPortDraft) : systemProxy.port;
   const proxyConfigValid =
     isValidSystemProxyHost(effectiveProxyHost) &&
     Number.isInteger(effectiveProxyPort) &&
@@ -336,8 +342,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
 
   function commitProxyPortDraft(nextDraft = proxyPortDraft) {
     if (nextDraft !== null) {
-      const parsed = Number.parseInt(nextDraft, 10);
-      patchSystemProxy({ port: Number.isNaN(parsed) ? 0 : parsed });
+      patchSystemProxy({ port: parseSystemProxyPortDraft(nextDraft) });
       setProxyPortDraft(null);
     }
   }
@@ -353,6 +358,32 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
     if (proxyPasswordDraft !== null) {
       patchSystemProxy({ password: proxyPasswordDraft });
       setProxyPasswordDraft(null);
+    }
+  }
+
+  // 点击检测到的代理：填写类型、地址、端口，不动开关。草稿一并清掉，否则输入框
+  // 里残留的旧值会在下次失焦时写回去。换到另一台主机时清掉原来的用户名密码，
+  // 免得把旧代理的凭据发给新地址（passwordConfigured=false 是同步里的显式清除信号）。
+  function applyDetectedProxy(proxy: DetectedProxy) {
+    const sameTarget = effectiveProxyHost === proxy.host && effectiveProxyPort === proxy.port;
+    setProxyHostDraft(null);
+    setProxyPortDraft(null);
+    if (sameTarget) {
+      patchSystemProxy({ type: proxy.type, host: proxy.host, port: proxy.port });
+    } else {
+      setProxyUsernameDraft(null);
+      setProxyPasswordDraft(null);
+      patchSystemProxy({
+        type: proxy.type,
+        host: proxy.host,
+        port: proxy.port,
+        username: "",
+        password: "",
+        passwordConfigured: false,
+      });
+    }
+    if (proxy.authRequired) {
+      document.getElementById("system-proxy-username")?.focus();
     }
   }
 
@@ -432,6 +463,12 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
               </SettingsSelectContent>
             </Select>
           }
+        />
+
+        <SettingsRow
+          title={t("settings.defaultTimeZone")}
+          description={t("settings.defaultTimeZoneDesc")}
+          control={<PlanningTimeZoneSetting />}
         />
       </SettingsGroup>
 
@@ -554,6 +591,14 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
                       onBlur={() => commitProxyPortDraft()}
                     />
                   </FormField>
+                  <DetectedProxyList
+                    current={{
+                      type: systemProxy.type,
+                      host: effectiveProxyHost,
+                      port: effectiveProxyPort,
+                    }}
+                    onSelect={applyDetectedProxy}
+                  />
                 </div>
 
                 <div className="mt-4 space-y-4">

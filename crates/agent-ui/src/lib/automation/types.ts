@@ -135,14 +135,18 @@ export type AutomationSnapshot = {
 };
 
 export type CronRunState = "pending" | "leased" | "done" | "expired";
+export type CronRunTerminationReason = "cancelled" | "timeout" | string;
 
 export type CronRunNowResponse = {
+  executionId?: string;
   startedAt: number;
 };
 
 export type CronRunRecord = {
   id: string;
   taskId: string;
+  sessionId?: string;
+  runId?: string;
   state: CronRunState;
   success: boolean;
   startedAt: number;
@@ -150,6 +154,9 @@ export type CronRunRecord = {
   durationMs: number;
   exitCode?: number;
   output: string;
+  /** Scheduler fires are counted; run-now executions are explicitly uncounted. */
+  counted?: boolean;
+  terminationReason?: CronRunTerminationReason;
 };
 
 export const MANUAL_CRON_RUN_POLL_INTERVAL_MS = 1_000;
@@ -160,9 +167,15 @@ const CONCURRENT_RUN_SKIP_PREFIX = "Skipped: previous run is still in progress."
 export function findManualCronRun(
   runs: CronRunRecord[],
   startedAt: number,
+  executionId?: string | null,
 ): CronRunRecord | undefined {
   return runs.reduce<CronRunRecord | undefined>((match, run) => {
-    if (run.startedAt < startedAt || run.output.startsWith(CONCURRENT_RUN_SKIP_PREFIX)) {
+    if (
+      run.startedAt < startedAt ||
+      run.counted === true ||
+      run.output.startsWith(CONCURRENT_RUN_SKIP_PREFIX) ||
+      (executionId != null && run.id !== executionId && run.runId !== executionId)
+    ) {
       return match;
     }
     if (!match || run.startedAt < match.startedAt) {
@@ -172,10 +185,65 @@ export function findManualCronRun(
   }, undefined);
 }
 
-export function isManualCronRunFinished(runs: CronRunRecord[], startedAt: number): boolean {
-  const run = findManualCronRun(runs, startedAt);
+export function isManualCronRunFinished(
+  runs: CronRunRecord[],
+  startedAt: number,
+  executionId?: string | null,
+): boolean {
+  const run = findManualCronRun(runs, startedAt, executionId);
   return run?.state === "done" || run?.state === "expired";
 }
+
+/** Run summary returned by the schedule layer query (output truncated to 300 chars). */
+export type CronRunSummary = {
+  id: string;
+  taskId: string;
+  startedAt: number;
+  finishedAt?: number;
+  state: CronRunState;
+  success: boolean;
+  durationMs: number;
+  exitCode?: number;
+  outputPreview: string;
+};
+
+export type CronOccurrenceTask = {
+  id: string;
+  name: string;
+  cron: string;
+  kind: CronTaskType;
+  remainingExecutions?: number | null;
+  lastRun?: CronRunSummary;
+};
+
+export type CronOccurrence = {
+  taskId: string;
+  at: number;
+};
+
+/** Per task and local day aggregate for high-frequency tasks. */
+export type CronDaySummary = {
+  taskId: string;
+  /** YYYY-MM-DD in the app default time zone. */
+  date: string;
+  planned: number;
+  /** The per-day expansion cap was reached; the real count is higher. */
+  plannedTruncated: boolean;
+  ran: number;
+  failed: number;
+  firstAt: number;
+  lastAt: number;
+};
+
+/** Planned fires (future), real runs (past) and day summaries for [from, to). */
+export type CronOccurrencesResponse = {
+  timeZone: string;
+  now: number;
+  tasks: CronOccurrenceTask[];
+  occurrences: CronOccurrence[];
+  runs: CronRunSummary[];
+  summaries: CronDaySummary[];
+};
 
 export type PromptRunRequest = {
   executionId: string;

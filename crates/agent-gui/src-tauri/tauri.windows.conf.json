@@ -8,6 +8,7 @@
         "height": 800,
         "minWidth": 480,
         "minHeight": 600,
+        "visible": false,
         "backgroundThrottling": "disabled",
         "decorations": false
       }
@@ -27,7 +28,8 @@
     ],
     "windows": {
       "nsis": {
-        "installerIcon": "icons/icon-windows.ico"
+        "installerIcon": "icons/icon-windows.ico",
+        "installerHooks": "windows/installer-hooks.nsh"
       }
     }
   }

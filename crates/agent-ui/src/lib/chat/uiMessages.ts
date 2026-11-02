@@ -1,11 +1,11 @@
+import { assistantMessageToText } from "@liveagent/app/lib/providers/llm";
 import type {
   AssistantMessage,
   Message,
   ToolCall,
   ToolResultMessage,
   Usage,
-} from "@liveagent/app/lib/agentTypes";
-import { assistantMessageToText } from "@liveagent/app/lib/providers/llm";
+} from "@liveagent/ui/lib/chat/agentTypes";
 import { ASK_USER_QUESTION_DEADLINE_ARG } from "@liveagent/ui/lib/chat/askUserQuestion";
 import { estimateThinkingReplayTokenUnits } from "@liveagent/ui/lib/chat/contextUsage";
 import {
@@ -21,9 +21,17 @@ import {
   EXIT_PLAN_MODE_PENDING_ARG,
 } from "@liveagent/ui/lib/chat/planMode";
 import {
+  TOOL_APPROVAL_ALLOW_SESSION_ARG,
   TOOL_APPROVAL_DEADLINE_ARG,
+  TOOL_APPROVAL_DEFAULT_SCOPE_ARG,
+  TOOL_APPROVAL_NOTICE_ARG,
   TOOL_APPROVAL_PENDING_ARG,
+  TOOL_APPROVAL_PREVIEW_ARG,
+  TOOL_APPROVAL_REMEMBER_RULES_ARG,
+  TOOL_APPROVAL_SESSION_SCOPE_ARG,
+  TOOL_APPROVAL_SESSION_WIDE_ARG,
   TOOL_APPROVAL_SUMMARY_ARG,
+  TOOL_PERMISSION_AUTO_RESOLVED_ARG,
 } from "@liveagent/ui/lib/chat/toolApprovalArgs";
 import { fileToolFieldChars, LIVE_TOOL_PREVIEW_META_KEY } from "@liveagent/ui/lib/chat/toolPreview";
 import {
@@ -44,6 +52,11 @@ const GLOBAL_BASH_MAX_TIMEOUT_MS = 600_000;
 export type ToolTraceItem = {
   toolCall: ToolCall;
   toolResult?: ToolResultMessage;
+  /**
+   * 命令运行中由后端推送的输出尾部快照（K-brain tool.status，有上限）。只活在
+   * 实时轮次里：结果到达即丢弃，不写入历史或持久化消息。
+   */
+  liveOutput?: string;
 };
 
 export type UiRoundContentBlock =
@@ -559,6 +572,14 @@ const DISPLAY_SYNTHETIC_ARG_KEYS = new Set([
   TOOL_APPROVAL_PENDING_ARG,
   TOOL_APPROVAL_DEADLINE_ARG,
   TOOL_APPROVAL_SUMMARY_ARG,
+  TOOL_APPROVAL_ALLOW_SESSION_ARG,
+  TOOL_APPROVAL_SESSION_SCOPE_ARG,
+  TOOL_APPROVAL_SESSION_WIDE_ARG,
+  TOOL_APPROVAL_REMEMBER_RULES_ARG,
+  TOOL_APPROVAL_DEFAULT_SCOPE_ARG,
+  TOOL_PERMISSION_AUTO_RESOLVED_ARG,
+  TOOL_APPROVAL_NOTICE_ARG,
+  TOOL_APPROVAL_PREVIEW_ARG,
   ASK_USER_QUESTION_DEADLINE_ARG,
   EXIT_PLAN_MODE_PENDING_ARG,
   EXIT_PLAN_MODE_APPROVED_ARG,
@@ -1227,10 +1248,12 @@ function upsertToolBlock(
     const existing = baseBlocks[existingIdx];
     if (existing.kind !== "tool") return baseBlocks;
     const next = baseBlocks.slice();
+    // 结果到达后由最终输出取代运行中快照。
+    const { liveOutput: _liveOutput, ...settledItem } = existing.item;
     next[existingIdx] = {
       kind: "tool",
       item: {
-        ...existing.item,
+        ...(toolResult ? settledItem : existing.item),
         toolCall: toolCallSnapshot,
         toolResult: toolResult ?? existing.item.toolResult,
       },

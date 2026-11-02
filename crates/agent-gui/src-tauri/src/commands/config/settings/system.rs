@@ -499,8 +499,95 @@ fn system_value_with_defaults(raw: Option<Value>, default_workdir: &str) -> Valu
         SYSTEM_BROWSER_AUTOMATION_MODE_KEY.to_string(),
         normalize_browser_automation_mode_value(system.get(SYSTEM_BROWSER_AUTOMATION_MODE_KEY)),
     );
+    system.insert(
+        SYSTEM_DEFAULT_TIME_ZONE_KEY.to_string(),
+        normalize_default_time_zone_value(system.get(SYSTEM_DEFAULT_TIME_ZONE_KEY)),
+    );
+    // 派生只读键:无论调用方传入什么都不采信,由 load_system_with_defaults 重新注入。
+    system.remove(SYSTEM_RESOLVED_TIME_ZONE_KEY);
 
     Value::Object(system)
+}
+
+/// 默认时区:非字符串 / 空串 / chrono_tz 无法解析的名字一律收敛为 ""(自动)。
+fn normalize_default_time_zone_value(raw: Option<&Value>) -> Value {
+    let text = raw
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !text.is_empty() && text.parse::<chrono_tz::Tz>().is_ok() {
+        Value::String(text.to_string())
+    } else {
+        Value::String(String::new())
+    }
+}
+
+/// 桌面端 OS 时区(IANA 名);取不到或 chrono_tz 无法解析时回退 "UTC"。
+pub(crate) fn os_time_zone() -> String {
+    match iana_time_zone::get_timezone() {
+        Ok(name) if name.parse::<chrono_tz::Tz>().is_ok() => name,
+        Ok(name) => {
+            eprintln!("[settings] OS time zone {name:?} is not a known IANA zone; using UTC");
+            "UTC".to_string()
+        }
+        Err(_) => "UTC".to_string(),
+    }
+}
+
+/// 全局有效时区的唯一权威来源:设置值合法 → 设置值;否则 OS 时区;否则 "UTC"。
+/// 配置库打不开时同样回退 OS 时区,不阻断调用方。
+pub(crate) fn load_runtime_default_time_zone() -> String {
+    let configured = open_db()
+        .and_then(|conn| load_system(&conn))
+        .ok()
+        .flatten()
+        .and_then(|value| {
+            value
+                .get(SYSTEM_DEFAULT_TIME_ZONE_KEY)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    resolve_default_time_zone(configured.as_deref())
+}
+
+/// 纯函数:按「设置值 → OS → UTC」的优先级得出有效时区名。
+fn resolve_default_time_zone(configured: Option<&str>) -> String {
+    match normalize_default_time_zone_value(
+        configured.map(|v| Value::String(v.to_string())).as_ref(),
+    ) {
+        Value::String(zone) if !zone.is_empty() => zone,
+        _ => os_time_zone(),
+    }
+}
+
+/// 有效时区的 chrono_tz 形态;解析失败(理论上不会发生)回退 UTC。
+/// 高频调用方(记忆索引逐文件计算日期锚点等)使用的短时缓存,避免每次都读配置库。
+/// 保存系统设置时调用 `invalidate_default_tz_cache` 立即失效。
+static DEFAULT_TZ_CACHE: std::sync::Mutex<Option<(std::time::Instant, chrono_tz::Tz)>> =
+    std::sync::Mutex::new(None);
+const DEFAULT_TZ_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub(crate) fn runtime_default_tz() -> chrono_tz::Tz {
+    if let Ok(cache) = DEFAULT_TZ_CACHE.lock() {
+        if let Some((at, tz)) = *cache {
+            if at.elapsed() < DEFAULT_TZ_CACHE_TTL {
+                return tz;
+            }
+        }
+    }
+    let tz = load_runtime_default_time_zone()
+        .parse::<chrono_tz::Tz>()
+        .unwrap_or(chrono_tz::Tz::UTC);
+    if let Ok(mut cache) = DEFAULT_TZ_CACHE.lock() {
+        *cache = Some((std::time::Instant::now(), tz));
+    }
+    tz
+}
+
+pub(crate) fn invalidate_default_tz_cache() {
+    if let Ok(mut cache) = DEFAULT_TZ_CACHE.lock() {
+        *cache = None;
+    }
 }
 
 /// 浏览器接入模式的合法取值,与前端 BROWSER_AUTOMATION_MODES 一致。
@@ -522,15 +609,20 @@ fn normalize_browser_automation_mode_value(raw: Option<&Value>) -> Value {
 }
 
 /// 命令安全模式的合法取值,与前端 COMMAND_SAFETY_MODES 一致。
-const COMMAND_SAFETY_MODES: [&str; 4] = ["ask", "auto", "sandbox", "sandboxOffline"];
+const COMMAND_SAFETY_MODES: [&str; 7] = [
+    "ask", "auto", "autoEdit", "always", "autoReview", "sandbox", "sandboxOffline",
+];
 /// 键缺失(全新配置/旧快照)时的默认值。
-const COMMAND_SAFETY_MODE_DEFAULT: &str = "auto";
+const COMMAND_SAFETY_MODE_DEFAULT: &str = "always";
+/// 已下线的"完全访问"旧值,读取时迁移为"始终允许"。
+const COMMAND_SAFETY_MODE_RETIRED_AUTO: &str = "auto";
 /// 存在但无法识别时收敛到的最严格值(逐次人工放行)。
 const COMMAND_SAFETY_MODE_FAIL_CLOSED: &str = "ask";
 
-/// "ask" | "auto" | "sandbox" | "sandboxOffline"。
+/// 保留受支持的权限模式，未知值收敛到 "ask"。
 ///
-/// - 键缺失 / null / 空串:沿用默认 "auto"(全新配置与旧快照的正常形态)。
+/// - 键缺失 / null / 空串:默认 "always"(全新配置与旧快照的正常形态)。
+/// - 旧值 "auto"(已下线的"完全访问")迁移为 "always"(始终允许),随下次保存持久化。
 /// - **存在但无法识别:收敛到最严格的 "ask"**(P2#6)。该设置全部意义在于约束,而
 ///   `save_system` 会先删除全部 system key 再按白名单重插,故此处的默认值不只是读取
 ///   期兜底,而是会被破坏性地持久化。未来新增的模式值、回退到旧版本、手改配置的
@@ -550,7 +642,7 @@ fn normalize_command_safety_mode_value(raw: Option<&Value>) -> Value {
         );
         return Value::String(COMMAND_SAFETY_MODE_FAIL_CLOSED.to_string());
     };
-    if text.is_empty() {
+    if text.is_empty() || text == COMMAND_SAFETY_MODE_RETIRED_AUTO {
         return Value::String(COMMAND_SAFETY_MODE_DEFAULT.to_string());
     }
     if COMMAND_SAFETY_MODES.contains(&text) {
@@ -601,10 +693,17 @@ pub(crate) fn load_runtime_browser_automation_mode() -> String {
 }
 
 fn load_system_with_defaults(conn: &Connection, default_workdir: &str) -> Result<Value, String> {
-    Ok(system_value_with_defaults(
-        load_system(conn)?,
-        default_workdir,
-    ))
+    let mut system = system_value_with_defaults(load_system(conn)?, default_workdir);
+    if let Value::Object(map) = &mut system {
+        // 注入「自动」档实际解析到的时区(桌面 OS 时区)。刻意不注入含设置值的有效
+        // 时区:前端切回「自动」时若沿用旧快照,展示的会是上一次的手选值;有效时区
+        // 由前端按 defaultTimeZone || resolvedTimeZone 自行得出,语义一致。
+        map.insert(
+            SYSTEM_RESOLVED_TIME_ZONE_KEY.to_string(),
+            Value::String(os_time_zone()),
+        );
+    }
+    Ok(system)
 }
 fn save_system(conn: &mut Connection, payload: Value) -> Result<(), String> {
     let default_workdir = default_project_workdir()?;
@@ -648,6 +747,7 @@ fn save_system_with_default_workdir(
         SYSTEM_WORKSPACE_RESOURCE_SETTINGS_KEY,
         SYSTEM_SYSTEM_PROXY_KEY,
         SYSTEM_CUA_ALLOW_SELF_TARGETING_KEY,
+        SYSTEM_DEFAULT_TIME_ZONE_KEY,
     ]
     .into_iter()
     .chain(

@@ -12,6 +12,52 @@ Gateway 是远程访问中继，不是 Agent 执行环境。它同时面对桌�
 | WebUI -> Gateway | WebSocket `/ws/v2`（Protobuf 帧） | 浏览器端发起 chat（command/subscribe）、直通 history/settings/skills/memory/cron 等请求，并订阅 `chat_event` 与同步广播。 |
 | WebUI -> Gateway | HTTP `/api/*` | 状态检查、文件上传、公网分享页、图片代理、静态资源。 |
 
+## K-brain 会话列表同步
+
+K-brain 的 `capabilities.session_changes >= 2` 表示支持摘要缓存、不可变分页快照和带字符串游标的变化清单。桌面 WebView 使用一个同步协调器建立完整摘要基线，从快照 revision 追赶到首份 changes 的 head，再以 `next_since` 续传。普通侧栏、置顶及桌面转发给 WebUI 的列表请求可复用这份摘要集合，不重复读取 transcript。旧后端保持原有轮询；鉴权失败不会通过降级绕过。
+
+桌面通过仅允许本地主窗口调用的 `gateway_publish_history_sync_v2` 发布完整摘要、增量和状态。该命令的 `accepted` 表示本次数据交给当前桌面到 Gateway 的发送路径，不代表每个浏览器已经收到。发送超时/离线会要求重新快照；桌面检查 Gateway 连接身份，连接替换后重新提交完整集合。K-brain epoch 变化也重建发布 generation。
+
+Gateway 按 agent 保存有容量上限的权威摘要集合。`HistorySyncEvent` 增加 `source_id`、`generation`、`delivery_seq`；`HistorySyncStatus` 说明生产者是否可用，以及当前浏览器是否需要恢复。数据队列满时，在独立状态中记录缺口；控制路径失败则关闭连接，由重连恢复，不能静默丢失恢复通知。
+
+浏览器通过 `HistoryResyncRequest` 获取同一恢复 token 的分页 `HistorySyncSnapshot`，在临时集合中回放切点之后的事件，再替换侧栏缓存并发送 `HistoryResyncAck`。旧 token、错误 generation、过期 token 或未覆盖缺口的序号不能清除恢复状态。恢复缓冲、快照有效期和大小均有上限；不通过无限排队换取一致性。
+
+健康 WebUI 保留 300 秒列表兜底，生产者状态超过 45 秒未刷新时恢复 60 秒轮询。桌面健康时关闭原 60 秒 reconcile，工作目录保留 300 秒兜底。focus 只请求合并后的 rescan，不重建全量快照；rescan 限频时保留现有基线并遵守 Retry-After。
+
+Gateway 使用 `-kbrain-url` 直连时，由 Relay 运行同一快照/changes 协议，并复用既有会话别名。能力探测失败会退避重试；不支持 v2 的后端保留旧行为并定期重探测。完整同步不依赖桌面，但仍复用 Gateway 的浏览器认证边界；受限共享链接不能订阅完整历史。
+
+会话文件格式、独立 TUI、ACP 和 `kn run` 不依赖该广播协议。没有 HTTP 同步订阅或快照租约时，K-brain 只保留按需摘要，不启动 HTTP 扫描或通知任务。实现依据与实际验证分别见 `docs/design/2026-10-27-session-change-sync.md` 和 `docs/plans/2026-10-28-session-sync/`；设计中的验收矩阵不等于已经执行通过。
+
+## HTTP 隧道的公开地址与资源路径
+
+HTTP 隧道通过 `/t/<slug>/` 进入 Gateway，再沿 Agent 链路转发到桌面端配置的
+`targetUrl`。Gateway 返回的 `publicPath` 只包含路径，不猜测 Docker 发布端口或反代域名。
+Desktop 从 Remote 设置的 `gatewayUrl` **和** `gatewayPort` 统一生成公开基址；独立端口
+覆盖 URL 中的端口，与桌面端 WebSocket 连接规则一致。面板展示、复制、打开以及
+TunnelManager 工具输出使用同一基址。Gateway WebUI 则使用浏览器的 `window.location.origin`。
+例如 Gateway 宿主机端口为 `3000`、目标服务端口为 `3099` 时，公开链接是
+`http://127.0.0.1:3000/t/<slug>/`，本地目标是 `http://127.0.0.1:3099/`。
+
+Gateway 改写 HTML/CSS 和响应头中的资源路径，并在应用脚本前注入
+`internal/server/tunnel_runtime.js`。运行时处理 fetch/XHR/WebSocket/EventSource，
+以及动态 `script.src`、`link.href`、`setAttribute`/`setAttributeNS` 和节点插入。
+资源地址必须在原生 DOM 操作之前改写，异步 MutationObserver 无法阻止首次错误请求。
+外部来源、相对资源地址、已带隧道前缀的地址保持原样。
+
+此兼容层不等同于完整应用的 `basePath` 支持：原生 ES module 根路径导入、Worker、
+客户端路由及动态 HTML 字符串等机制仍需应用自行适配。绿色链路/中继/本地服务状态
+只证明对应连接或 HTTP 探测成功，不能替代实际浏览器中的资源加载和交互验证。
+
+回归检查包括 `go test ./internal/server ./test/tunnel`（在 Gateway 目录执行）、
+`node --test crates/agent-gateway/test/webui/tunnel-runtime.test.mjs` 及
+`node --test crates/agent-gui/test/settings/gateway-public-url.test.mjs crates/agent-gui/test/tools/tunnel-manager-tools.test.mjs`
+（后两条在仓库根目录执行）。
+
+下图为最小复现页面的真实浏览器对照：端口行执行公开基址生成逻辑，动态脚本行使用
+原版和修复后的运行时请求同一 HTTP 服务；不是产品界面截图。
+
+![隧道公开地址与动态脚本的修复前后对照](../images/tunnel-url-and-runtime-regression.png)
+
 ## 入口与服务启动
 
 | 文件 | 作用 |

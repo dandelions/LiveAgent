@@ -59,6 +59,7 @@ import type {
   GatewayWorkspaceRootGrantDraft,
   HistoryGetOptions,
   HistoryListener,
+  HistorySyncListener,
   ManagedProcessLogPayload,
   ManagedProcessStatePayload,
   MentionListResponse,
@@ -128,6 +129,14 @@ export type GatewayWebSocketClientLike = {
   subscribeAgents(listener: (agents: AgentStatus[]) => void): () => void;
   subscribeStatus(listener: StatusListener): () => void;
   subscribeHistory(listener: HistoryListener): () => void;
+  subscribeHistorySync(listener: HistorySyncListener): () => void;
+  requestHistoryResync(
+    resyncToken: string,
+  ): Promise<import("./gatewayTypes").GatewayHistorySyncSnapshot>;
+  acknowledgeHistoryResync(
+    snapshot: import("./gatewayTypes").GatewayHistorySyncSnapshot,
+    appliedDeliverySeq?: number,
+  ): Promise<void>;
   subscribeSettings(listener: SettingsListener): () => void;
   subscribeTerminal(listener: TerminalListener): () => void;
   subscribeSftpTransfers(listener: SftpTransferListener): () => void;
@@ -144,6 +153,11 @@ export type GatewayWebSocketClientLike = {
   chatCommand(input: GatewayChatCommandInput): Promise<ChatCommandAccepted>;
   cancelChat(conversationId: string, runId?: string): Promise<void>;
   chatQueueGet(conversationId: string): Promise<ChatQueueResponse>;
+  chatQueueSetPaused(
+    conversationId: string,
+    paused: boolean,
+    revision: number,
+  ): Promise<ChatQueueResponse>;
   chatQueueGetItem(conversationId: string, itemId: string): Promise<ChatQueueResponse>;
   chatQueueRunNow(conversationId: string, itemId: string): Promise<ChatQueueResponse>;
   chatQueueCompactNow(conversationId: string, operationId: string): Promise<ChatQueueResponse>;
@@ -162,6 +176,8 @@ export type GatewayWebSocketClientLike = {
     uploadedFilesJson: string;
   }): Promise<ChatQueueResponse>;
   chatQueueEditCancel(conversationId: string, itemId: string): Promise<ChatQueueResponse>;
+  planningManage<T = unknown>(action: string, input?: unknown): Promise<T>;
+  subscribePlanning(listener: (seq: number) => void): () => void;
   cronManage(payload: CronManagePayload): Promise<CronManageResponse>;
   memoryManage<T = unknown>(payload: MemoryManagePayload): Promise<T>;
   /** 轨迹按需拉取：事件窗口、Prompt 分段和子代理 run 使用彼此独立的 ID 字段。 */
@@ -244,10 +260,20 @@ export type GatewayWebSocketClientLike = {
     expectedSizeBytes?: number;
   }): Promise<SftpActionResponse>;
   terminalShellOptions(): Promise<TerminalShellOptions>;
-  listTerminals(projectPathKey?: string): Promise<TerminalSession[]>;
+  listTerminals(
+    params?:
+      | string
+      | {
+          projectPathKey?: string;
+          conversationId?: string;
+          runId?: string;
+        },
+  ): Promise<TerminalSession[]>;
   createTerminal(params: {
     cwd: string;
     projectPathKey: string;
+    conversationId?: string;
+    runId?: string;
     shell?: string;
     title?: string;
     cols?: number;
@@ -415,6 +441,7 @@ export type GatewayWebSocketClientLike = {
     providerId?: string,
     isFullUrl?: boolean,
     customHeaders?: readonly { key: string; value: string }[],
+    requestFormat?: string,
   ): Promise<unknown>;
   providerUsageQuery<T = unknown>(providerId: string, refresh: boolean): Promise<T>;
   providerUsageTest<T = unknown>(providerId: string, configJson: string): Promise<T>;

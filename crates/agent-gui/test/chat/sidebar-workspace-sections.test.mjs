@@ -20,9 +20,11 @@ const icons = [
   "ChevronRight",
   "CirclePlus",
   "Clock3",
+  "CalendarDays",
   "Folder",
   "FolderClosed",
   "FolderOpen",
+  "ImageIcon",
   "ListChecks",
   "Loader2",
   "MessageSquare",
@@ -372,5 +374,37 @@ test("created empty groups remain visible in empty and truncated workspace lists
       await key(input, "Enter");
       assert.equal(sidebar.container.querySelector('[data-group-id="new-1"]').textContent, "New empty group (0)");
     } finally { await sidebar.cleanup(); }
+  }
+});
+
+
+test("Image Studio opens from the sidebar and honors shortcut visibility", async () => {
+  const container = document.createElement("div"), root = createRoot(container);
+  const opened = [];
+  const props = { ...baseProps, activeView: "image-studio-hub", onOpenResourceHub: (id) => opened.push(id) };
+  try {
+    await act(async () => root.render(React.createElement(ChatHistorySidebar, props)));
+    const entry = () => container.querySelector('[data-testid="sidebar-shortcut-image-studio"]');
+    assert.equal(entry().getAttribute("aria-current"), "page");
+    await click(entry());
+    assert.deepEqual(opened, ["image-studio"]);
+    await act(async () => root.render(React.createElement(ChatHistorySidebar, { ...props, sidebarShortcuts: { "image-studio": false } })));
+    assert.equal(entry(), null);
+  } finally { await act(async () => root.unmount()); }
+});
+
+test("Planning opens from the current sidebar and honors shortcut visibility", async () => {
+  const container = document.createElement("div"), root = createRoot(container);
+  const opened = [];
+  const props = { ...baseProps, activeView: "planning-hub", onOpenResourceHub: (id) => opened.push(id) };
+  try {
+    await act(async () => root.render(React.createElement(ChatHistorySidebar, props)));
+    const entry = () => [...container.querySelectorAll("button")].find((button) => button.textContent === "settings.navPlanning");
+    await click(entry());
+    assert.deepEqual(opened, ["planning"]);
+    await act(async () => root.render(React.createElement(ChatHistorySidebar, { ...props, sidebarShortcuts: { skills: true, mcp: true, cron: true, memory: true, planning: false } })));
+    assert.equal(entry(), undefined);
+  } finally {
+    await act(async () => root.unmount());
   }
 });

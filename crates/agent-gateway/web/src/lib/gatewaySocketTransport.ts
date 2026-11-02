@@ -29,6 +29,7 @@ import {
   type GatewayRequestOptions,
   getRuntimeHost,
   type HistoryListener,
+  type HistorySyncListener,
   isDocumentHidden,
   isForegroundWakeupEvent,
   isRecoverableGatewayTransportError,
@@ -74,7 +75,13 @@ import {
   encodeRequestFrame,
   GATEWAY_V2_SUBPROTOCOL,
 } from "./gatewaySocketV2/adapters";
-import type { AgentStatus, ChatQueueSnapshot, GatewayHistoryEvent } from "./gatewayTypes";
+import type {
+  AgentStatus,
+  ChatQueueSnapshot,
+  GatewayHistoryEvent,
+  GatewayHistorySyncSnapshot,
+  GatewayHistorySyncStatus,
+} from "./gatewayTypes";
 
 export class GatewayWebSocketTransport {
   readonly terminalStream: BrowserGatewayTerminalStreamClient;
@@ -86,6 +93,8 @@ export class GatewayWebSocketTransport {
   protected disposed = false;
   protected statusListeners = new Set<StatusListener>();
   protected historyListeners = new Set<HistoryListener>();
+  protected historySyncListeners = new Set<HistorySyncListener>();
+  protected planningListeners = new Set<(seq: number) => void>();
   protected settingsListeners = new Set<SettingsListener>();
   protected terminalListeners = new Set<TerminalListener>();
   protected sftpTransferListeners = new Set<SftpTransferListener>();
@@ -330,6 +339,13 @@ export class GatewayWebSocketTransport {
     this.scheduleReconnect(0);
   }
 
+  subscribePlanning(listener: (seq: number) => void): () => void {
+    this.planningListeners.add(listener);
+    return () => {
+      this.planningListeners.delete(listener);
+    };
+  }
+
   async getStatus(): Promise<AgentStatus> {
     const status = await this.requestWithRecovery<AgentStatus>("status.get", {});
     this.lastStatus = status;
@@ -391,6 +407,59 @@ export class GatewayWebSocketTransport {
     return () => {
       this.historyListeners.delete(listener);
     };
+  }
+
+  subscribeHistorySync(listener: HistorySyncListener): () => void {
+    this.historySyncListeners.add(listener);
+    return () => {
+      this.historySyncListeners.delete(listener);
+    };
+  }
+
+  async requestHistoryResync(resyncToken: string): Promise<GatewayHistorySyncSnapshot> {
+    const conversations: GatewayHistorySyncSnapshot["conversations"] = [];
+    let offset = 0;
+    let first: GatewayHistorySyncSnapshot | null = null;
+    for (;;) {
+      const page = await this.request<GatewayHistorySyncSnapshot>("history.resync", {
+        resync_token: resyncToken,
+        offset,
+        limit: 500,
+      });
+      if (
+        first !== null &&
+        (page.source_id !== first.source_id ||
+          page.generation !== first.generation ||
+          page.cut_delivery_seq !== first.cut_delivery_seq ||
+          page.resync_token !== first.resync_token ||
+          page.total_count !== first.total_count)
+      ) {
+        throw new Error("Gateway history synchronization snapshot changed while paging");
+      }
+      first ??= page;
+      conversations.push(...page.conversations);
+      if (page.next_offset === 0) break;
+      if (page.next_offset <= offset) {
+        throw new Error("Gateway history synchronization snapshot did not advance");
+      }
+      offset = page.next_offset;
+    }
+    if (first === null || conversations.length !== first.total_count) {
+      throw new Error("Gateway history synchronization snapshot is incomplete");
+    }
+    return { ...first, offset: 0, next_offset: 0, conversations };
+  }
+
+  async acknowledgeHistoryResync(
+    snapshot: GatewayHistorySyncSnapshot,
+    appliedDeliverySeq = snapshot.cut_delivery_seq,
+  ): Promise<void> {
+    await this.request("history.resync_ack", {
+      source_id: snapshot.source_id,
+      generation: snapshot.generation,
+      resync_token: snapshot.resync_token,
+      applied_delivery_seq: appliedDeliverySeq,
+    });
   }
 
   subscribeSettings(listener: SettingsListener): () => void {
@@ -641,6 +710,7 @@ export class GatewayWebSocketTransport {
         this.statusListeners.size > 0 ||
         this.historyListeners.size > 0 ||
         this.settingsListeners.size > 0 ||
+        this.planningListeners.size > 0 ||
         this.terminalListeners.size > 0 ||
         this.sftpTransferListeners.size > 0 ||
         this.chatActivityListeners.size > 0 ||
@@ -1136,7 +1206,14 @@ export class GatewayWebSocketTransport {
         this.bufferAgentEvent(decoded.agentId, decoded.type, decoded.payload);
         return;
       }
-      if (decoded.agentId && !this.matchesActiveAgent(decoded.agentId)) {
+      if (
+        decoded.agentId &&
+        !this.matchesActiveAgent(decoded.agentId) &&
+        !(
+          decoded.type === "workspace.activity" &&
+          decoded.agentId.startsWith("gateway-local-workspace-")
+        )
+      ) {
         return;
       }
       this.handleEvent(decoded.type, decoded.payload);
@@ -1167,11 +1244,28 @@ export class GatewayWebSocketTransport {
 
   // 分发广播事件；payload 已由适配层还原为既有归一化器需要的对象形状。
   protected handleEvent(type: string, payload: unknown) {
+    if (type === "planning.changed") {
+      const seq = (payload as { seq?: number }).seq;
+      if (typeof seq === "number") for (const listener of this.planningListeners) listener(seq);
+      return;
+    }
     if (type === "history.event") {
       const event = payload as GatewayHistoryEvent;
       if (event?.kind === "upsert" || event?.kind === "delete") {
         this.emitHistory(event);
       }
+      return;
+    }
+
+    if (type === "history.sync_status") {
+      const status = payload as GatewayHistorySyncStatus;
+      for (const listener of this.historySyncListeners) listener({ kind: "status", status });
+      return;
+    }
+
+    if (type === "history.sync_snapshot") {
+      const snapshot = payload as GatewayHistorySyncSnapshot;
+      for (const listener of this.historySyncListeners) listener({ kind: "snapshot", snapshot });
       return;
     }
 
