@@ -38,8 +38,10 @@ import {
   ContextMenuItem as StandardContextMenuItem,
 } from "@liveagent/ui/components/ui/context-menu";
 import { EmptyState } from "@liveagent/ui/components/ui/empty-state";
+import { KbdShortcut } from "@liveagent/ui/components/ui/kbd";
 import { isWorkspacePreviewPath } from "@liveagent/ui/components/workspace-editor/workspaceImagePreview";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import { isMacLikePlatform } from "@liveagent/ui/lib/chat/commandPalette";
 import {
   type CodeMentionReference,
   createCodeMentionReference,
@@ -193,23 +195,18 @@ function editorModelUri(tabKey: string) {
   });
 }
 
-function isMacLikePlatform() {
-  if (typeof navigator === "undefined") return false;
-  const platform = `${navigator.userAgent} ${navigator.platform}`;
-  return /Mac|iPhone|iPad|iPod/i.test(platform);
-}
-
+/** Monaco's own chords; redo and replace use different keys per platform. */
 function getEditorContextMenuShortcuts() {
   const isMac = isMacLikePlatform();
   return {
-    undo: isMac ? "⌘Z" : "Ctrl+Z",
-    redo: isMac ? "⌘⇧Z" : "Ctrl+Y",
-    cut: isMac ? "⌘X" : "Ctrl+X",
-    copy: isMac ? "⌘C" : "Ctrl+C",
-    paste: isMac ? "⌘V" : "Ctrl+V",
-    selectAll: isMac ? "⌘A" : "Ctrl+A",
-    find: isMac ? "⌘F" : "Ctrl+F",
-    replace: isMac ? "⌥⌘F" : "Ctrl+H",
+    undo: "Mod+KeyZ",
+    redo: isMac ? "Mod+Shift+KeyZ" : "Ctrl+KeyY",
+    cut: "Mod+KeyX",
+    copy: "Mod+KeyC",
+    paste: "Mod+KeyV",
+    selectAll: "Mod+KeyA",
+    find: "Mod+KeyF",
+    replace: isMac ? "Alt+Mod+KeyF" : "Ctrl+KeyH",
   } as const;
 }
 
@@ -1191,9 +1188,13 @@ function ContextMenuItem(props: {
       )}
       <span className="min-w-0 flex-1 truncate">{props.label}</span>
       {props.shortcut ? (
-        <kbd className="shrink-0 text-xs tracking-wide text-muted-foreground/60">
-          {props.shortcut}
-        </kbd>
+        <KbdShortcut
+          compact
+          shortcut={props.shortcut}
+          variant="plain"
+          size="inline"
+          className="text-xs tracking-wide text-muted-foreground/60"
+        />
       ) : null}
     </StandardContextMenuItem>
   );

@@ -55,6 +55,7 @@ import {
   DropdownMenuTrigger,
 } from "@liveagent/ui/components/ui/dropdown-menu";
 import { LabelTooltip as RuntimeControlTooltip } from "@liveagent/ui/components/ui/label-tooltip";
+import { ShortcutTooltip } from "@liveagent/ui/components/ui/shortcut-tooltip";
 import { SwitchIndicator } from "@liveagent/ui/components/ui/switch";
 import { toast } from "@liveagent/ui/components/ui/toast-manager";
 import { useLocale } from "@liveagent/ui/i18n/index";
@@ -70,6 +71,7 @@ import {
 } from "@liveagent/ui/lib/chat/conversationReferenceDrag";
 import type { ConversationMentionReference } from "@liveagent/ui/lib/chat/mentionReferences";
 import { nextComposerPermissionMode } from "@liveagent/ui/lib/chat/permissionModes";
+import { readSendShortcut } from "@liveagent/ui/lib/chat/sendShortcut";
 import {
   clearActiveWorkspacePathDrag,
   getActiveWorkspacePathDrag,
@@ -86,6 +88,7 @@ import {
 import type { GitClient } from "@liveagent/ui/lib/git/types";
 import type { SharedModelOption } from "@liveagent/ui/lib/models/modelOptions";
 import { cn } from "@liveagent/ui/lib/shared/utils";
+import { formatShortcutLabel } from "@liveagent/ui/lib/shortcuts/shortcutKeys";
 import type { SttTransport } from "@liveagent/ui/lib/stt/types";
 import type { WorkspaceActivityClient } from "@liveagent/ui/lib/workspace-activity/types";
 import {
@@ -102,6 +105,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { useEscapeToStopRun } from "../../lib/chat/escapeStopRun";
 import {
   getUploadedImagePreviewCacheKey,
   loadUploadedImagePreview,
@@ -109,6 +113,7 @@ import {
   type UploadedImagePreviewLoader,
 } from "../../lib/chat/uploadedImagePreview";
 import type { PendingUploadedFile } from "../../lib/chat/uploadTypes";
+import { useComposerShortcuts } from "../../lib/shortcuts/useComposerShortcuts";
 import { useComposerStt } from "./useComposerStt";
 
 function useComposerUploadedImagePreview(
@@ -374,12 +379,6 @@ export type ChatComposerBarProps = {
   clarifyContext?: ClarifyContext;
   onHeightChange?: (height: number) => void;
   /**
-   * 预留线之上被队列面板、任务进度药丸额外占据的高度（见
-   * composerOverlayMetrics）。它们不计入 onHeightChange，但浮在输入区上方的
-   * 控件（回到底部按钮）要再让出这段距离才不会被盖住。仅 desktop 上报。
-   */
-  onFloatingOverhangChange?: (height: number) => void;
-  /**
    * 卡片列中心相对输入区层中心的水平偏移（向右为正）。卡片列与正文同为居中，
    * 正常为 0；分屏等场景下仍按实测值平移，使居中锚定在输入区上方的控件与
    * 卡片、药丸对齐。仅 desktop 上报。
@@ -477,7 +476,6 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     runClarifyTurn,
     clarifyContext,
     onHeightChange,
-    onFloatingOverhangChange,
     onCenterOffsetChange,
     taskProgressBar,
     approvalBar,
@@ -549,7 +547,6 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
   const scheduleComposerOverflowMeasureRef = useRef<(() => void) | null>(null);
   const composerLayerRef = useRef<HTMLDivElement | null>(null);
   const composerColumnRef = useRef<HTMLDivElement | null>(null);
-  const queuePanelRef = useRef<HTMLDivElement | null>(null);
   // 走 state 而非 ref：容器随 taskProgressBar 插槽挂载/卸载，测量 effect 要
   // 跟着重新观察它。
   const [taskProgressBarElement, setTaskProgressBarElement] = useState<HTMLDivElement | null>(null);
@@ -614,6 +611,12 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     onChatRuntimeControlsChange,
     t,
   ]);
+  useComposerShortcuts({
+    rootRef: composerLayerRef,
+    enabled: !hidden,
+    focusComposer: () => composerRef.current?.focus(),
+    openModelPicker: modelPickerAvailable ? () => setModelPickerOpen(true) : undefined,
+  });
   const canDropConversationReference = isAgentMode && !controlsDisabled && !hidden;
   // "+"菜单不只有上传:plan 开关不依赖 workdir/上传状态,菜单触发键只按
   // 最宽松的可用项禁用,各菜单项再单独按自身前置条件禁用。
@@ -621,11 +624,22 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
   const hasSendableDraft = !composerIsEmpty || pendingUploadedFiles.length > 0;
   const sendDisabled = isInputDisabled || stt.active || isUploadingFiles || !hasSendableDraft;
   const canQueueDraftWhileSending = isSending && !sendDisabled;
+  // Mirrors the editor's send key preference; while a run streams the same
+  // button stops it, and Esc does too (useEscapeToStopRun below).
+  const sendShortcutKeys = readSendShortcut() === "ctrlEnter" ? "Mod+Enter" : "Enter";
   const primaryActionTitle = canQueueDraftWhileSending
     ? t("chat.queue.addToQueue")
     : isSending
       ? t("chat.stopGeneration")
       : t("chat.sendMessage");
+  // Esc stops the run; open popups, the expanded composer and a pending
+  // approval keep the key first (see escapeStopRun.ts for the precedence).
+  useEscapeToStopRun({
+    enabled: isSending && !hidden && approvalBar == null,
+    onStop,
+    anchorRef: composerLayerRef,
+    composerInputRef: glassCardRef,
+  });
   const uploadTooltip = isUploadingFiles
     ? t("chat.upload.uploading")
     : !isAgentMode
@@ -1195,92 +1209,61 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
 
   useEffect(() => {
     const composerLayer = composerLayerRef.current;
-    if (!composerLayer) return;
-
-    if (surface === "desktop") {
-      if (!onHeightChange && !onFloatingOverhangChange && !onCenterOffsetChange) return;
-
-      let animationFrame: number | null = null;
-      const measure = () => {
-        animationFrame = null;
-        if (isComposerExpandedRef.current || expandAnimationRef.current) return;
-        const metrics = measureComposerOverlay({
-          layer: composerLayer.getBoundingClientRect(),
-          queueHeight: queuePanelRef.current?.getBoundingClientRect().height ?? 0,
-          floating: taskProgressBarElement?.getBoundingClientRect(),
-          column: composerColumnRef.current?.getBoundingClientRect(),
-        });
-        onHeightChange?.(metrics.heightPx);
-        onFloatingOverhangChange?.(metrics.floatingOverhangPx);
-        onCenterOffsetChange?.(metrics.centerOffsetPx);
-      };
-      const scheduleMeasure = () => {
-        if (animationFrame !== null) return;
-        animationFrame = window.requestAnimationFrame(measure);
-      };
-      scheduleHeightMeasureRef.current = scheduleMeasure;
-      scheduleMeasure();
-
-      const resizeObserver =
-        typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleMeasure);
-      resizeObserver?.observe(composerLayer);
-      // 卡片列宽度跟随正文宽度设置，可在 composerLayer 尺寸不变时独立变化。
-      if (composerColumnRef.current) resizeObserver?.observe(composerColumnRef.current);
-      // 药丸容器绝对定位在卡片列之外，出现/消失不会改变 composerLayer 的尺寸。
-      if (taskProgressBarElement) resizeObserver?.observe(taskProgressBarElement);
-      window.addEventListener("resize", scheduleMeasure);
-
-      return () => {
-        if (animationFrame !== null) window.cancelAnimationFrame(animationFrame);
-        if (scheduleHeightMeasureRef.current === scheduleMeasure) {
-          scheduleHeightMeasureRef.current = null;
-        }
-        resizeObserver?.disconnect();
-        window.removeEventListener("resize", scheduleMeasure);
-        onHeightChange?.(0);
-        onFloatingOverhangChange?.(0);
-        onCenterOffsetChange?.(0);
-      };
-    }
-
     const chatFrame = overlayHeightOwnerRef?.current;
-    if (!chatFrame) return;
+    if (!composerLayer) return;
+    if (surface === "desktop" ? !onHeightChange && !onCenterOffsetChange : !chatFrame) return;
 
-    const updateComposerOverlayHeight = () => {
-      // 展开态占满聊天区，保留最近一次常规高度，避免底部预留跟着跳动；
-      // 展开/还原动画期间高度是中间值，同样不上报，动画结束后补测。
+    let animationFrame: number | null = null;
+    const measure = () => {
+      animationFrame = null;
+      // 全屏编辑及其过渡保留常规占位，收起动画结束后补测。
       if (isComposerExpandedRef.current || expandAnimationRef.current) return;
-      const composerLayerHeight = composerLayer.getBoundingClientRect().height;
-      const queueHeight = queuePanelRef.current?.getBoundingClientRect().height ?? 0;
-      chatFrame.style.setProperty(
-        "--gateway-chat-composer-overlay-height",
-        `${Math.ceil(Math.max(0, composerLayerHeight - queueHeight))}px`,
-      );
+      const metrics = measureComposerOverlay({
+        layer: composerLayer.getBoundingClientRect(),
+        floating: taskProgressBarElement?.getBoundingClientRect(),
+        column: composerColumnRef.current?.getBoundingClientRect(),
+      });
+      if (surface === "desktop") {
+        onHeightChange?.(metrics.heightPx);
+        onCenterOffsetChange?.(metrics.centerOffsetPx);
+      } else {
+        chatFrame?.style.setProperty(
+          "--gateway-chat-composer-overlay-height",
+          `${metrics.heightPx}px`,
+        );
+      }
     };
-    scheduleHeightMeasureRef.current = updateComposerOverlayHeight;
+    const scheduleMeasure = () => {
+      if (animationFrame !== null) return;
+      animationFrame = window.requestAnimationFrame(measure);
+    };
+    scheduleHeightMeasureRef.current = scheduleMeasure;
+    scheduleMeasure();
 
-    updateComposerOverlayHeight();
-
-    if (typeof ResizeObserver === "undefined") {
-      return () => {
-        scheduleHeightMeasureRef.current = null;
-        chatFrame.style.removeProperty("--gateway-chat-composer-overlay-height");
-      };
-    }
-
-    const resizeObserver = new ResizeObserver(() => {
-      updateComposerOverlayHeight();
-    });
-    resizeObserver.observe(composerLayer);
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleMeasure);
+    resizeObserver?.observe(composerLayer);
+    if (composerColumnRef.current) resizeObserver?.observe(composerColumnRef.current);
+    // 任务胶囊绝对定位，出现和消失不改变输入区层的高度。
+    if (taskProgressBarElement) resizeObserver?.observe(taskProgressBarElement);
+    window.addEventListener("resize", scheduleMeasure);
 
     return () => {
-      scheduleHeightMeasureRef.current = null;
-      resizeObserver.disconnect();
-      chatFrame.style.removeProperty("--gateway-chat-composer-overlay-height");
+      if (animationFrame !== null) window.cancelAnimationFrame(animationFrame);
+      if (scheduleHeightMeasureRef.current === scheduleMeasure) {
+        scheduleHeightMeasureRef.current = null;
+      }
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", scheduleMeasure);
+      if (surface === "desktop") {
+        onHeightChange?.(0);
+        onCenterOffsetChange?.(0);
+      } else {
+        chatFrame?.style.removeProperty("--gateway-chat-composer-overlay-height");
+      }
     };
   }, [
     onHeightChange,
-    onFloatingOverhangChange,
     onCenterOffsetChange,
     surface,
     taskProgressBarElement,
@@ -1342,10 +1325,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
           </div>
         ) : null}
         {goalBar || queuedTurns.length > 0 || queuePaused ? (
-          <div
-            ref={queuePanelRef}
-            className="relative z-30 mx-auto mb-minus-1px flex w-inset-1p5rem flex-col empty:hidden [&>[data-composer-goal-bar]+*]:rounded-t-none"
-          >
+          <div className="relative z-30 mx-auto mb-minus-1px flex w-inset-1p5rem flex-col empty:hidden [&>[data-composer-goal-bar]+*]:rounded-t-none">
             {/* 目标栏与指令队列同在一个纵向容器里：上下排列，不互相覆盖，并一起计入输入区高度。
                 goalBar 宿主没有目标时渲染为空，只有真正渲染出的目标栏才让下方队列去掉上圆角。 */}
             {goalBar}
@@ -1563,6 +1543,8 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
               ? (event) => {
                   // mention 弹层消费 Escape 时会 preventDefault，此处让路。
                   if (event.key === "Escape" && !event.defaultPrevented) {
+                    // Consumed: the same press must not also stop the run.
+                    event.preventDefault();
                     setComposerExpanded(false);
                   }
                 }
@@ -1739,44 +1721,45 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
             <div className="relative flex items-center justify-between gap-2 px-3 pb-2 pt-0.5">
               <div className="flex min-w-0 flex-1 items-center gap-1">
                 <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <button
-                        type="button"
-                        disabled={composerAddMenuDisabled}
-                        aria-label={addMenuTooltip}
-                        title={addMenuTooltip}
-                        className={cn(
-                          "composer-toolbar-action relative inline-flex size-8 shrink-0 items-center justify-center",
-                          "rounded-full outline-hidden transition-colors",
-                          "hover:bg-muted/60 focus-visible:bg-muted/60 data-[popup-open]:bg-muted/60",
-                          "disabled:pointer-events-none disabled:opacity-40",
-                          pendingUploadedFiles.length > 0
-                            ? "text-sky-600 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200"
-                            : "text-muted-foreground hover:text-foreground dark:hover:text-white",
-                        )}
-                      />
-                    }
-                  >
-                    {isUploadingFiles ? (
-                      <Loader2 className="size-4 animate-spin" />
-                    ) : (
-                      <Plus className="size-4" />
-                    )}
-                    {pendingUploadedFiles.length > 0 ? (
-                      <span
-                        aria-hidden
-                        className={cn(
-                          "absolute -right-0.5 -top-0.5 flex h-15px min-w-15px items-center justify-center",
-                          "rounded-full bg-sky-500 px-3px",
-                          "text-tiny font-semibold leading-none text-white shadow-ui-chatcomposerbar-41",
-                          "dark:bg-sky-400 dark:text-slate-900 dark:shadow-ui-chatcomposerbar-42",
-                        )}
-                      >
-                        {pendingUploadedFiles.length}
-                      </span>
-                    ) : null}
-                  </DropdownMenuTrigger>
+                  <ShortcutTooltip label={addMenuTooltip} triggerDisabled={composerAddMenuDisabled}>
+                    <DropdownMenuTrigger
+                      render={
+                        <button
+                          type="button"
+                          disabled={composerAddMenuDisabled}
+                          aria-label={addMenuTooltip}
+                          className={cn(
+                            "composer-toolbar-action relative inline-flex size-8 shrink-0 items-center justify-center",
+                            "rounded-full outline-hidden transition-colors",
+                            "hover:bg-muted/60 focus-visible:bg-muted/60 data-[popup-open]:bg-muted/60",
+                            "disabled:pointer-events-none disabled:opacity-40",
+                            pendingUploadedFiles.length > 0
+                              ? "text-sky-600 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200"
+                              : "text-muted-foreground hover:text-foreground dark:hover:text-white",
+                          )}
+                        />
+                      }
+                    >
+                      {isUploadingFiles ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Plus className="size-4" />
+                      )}
+                      {pendingUploadedFiles.length > 0 ? (
+                        <span
+                          aria-hidden
+                          className={cn(
+                            "absolute -right-0.5 -top-0.5 flex h-15px min-w-15px items-center justify-center",
+                            "rounded-full bg-sky-500 px-3px",
+                            "text-tiny font-semibold leading-none text-white shadow-ui-chatcomposerbar-41",
+                            "dark:bg-sky-400 dark:text-slate-900 dark:shadow-ui-chatcomposerbar-42",
+                          )}
+                        >
+                          {pendingUploadedFiles.length}
+                        </span>
+                      ) : null}
+                    </DropdownMenuTrigger>
+                  </ShortcutTooltip>
                   <DropdownMenuContent
                     variant="soft"
                     className="flex w-60 flex-col overflow-hidden"
@@ -1877,12 +1860,14 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                 ) : null}
 
                 {stt.available ? (
-                  <RuntimeControlTooltip label={stt.active ? "停止语音输入" : "开始语音输入"}>
+                  <RuntimeControlTooltip
+                    label={stt.active ? t("chat.stt.stop") : t("chat.stt.start")}
+                  >
                     <button
                       type="button"
                       disabled={isInputDisabled}
                       onClick={stt.toggle}
-                      aria-label={stt.active ? "停止语音输入" : "开始语音输入"}
+                      aria-label={stt.active ? t("chat.stt.stop") : t("chat.stt.start")}
                       aria-pressed={stt.active}
                       className={cn(
                         "composer-toolbar-action inline-flex size-8 shrink-0 items-center justify-center rounded-full outline-hidden",
@@ -1908,58 +1893,63 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
               </div>
 
               <div className="flex shrink-0 items-center gap-1">
-                <Button
-                  disabled={isSending ? false : sendDisabled}
-                  onClick={() => {
-                    if (canQueueDraftWhileSending) {
-                      handleComposerSend();
-                      return;
-                    }
-                    if (isSending) {
-                      onStop();
-                      return;
-                    }
-                    if (sendDisabled) return;
-                    handleComposerSend();
-                  }}
-                  size="sm"
-                  title={primaryActionTitle}
-                  aria-label={primaryActionTitle}
-                  style={
-                    canQueueDraftWhileSending
-                      ? {
-                          backgroundColor: "var(--ui-color-hsl-160-84-39)",
-                          backgroundImage: "none",
-                          color: "white",
-                        }
-                      : isSending
-                        ? {
-                            backgroundColor: "var(--destructive)",
-                            backgroundImage: "none",
-                            color: "var(--destructive-foreground)",
-                          }
-                        : undefined
-                  }
-                  className={cn(
-                    // 点击区保持 32px；背景经 p-0.5 + bg-clip-content 只涂 28px 内圆，
-                    // 与用量环外径、展开按钮悬停圆等大，避免实心圆盘显大。
-                    "size-8 shrink-0 rounded-full border-0 bg-clip-content p-0.5 shadow-none transition-all",
-                    "[&_svg]:stroke-[2.25]",
-                    canQueueDraftWhileSending
-                      ? "hover:brightness-105 active:scale-95"
-                      : isSending
-                        ? "hover:opacity-90 active:scale-95"
-                        : "disabled:opacity-100 [&:not(:disabled)]:bg-foreground [&:not(:disabled)]:text-background [&:not(:disabled)]:hover:bg-foreground/85 [&:not(:disabled)]:active:scale-95 disabled:bg-muted/60 disabled:text-muted-foreground",
-                  )}
+                <ShortcutTooltip
+                  label={primaryActionTitle}
+                  shortcut={isSending && !canQueueDraftWhileSending ? "Escape" : sendShortcutKeys}
+                  triggerDisabled={isSending ? false : sendDisabled}
                 >
-                  {canQueueDraftWhileSending ? (
-                    <ArrowUp className="size-4" />
-                  ) : isSending ? (
-                    <Square className="size-3 fill-current" />
-                  ) : (
-                    <ArrowUp className="size-4" />
-                  )}
-                </Button>
+                  <Button
+                    disabled={isSending ? false : sendDisabled}
+                    onClick={() => {
+                      if (canQueueDraftWhileSending) {
+                        handleComposerSend();
+                        return;
+                      }
+                      if (isSending) {
+                        onStop();
+                        return;
+                      }
+                      if (sendDisabled) return;
+                      handleComposerSend();
+                    }}
+                    size="sm"
+                    aria-label={primaryActionTitle}
+                    style={
+                      canQueueDraftWhileSending
+                        ? {
+                            backgroundColor: "var(--ui-color-hsl-160-84-39)",
+                            backgroundImage: "none",
+                            color: "white",
+                          }
+                        : isSending
+                          ? {
+                              backgroundColor: "var(--destructive)",
+                              backgroundImage: "none",
+                              color: "var(--destructive-foreground)",
+                            }
+                          : undefined
+                    }
+                    className={cn(
+                      // 点击区保持 32px；背景经 p-0.5 + bg-clip-content 只涂 28px 内圆，
+                      // 与用量环外径、展开按钮悬停圆等大，避免实心圆盘显大。
+                      "size-8 shrink-0 rounded-full border-0 bg-clip-content p-0.5 shadow-none transition-all",
+                      "[&_svg]:stroke-[2.25]",
+                      canQueueDraftWhileSending
+                        ? "hover:brightness-105 active:scale-95"
+                        : isSending
+                          ? "hover:opacity-90 active:scale-95"
+                          : "disabled:opacity-100 [&:not(:disabled)]:bg-foreground [&:not(:disabled)]:text-background [&:not(:disabled)]:hover:bg-foreground/85 [&:not(:disabled)]:active:scale-95 disabled:bg-muted/60 disabled:text-muted-foreground",
+                    )}
+                  >
+                    {canQueueDraftWhileSending ? (
+                      <ArrowUp className="size-4" />
+                    ) : isSending ? (
+                      <Square className="size-3 fill-current" />
+                    ) : (
+                      <ArrowUp className="size-4" />
+                    )}
+                  </Button>
+                </ShortcutTooltip>
               </div>
             </div>
           </div>
@@ -1980,7 +1970,14 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                     disabled={controlsDisabled || !isAgentMode}
                     onChange={onCommandSafetyModeChange}
                     onConfigureAutoReview={() => onOpenSettings("systemTools")}
-                    shortcutHint={canCycleMode ? t("chat.safety.cycleShortcut") : undefined}
+                    shortcutHint={
+                      canCycleMode
+                        ? t("chat.safety.cycleShortcut").replace(
+                            "{keys}",
+                            formatShortcutLabel("Shift+Tab"),
+                          )
+                        : undefined
+                    }
                   />
                 ) : null}
                 <span role="status" aria-live="polite">

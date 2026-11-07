@@ -1,21 +1,35 @@
 import { retainRunningToolContent } from "@liveagent/adapters/assistantBubble";
 import { AssistantStatus } from "@liveagent/ui/components/chat/AssistantStatus";
 import { LazyCollapse } from "@liveagent/ui/components/chat/LazyCollapse";
+import {
+  useExpandProcessByDefault,
+  useProcessDefaultChange,
+} from "@liveagent/ui/components/chat/processDisclosure";
 import { useAttentionDisclosure } from "@liveagent/ui/components/chat/useAttentionDisclosure";
 import { useLocale } from "@liveagent/ui/i18n/index";
 import type { ToolTraceItem } from "@liveagent/ui/lib/chat/assistantBubbleAdapter";
 import type { ChatFileLink } from "@liveagent/ui/lib/chat/chatFileLinks";
+import { summarizeKBrainToolLine } from "@liveagent/ui/lib/chat/kbrainToolSummaries";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { memo, useMemo } from "react";
 import {
+  AppWindow,
   Bot,
+  Braces,
+  Brain,
+  CalendarDays,
   ChevronRight,
   Eye,
   FilePenLine,
   FolderTree,
+  Globe,
+  Hand,
   type IconComponent,
+  RotateCcw,
   Search,
   Terminal,
+  Timer,
+  Waypoints,
   Wrench,
 } from "../../IconSet";
 import {
@@ -25,6 +39,8 @@ import {
   getToolDisplayName,
   getToolTraceKey,
   hasActiveUserInteraction,
+  isWebFetchToolName,
+  LSP_TOOL_NAME,
   type ToolActivityCategory,
 } from "./assistantBubbleUtils";
 import { areToolTraceItemsEqual, MemoToolCallItem } from "./ToolCallItem";
@@ -70,7 +86,17 @@ const TOOL_BATCH_ICONS: Record<ToolActivityCategory, IconComponent> = {
   edit: FilePenLine,
   command: Terminal,
   list: FolderTree,
+  code: Braces,
+  fetch: Globe,
   agent: Bot,
+  planning: CalendarDays,
+  wait: Timer,
+  workflow: Waypoints,
+  result: Braces,
+  memory: Brain,
+  context: RotateCcw,
+  browser: AppWindow,
+  computer: Hand,
   other: Wrench,
 };
 
@@ -88,6 +114,8 @@ function getRunningToolTarget(item: ToolTraceItem) {
   if (fileOperation) return fileOperation.fileName;
 
   const name = getToolDisplayName(item.toolCall.name);
+  const kbrainTarget = summarizeKBrainToolLine(item.toolCall.name, item.toolCall.arguments);
+  if (kbrainTarget !== null) return compactInlineText(kbrainTarget, 112);
   const target =
     name === "Bash"
       ? stringArgument(item, "command").split("\n")[0]
@@ -101,7 +129,11 @@ function getRunningToolTarget(item: ToolTraceItem) {
               ? stringArgument(item, "name", "id", "prompt")
               : name === "SendMessage"
                 ? stringArgument(item, "to", "channel", "subject")
-                : stringArgument(item, "path", "label", "name", "query", "action", "command");
+                : name === LSP_TOOL_NAME
+                  ? stringArgument(item, "path", "query")
+                  : isWebFetchToolName(name)
+                    ? stringArgument(item, "url", "uri")
+                    : stringArgument(item, "path", "label", "name", "query", "action", "command");
 
   return compactInlineText(target, 112);
 }
@@ -158,7 +190,9 @@ function ToolTraceGroupInner(props: {
     () => hasActiveUserInteraction(items, runningToolCallIds),
     [items, runningToolCallIds],
   );
-  const [open, setOpen] = useAttentionDisclosure(attentionRequired);
+  const expandByDefault = useExpandProcessByDefault();
+  const [open, setOpen] = useAttentionDisclosure(attentionRequired, expandByDefault);
+  useProcessDefaultChange(expandByDefault, (expand) => setOpen(expand || attentionRequired));
 
   // The latest live batch drops the count prefix ("运行中" instead of
   // "1 运行中"), nothing more. Idle phases render no filler status here:

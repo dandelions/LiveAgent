@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/liveagent/agent-gateway/internal/chatcmd"
 	gatewayv2 "github.com/liveagent/agent-gateway/internal/proto/v2"
 	"github.com/liveagent/agent-gateway/internal/session"
 )
@@ -277,6 +278,9 @@ func TestVetAgentRequestAllowsCheckpointActions(t *testing.T) {
 	requests := []*gatewayv2.CheckpointRequest{
 		{Action: "list", ConversationId: "conversation-1"},
 		{Action: "diff", ConversationId: "conversation-1", TurnSeq: 2, AuthorizedRoots: []string{"/work"}},
+		// K-brain's first turn is turn_seq 0.
+		{Action: "diff", ConversationId: "conversation-1", AuthorizedRoots: []string{"/work"}},
+		{Action: "rewind", ConversationId: "conversation-1", AuthorizedRoots: []string{"/work"}},
 		{
 			Action:          "rewind",
 			ConversationId:  "conversation-1",
@@ -304,8 +308,8 @@ func TestVetAgentRequestRejectsMalformedCheckpoint(t *testing.T) {
 	requests := []*gatewayv2.CheckpointRequest{
 		nil,
 		{Action: "list", ConversationId: "conversation-1", TurnSeq: 1},
-		{Action: "diff", ConversationId: "conversation-1"},
-		{Action: "rewind", ConversationId: "conversation-1"},
+		{Action: "diff", ConversationId: "conversation-1", Expected: []*gatewayv2.CheckpointExpectedEntry{{Key: "/work\x01a.txt", CurrentHash: "abc"}}},
+		{Action: "rewind"},
 		{Action: "unknown", ConversationId: "conversation-1"},
 		{Action: "diff", ConversationId: "conversation-1", TurnSeq: 1, AuthorizedRoots: []string{" "}},
 		{Action: "diff", ConversationId: "conversation-1", TurnSeq: 1, AuthorizedRoots: tooManyRoots},
@@ -363,6 +367,15 @@ func TestVetAgentRequestAllowsSlashCommandsGoalsAndLoops(t *testing.T) {
 		"goal clear": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
 			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "sess-1", Action: "clear"},
 		}},
+		"goal get": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
+			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "sess-1", Action: "get"},
+		}},
+		"goal pause": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
+			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "sess-1", Action: "pause"},
+		}},
+		"goal update": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
+			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "sess-1", Action: "update", Goal: "ship the release notes"},
+		}},
 		"loops list": {Payload: &gatewayv2.GatewayEnvelope_LoopManage{
 			LoopManage: &gatewayv2.LoopManageRequest{ConversationId: "sess-1", Action: "list"},
 		}},
@@ -393,6 +406,20 @@ func TestVetAgentRequestNormalizesComposerActions(t *testing.T) {
 	}
 	if goal.GetAction() != "clear" || goal.GetConversationId() != "sess-1" {
 		t.Fatalf("goal request not normalized: %+v", goal)
+	}
+	paused := &gatewayv2.GoalManageRequest{ConversationId: "sess-1", Action: "pause", Goal: "stray"}
+	if err := vetAgentRequest(view, &gatewayv2.GatewayEnvelope{Payload: &gatewayv2.GatewayEnvelope_GoalManage{GoalManage: paused}}); err != nil {
+		t.Fatal(err)
+	}
+	if paused.GetGoal() != "" {
+		t.Fatalf("goal text must only travel with update: %+v", paused)
+	}
+	updated := &gatewayv2.GoalManageRequest{ConversationId: "sess-1", Action: " update ", Goal: "  new goal  "}
+	if err := vetAgentRequest(view, &gatewayv2.GatewayEnvelope{Payload: &gatewayv2.GatewayEnvelope_GoalManage{GoalManage: updated}}); err != nil {
+		t.Fatal(err)
+	}
+	if updated.GetAction() != "update" || updated.GetGoal() != "new goal" {
+		t.Fatalf("goal update not normalized: %+v", updated)
 	}
 	loop := &gatewayv2.LoopManageRequest{ConversationId: "sess-1", Action: " cancel ", LoopId: " loop-1 ", Prompt: "stray"}
 	if err := vetAgentRequest(view, &gatewayv2.GatewayEnvelope{Payload: &gatewayv2.GatewayEnvelope_LoopManage{LoopManage: loop}}); err != nil {
@@ -433,7 +460,16 @@ func TestVetAgentRequestRejectsInvalidGoalAndLoopRequests(t *testing.T) {
 			GoalManage: &gatewayv2.GoalManageRequest{Action: "clear"},
 		}},
 		"goal unknown action": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
-			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "s", Action: "pause"},
+			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "s", Action: "stop"},
+		}},
+		"goal resume over the manage route": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
+			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "s", Action: "resume"},
+		}},
+		"goal update without text": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
+			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "s", Action: "update", Goal: "   "},
+		}},
+		"goal update too long": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
+			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "s", Action: "update", Goal: strings.Repeat("g", chatcmd.MaxGoalTextLen+1)},
 		}},
 		"goal set over the manage route": {Payload: &gatewayv2.GatewayEnvelope_GoalManage{
 			GoalManage: &gatewayv2.GoalManageRequest{ConversationId: "s", Action: "set"},

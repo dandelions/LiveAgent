@@ -30,6 +30,7 @@ import {
   defaultParameters,
   keepDeclaredParameters,
   migrateParameters,
+  normalizeParameters,
   validateParameters,
 } from "./parameterModel";
 import {
@@ -1093,7 +1094,8 @@ export class ImageStudioController {
   }
   /** Every click is a new job built from the current draft; only an in-flight request blocks it. */
   async submit() {
-    if (this.pendingSubmit || this.disposed || !this.view.draftReady) return;
+    const target = this.target;
+    if (this.pendingSubmit || this.disposed || !this.view.draftReady || !target) return;
     const errors = this.validationMessages();
     if (errors.length) {
       this.say(...errors);
@@ -1106,7 +1108,7 @@ export class ImageStudioController {
       prompt: usesPromptFraming(this.target)
         ? composeFramedPrompt(draft.prompt, draft.framing)
         : draft.prompt,
-      parameters: draft.parameters as Record<string, Scalar>,
+      parameters: normalizeParameters(target, draft.parameters) as Record<string, Scalar>,
       inputs: draft.inputs,
       operation,
       count,
@@ -1166,15 +1168,18 @@ export class ImageStudioController {
       if (this.valid(epoch)) this.pendingSubmit = false;
     }
   }
-  async refreshJob(id: string) {
+  /** Resolves true when the backend's record was read and applied. */
+  async refreshJob(id: string): Promise<boolean> {
     const epoch = this.epoch;
     try {
       const job = await this.client.getJob(id);
-      if (!this.valid(epoch)) return;
+      if (!this.valid(epoch)) return false;
       this.patch({ state: applyJobSnapshot(this.view.state, job) });
       this.streams.watch(job);
+      return true;
     } catch {
       if (this.valid(epoch)) this.say(message("imageStudio.notice.error.jobCheckFailed"));
+      return false;
     }
   }
   async cancelJob(id: string) {
@@ -1212,7 +1217,11 @@ export class ImageStudioController {
       if (this.valid(epoch))
         this.say(
           message("imageStudio.notice.error.exportFailed", {
-            action: errorActionMessage(error as { code?: string }),
+            // No export handler is not a job rejection; changing the prompt would not help.
+            action:
+              (error as { code?: string }).code === "IMAGE_UNSUPPORTED_OPERATION"
+                ? message("imageStudio.errorAction.default")
+                : errorActionMessage(error as { code?: string }),
           }),
         );
     }

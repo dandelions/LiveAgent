@@ -20,7 +20,9 @@ import {
 } from "react";
 import { useAutosizeTextarea } from "../../../lib/shared/useAutosizeTextarea";
 import { cn } from "../../../lib/shared/utils";
+import { formatShortcutLabel } from "../../../lib/shortcuts/shortcutKeys";
 import { Button } from "../../ui/button";
+import { KbdShortcut } from "../../ui/kbd";
 import { Textarea } from "../../ui/textarea";
 import { useRightDockToolContext } from "../RightDockContext";
 import {
@@ -37,11 +39,7 @@ const COARSE_POINTER_BUTTON_CLASS = "[@media(pointer:coarse)]:h-9";
 
 // Keyboard hint for the commit shortcut; the handler accepts both Cmd and
 // Ctrl, the hint only mirrors the platform's conventional modifier.
-const COMMIT_SHORTCUT_HINT = /Mac|iPhone|iPad|iPod/i.test(
-  typeof navigator === "undefined" ? "" : `${navigator.userAgent} ${navigator.platform}`,
-)
-  ? "⌘↩"
-  : "Ctrl+↩";
+const COMMIT_SHORTCUT = "Mod+Enter";
 
 export function GitCommitComposer(props: {
   commitMessage: string;
@@ -327,7 +325,7 @@ export function GitCommitComposer(props: {
             size="sm"
             disabled={!canCommit}
             className={cn("h-7 shrink-0 gap-1.5 px-2.5", COARSE_POINTER_BUTTON_CLASS)}
-            title={`${t("projectTools.gitReview.commitStaged")} (${COMMIT_SHORTCUT_HINT})`}
+            title={`${t("projectTools.gitReview.commitStaged")} (${formatShortcutLabel(COMMIT_SHORTCUT)})`}
             onClick={handleCommit}
           >
             {busy === "commit" ? (
@@ -340,9 +338,13 @@ export function GitCommitComposer(props: {
                     {stagedEntries.length}
                   </span>
                 ) : null}
-                <kbd className="hidden font-sans text-tiny font-normal leading-none opacity-70 @min-[19rem]:inline">
-                  {COMMIT_SHORTCUT_HINT}
-                </kbd>
+                <KbdShortcut
+                  compact
+                  shortcut={COMMIT_SHORTCUT}
+                  variant="plain"
+                  size="inline"
+                  className="hidden text-tiny text-inherit opacity-70 @min-[19rem]:inline-flex"
+                />
               </>
             )}
           </Button>

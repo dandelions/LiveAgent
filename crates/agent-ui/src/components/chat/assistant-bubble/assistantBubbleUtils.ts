@@ -20,42 +20,82 @@ import type {
   SubagentReportDetails,
 } from "@liveagent/ui/lib/subagents/protocol";
 import {
+  AppWindow,
   Bot,
+  Braces,
   Brain,
+  CalendarDays,
   CircleHelp,
   Clock3,
   Eye,
   FilePenLine,
   FileText,
   FolderTree,
+  Globe,
   Hand,
   type IconComponent,
   ImageIcon,
   Link2,
   ListChecks,
   Plug,
+  RotateCcw,
+  ScrollText,
   Search,
   Server,
   Terminal,
+  Timer,
   Trash2,
+  Waypoints,
   Wrench,
 } from "../../IconSet";
 
-export type ToolActivityCategory =
-  | "read"
-  | "search"
-  | "edit"
-  | "command"
-  | "list"
-  | "agent"
-  | "other";
+/**
+ * 工具行的活动类别。除 `other` 外，每个类别都有
+ * `chat.tool.activity.<category>.{running,completed,failed}` 标题；所有类别都有
+ * `chat.tool.batch.<category>` 组标签（`other` 只用 running 标题）。
+ */
+export const TOOL_ACTIVITY_CATEGORIES = [
+  "read",
+  "search",
+  "edit",
+  "command",
+  "list",
+  "code",
+  "fetch",
+  "agent",
+  "planning",
+  "wait",
+  "workflow",
+  "result",
+  "memory",
+  "context",
+  "browser",
+  "computer",
+  "other",
+] as const;
+
+export type ToolActivityCategory = (typeof TOOL_ACTIVITY_CATEGORIES)[number];
+
+/** K-brain 的只读代码智能工具（definition / references / hover / 符号）。 */
+export const LSP_TOOL_NAME = "lsp";
+
+/**
+ * 以普通工具行出现的网页抓取调用：K-brain 的 `web_fetch` 工具，或宿主未执行、
+ * 未被隐藏桥接吞掉的 provider-native `web_fetch`/`WebFetch`。已由服务端执行的
+ * provider-native 抓取走联网搜索组（HostedSearchGroupView），不经过这里。
+ */
+export function isWebFetchToolName(name: string) {
+  return name === "web_fetch" || name === "WebFetch";
+}
 
 export function getToolActivityCategory(name: string): ToolActivityCategory {
   if (isTaskToolName(name)) return "other";
+  if (isWebFetchToolName(name)) return "fetch";
   switch (name) {
     case "Read":
     case "Image":
     case "SkillsManager":
+    case "ReadTerminal":
       return "read";
     case "Glob":
     case "Grep":
@@ -71,12 +111,36 @@ export function getToolActivityCategory(name: string): ToolActivityCategory {
     case "ProcessStop":
     case "SSHManager":
     case "SshManager":
+    case "TerminalSession":
       return "command";
     case "List":
       return "list";
+    case LSP_TOOL_NAME:
+      return "code";
     case "Agent":
     case "SendMessage":
+    case KBRAIN_SUBAGENT_TOOL_NAME:
       return "agent";
+    // K-brain 后端自带、旧前端 runtime 没有的工具（#1194 之后补齐）。
+    case "PlanningQuery":
+    case "PlanningMutate":
+      return "planning";
+    case "wait":
+      return "wait";
+    case "workflow":
+      return "workflow";
+    case "structured_output":
+      return "result";
+    case "remember":
+    case "forget":
+    case "memory_manager":
+      return "memory";
+    case "new_context":
+      return "context";
+    case "browser_exec":
+      return "browser";
+    case "computer_exec":
+      return "computer";
     default:
       return "other";
   }
@@ -126,12 +190,35 @@ export function getToolMeta(name: string): {
       ? { Icon: Hand, accent: "var(--tool-bash-accent)", category: "cua" }
       : { Icon: Plug, accent: "var(--tool-list-accent)", category: "mcp" };
   }
+  if (isWebFetchToolName(name)) {
+    return { Icon: Globe, accent: "var(--tool-search-accent)", category: "web" };
+  }
   switch (name) {
     case "Bash":
     case "ManagedProcess":
     case "ProcessWait":
     case "ProcessStop":
+    case "TerminalSession":
       return { Icon: Terminal, accent: "var(--tool-bash-accent)", category: "terminal" };
+    case "ReadTerminal":
+      return { Icon: ScrollText, accent: "var(--tool-bash-accent)", category: "terminal" };
+    case "wait":
+      return { Icon: Timer, accent: "var(--tool-bash-accent)", category: "terminal" };
+    case "PlanningQuery":
+    case "PlanningMutate":
+      return { Icon: CalendarDays, accent: "var(--tool-list-accent)", category: "system" };
+    case "workflow":
+      return { Icon: Waypoints, accent: "var(--tool-list-accent)", category: "system" };
+    case "structured_output":
+      return { Icon: Braces, accent: "var(--tool-list-accent)", category: "system" };
+    case "new_context":
+      return { Icon: RotateCcw, accent: "var(--tool-list-accent)", category: "system" };
+    case "remember":
+    case "forget":
+    case "memory_manager":
+      return { Icon: Brain, accent: "var(--tool-list-accent)", category: "system" };
+    case "browser_exec":
+      return { Icon: AppWindow, accent: "var(--tool-search-accent)", category: "web" };
     case "Read":
       return { Icon: Eye, accent: "var(--tool-file-accent)", category: "file" };
     case "Image":
@@ -154,6 +241,8 @@ export function getToolMeta(name: string): {
       return { Icon: Bot, accent: "var(--tool-list-accent)", category: "system" };
     case "SendMessage":
       return { Icon: Bot, accent: "var(--tool-list-accent)", category: "system" };
+    case KBRAIN_SUBAGENT_TOOL_NAME:
+      return { Icon: Bot, accent: "var(--tool-list-accent)", category: "agent" };
     case "Write":
       return { Icon: FileText, accent: "var(--tool-file-accent)", category: "file" };
     case "Edit":
@@ -172,6 +261,8 @@ export function getToolMeta(name: string): {
       return { Icon: ListChecks, accent: "var(--tool-list-accent)", category: "system" };
     case "ToolSearch":
       return { Icon: Search, accent: "var(--tool-search-accent)", category: "search" };
+    case LSP_TOOL_NAME:
+      return { Icon: Braces, accent: "var(--tool-search-accent)", category: "search" };
     default:
       return { Icon: Wrench, accent: "var(--tool-file-accent)", category: "other" };
   }
@@ -637,21 +728,33 @@ export function getToolTraceKey(item: ToolTraceItem, index: number) {
   return `${item.toolCall.name}-${index}-${getStableValueSignature(item.toolCall.arguments)}`;
 }
 
+/** K-brain's tool for delegating to a subagent; each call is one subagent card. */
+export const KBRAIN_SUBAGENT_TOOL_NAME = "subagent";
+
 export function isAgentToolName(name: string) {
-  return name === "Agent";
+  return name === "Agent" || name === KBRAIN_SUBAGENT_TOOL_NAME;
 }
 
 /**
- * 拆开动态 MCP 工具名。命名规则见 `mcpTools.ts`：
- * `mcp_<sanitizedServerId>_<sanitizedToolName>`。
+ * 拆开动态 MCP 工具名。两种命名都会出现：
  *
- * 两段本身都可能含下划线，所以按第一个 `_` 切分是启发式而非精确解析。
- * 实践中 server id 是 kebab-case（sanitize 保留 `-`），切分正确；即便切
- * 错也只影响标题渲染，不参与任何判定或 key。
+ * - K-brain（internal/mcp/config.go `ToolName`）：`mcp__<serverKey>__<tool>`。
+ *   serverKey 保证不含 `__`，所以按第一个 `__` 切分是精确的；工具段自身可以
+ *   含 `__`，归入 tool。
+ * - 旧前端 runtime（`mcpTools.ts`）：`mcp_<sanitizedServerId>_<sanitizedToolName>`。
+ *   两段本身都可能含下划线，按第一个 `_` 切分是启发式而非精确解析。实践中
+ *   server id 是 kebab-case（sanitize 保留 `-`），切分正确；即便切错也只影响
+ *   标题渲染，不参与任何判定或 key。
  */
 export function parseDynamicMcpToolName(name: string): { serverId: string; tool: string } | null {
   const trimmed = name.trim();
   if (!isDynamicMcpToolName(trimmed)) return null;
+  if (trimmed.startsWith("mcp__")) {
+    const rest = trimmed.slice("mcp__".length);
+    const separator = rest.indexOf("__");
+    if (separator <= 0 || separator + 2 >= rest.length) return null;
+    return { serverId: rest.slice(0, separator), tool: rest.slice(separator + 2) };
+  }
   const rest = trimmed.slice("mcp_".length);
   const separator = rest.indexOf("_");
   if (separator <= 0 || separator === rest.length - 1) return null;
@@ -940,5 +1043,20 @@ export function isBuiltinShareToolName(name: string) {
     "SshManager",
     "TunnelManager",
     "Write",
+    "lsp",
+    "web_fetch",
+    "WebFetch",
+    // K-brain-only built-ins: their arguments and results carry workspace commands,
+    // memory text and page content just like the tools above.
+    "TerminalSession",
+    "browser_exec",
+    "computer_exec",
+    "forget",
+    "memory_manager",
+    "new_context",
+    "remember",
+    "structured_output",
+    "wait",
+    "workflow",
   ].includes(trimmed);
 }

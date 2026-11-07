@@ -1,9 +1,19 @@
+import type { SubagentCardBinding } from "@liveagent/ui/contracts/subagentPane";
 import type { AskUserQuestionAnswer } from "@liveagent/ui/lib/chat/askUserQuestion";
 import type { PlanDecisionAnswer } from "@liveagent/ui/lib/chat/planMode";
-import { useSyncExternalStore } from "react";
+import { useMemo, useSyncExternalStore } from "react";
+import {
+  getKBrainSubagentForToolCall,
+  openKBrainSubagent,
+  subscribeKBrainSubagents,
+} from "../lib/subagents/kbrainSubagentStore";
+import { kbrainSubagentView } from "../lib/subagents/kbrainSubagentView";
 import {
   answerAskUserQuestion,
   getAskUserQuestionDeadlineAt,
+  getAskUserQuestionVersion,
+  hasPendingAskUserQuestion,
+  subscribeAskUserQuestions,
 } from "../lib/tools/askUserQuestionTools";
 import {
   getPermissionAutoResolved,
@@ -46,6 +56,20 @@ export function usePermissionAutoResolved(
   return getPermissionAutoResolved(toolCallId);
 }
 
+// The card is answerable only while the question is registered: the tool call arrives
+// first, and K-brain may still be reviewing or waiting for approval before it asks.
+export function useAskUserQuestionPending(
+  toolCallId: string,
+  _toolArguments: Record<string, unknown>,
+) {
+  useSyncExternalStore(
+    subscribeAskUserQuestions,
+    getAskUserQuestionVersion,
+    getAskUserQuestionVersion,
+  );
+  return hasPendingAskUserQuestion(toolCallId);
+}
+
 export function readAskUserQuestionDeadline(
   toolCallId: string,
   _toolArguments: Record<string, unknown>,
@@ -67,4 +91,26 @@ export function usePlanDecisionState(toolCallId: string, _toolArguments: Record<
 
 export function submitPlanDecision(toolCallId: string, answer: PlanDecisionAnswer) {
   return Promise.resolve(answerPlanDecision(toolCallId, answer));
+}
+
+// The K-brain subagent the parent's `subagent` call started. Null until the backend
+// links the two (older K-brain never does), and the plain tool row renders instead.
+export function useSubagentCard(toolCallId: string): SubagentCardBinding | null {
+  // Each snapshot must be stable between store changes, so read the entry and its
+  // conversation separately rather than as a fresh pair.
+  const entry = useSyncExternalStore(
+    subscribeKBrainSubagents,
+    () => getKBrainSubagentForToolCall(toolCallId)?.entry,
+  );
+  const conversationId = useSyncExternalStore(
+    subscribeKBrainSubagents,
+    () => getKBrainSubagentForToolCall(toolCallId)?.conversationId,
+  );
+  return useMemo(() => {
+    if (!entry || !conversationId) return null;
+    return {
+      view: kbrainSubagentView(entry),
+      open: () => openKBrainSubagent(conversationId, entry.subagent.id),
+    };
+  }, [conversationId, entry]);
 }

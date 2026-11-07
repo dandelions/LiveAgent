@@ -10,6 +10,7 @@ import {
   normalizeHostedSearchBlock,
 } from "@liveagent/ui/lib/chat/hostedSearch";
 import { taskResultDetails } from "@liveagent/ui/lib/chat/taskProgress";
+import { withToolRunInfo } from "@liveagent/ui/lib/chat/toolRunInfo";
 import { parseUserMessageContentWithUploads } from "@liveagent/ui/lib/chat/uploadedFiles";
 import {
   type ConversationViewState,
@@ -35,7 +36,11 @@ import {
   getKBrainSessionId,
   setKBrainSessionId,
 } from "./mapping";
-import { questionResultDetails } from "./questions";
+import {
+  kbrainToolResultName,
+  normalizeKBrainQuestionToolCall,
+  questionResultDetails,
+} from "./questions";
 import { getConfiguredKBrainConnection } from "./runtimeConnection";
 import { confirmKBrainMutation, hasKBrainMutationSync } from "./sessionSyncState";
 import { displayImageResultDetails, kbrainToolImages } from "./toolImages";
@@ -46,6 +51,7 @@ import type {
   KBrainMessageRef,
   KBrainModelRef,
   KBrainSession,
+  KBrainToolCall,
 } from "./types";
 
 const KBRAIN_API = "kbrain.agent.v1" as AssistantMessage["api"];
@@ -124,18 +130,44 @@ function toHostedSearch(value: KBrainMessage["hosted_search"]): HostedSearchBloc
   });
 }
 
+export const KBRAIN_ORIGIN_BACKGROUND = "background";
+
+// K-brain 0.107.17 及更早版本把这些通知存成没有 origin 的普通用户消息；跨升级
+// 的长对话里它们还在，会继续显示成用户气泡（#1211）。只认后端生成的固定开头：
+// 任务 ID 与状态都来自后端，用户手打的文字不会恰好长这样。
+const LEGACY_BACKGROUND_NOTICE_PATTERNS = [
+  /^\[process (?:mp|bash)-\d+ (?:completed|failed|cancelled|timed_out)(?: exit_code=-?\d+)?\][^\n]*\n\$ /,
+  /^\[subagent [a-z0-9]+(?:-[a-z0-9]+)* (?:done|error|cancelled)\] /,
+  /^\[subagent [a-z0-9]+(?:-[a-z0-9]+)*\] prepare subagent workspace/,
+  /^\[wait wait-[a-z0-9]+(?:-[a-z0-9]+)* (?:done|timeout)\] /,
+  /^\[wait wait-[a-z0-9]+(?:-[a-z0-9]+)*\] gave up: /,
+  /^\[workflow run-[0-9a-f]+(?:-[0-9a-f]+)+ [a-z_]+\] /,
+  // 目标续跑轮次、新上下文通知与输出上限续写提醒（0.107.18 及更早没有 origin）：
+  // 都是后端写的固定文本，round/max 是后端的轮次计数。
+  /^\[goal [1-9]\d*\/[1-9]\d*\] \S/,
+  /^A new context window is active\. Continue the current task using the available workspace and tools\. The previous conversation was intentionally discarded\.(?:\n|$)/,
+  /^<system-reminder>\nYour previous response was cut off because it reached the output token limit[ .]/,
+];
+
+function isLegacyBackgroundNotice(text: string): boolean {
+  return LEGACY_BACKGROUND_NOTICE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function isBackgroundNotice(message: KBrainMessage, text: string): boolean {
+  if (message.origin === KBRAIN_ORIGIN_BACKGROUND) return true;
+  return !message.origin && isLegacyBackgroundNotice(text);
+}
+
 function toMessage(
   message: KBrainMessage,
   index: number,
   cwd?: string,
-  toolArguments?: unknown,
+  toolCall?: KBrainToolCall,
   taskRunId?: string,
 ): Message | null {
   const timestamp = epoch(message.created_at, 0);
   if (message.role === "user") {
     const content = userContent(message);
-    // K-brain 只存文本。带附件的消息落库时正文与附件指令拼在一起，历史回读
-    // 要把它拆回去，否则界面会把整段指令当正文显示，附件卡片和粘贴 chip 都丢。
     const rawText =
       typeof content === "string"
         ? content
@@ -143,6 +175,19 @@ function toMessage(
             .filter((part) => part.type === "text")
             .map((part) => part.text)
             .join("");
+    // 后端自己送来的通知（wait 结果、进程退出、后台任务报告）不是用户写的，
+    // 标出来让对话按系统通知显示，而不是用户气泡。
+    if (isBackgroundNotice(message, rawText)) {
+      return {
+        role: "user",
+        content,
+        timestamp,
+        ...(message.id ? { id: message.id } : {}),
+        liveAgentBackgroundNotice: true,
+      } as Message;
+    }
+    // K-brain 只存文本。带附件的消息落库时正文与附件指令拼在一起，历史回读
+    // 要把它拆回去，否则界面会把整段指令当正文显示，附件卡片和粘贴 chip 都丢。
     const parsed = parseUserMessageContentWithUploads(rawText, cwd);
     if (parsed.parsed) {
       // content 保持原样（仍是给模型的完整文本），只补展示用元数据：正文给
@@ -175,33 +220,35 @@ function toMessage(
     const isError = message.stop_reason === "error" || message.stop_reason === "cancelled";
     const images = kbrainToolImages(message.content, output);
     const content = [...textAndFiles, ...images.content];
+    const text = content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("");
     return {
       role: "toolResult",
       toolCallId: message.tool_call_id || `kbrain-tool-${index}`,
-      toolName: message.name || "tool",
+      toolName: kbrainToolResultName(message.name),
       content,
-      details:
+      // 运行信息（退出码/超时/耗时）在历史里挂在 assistant 的 tool_calls[] 上。
+      details: withToolRunInfo(
+        message.name,
         questionResultDetails(
           message.name,
-          content
-            .filter((part) => part.type === "text")
-            .map((part) => part.text)
-            .join(""),
+          text,
+          toolCall?.arguments,
+          isError,
+          toolCall?.question_answers,
         ) ??
-        taskResultDetails(
-          message.name,
-          toolArguments,
-          {
-            output: content
-              .filter((part) => part.type === "text")
-              .map((part) => part.text)
-              .join(""),
-            isError: message.stop_reason === "error" || message.stop_reason === "cancelled",
-          },
-          taskRunId ?? "history",
-          index,
-        ) ??
-        displayImageResultDetails(message.name, images.images, isError),
+          taskResultDetails(
+            message.name,
+            toolCall?.arguments,
+            { output: text, isError },
+            taskRunId ?? "history",
+            index,
+          ) ??
+          displayImageResultDetails(message.name, images.images, isError),
+        toolCall,
+      ),
       isError,
       timestamp,
     };
@@ -215,12 +262,14 @@ function toMessage(
   }
   content.push(...toHostedSearch(message.hosted_search));
   for (const call of message.tool_calls ?? []) {
-    content.push({
-      type: "toolCall",
-      id: call.id,
-      name: call.name,
-      arguments: (call.arguments ?? {}) as Record<string, unknown>,
-    });
+    content.push(
+      normalizeKBrainQuestionToolCall({
+        type: "toolCall",
+        id: call.id,
+        name: call.name,
+        arguments: (call.arguments ?? {}) as Record<string, unknown>,
+      }),
+    );
   }
   return {
     role: "assistant",
@@ -249,6 +298,8 @@ function taskMessages(session: KBrainSession, offset: number): Message[] {
   for (const task of session.tasks ?? []) {
     if (seen.has(task.id)) continue;
     seen.add(task.id);
+    // Linked tasks show on the card of the real `subagent` call that started them.
+    if (task.parent_tool_call_id) continue;
     const id = `kbrain-subagent:${task.id}`;
     const assistant = toMessage(
       {
@@ -357,22 +408,23 @@ function revisionFor(session: KBrainSession): string {
   return session.revision;
 }
 
-function convertMessages(
+/** K-brain messages as chat messages; the subagent pane renders transcripts with it. */
+export function convertMessages(
   messages: KBrainMessage[],
   offset = 0,
   cwd?: string,
   taskRunId?: string,
 ): Message[] {
-  const toolArguments = new Map<string, unknown>();
+  const toolCalls = new Map<string, KBrainToolCall>();
   for (const message of messages) {
-    for (const call of message.tool_calls ?? []) toolArguments.set(call.id, call.arguments);
+    for (const call of message.tool_calls ?? []) toolCalls.set(call.id, call);
   }
   return messages.flatMap((message, index) => {
     const converted = toMessage(
       message,
       offset + index,
       cwd,
-      message.role === "tool" ? toolArguments.get(message.tool_call_id ?? "") : undefined,
+      message.role === "tool" ? toolCalls.get(message.tool_call_id ?? "") : undefined,
       taskRunId,
     );
     return converted ? [converted] : [];
@@ -405,9 +457,9 @@ function historyWindow(
   ) {
     throw new Error("K-brain history message_offsets are invalid");
   }
-  const toolArguments = new Map<string, unknown>();
+  const toolCalls = new Map<string, KBrainToolCall>();
   for (const message of source) {
-    for (const call of message.tool_calls ?? []) toolArguments.set(call.id, call.arguments);
+    for (const call of message.tool_calls ?? []) toolCalls.set(call.id, call);
   }
   const indexedMessages = source.flatMap((message, index) => {
     const offset = offsets[index];
@@ -415,7 +467,7 @@ function historyWindow(
       message,
       offset,
       session.cwd,
-      message.role === "tool" ? toolArguments.get(message.tool_call_id ?? "") : undefined,
+      message.role === "tool" ? toolCalls.get(message.tool_call_id ?? "") : undefined,
       session.id,
     );
     return converted ? [{ message: converted, offset }] : [];
@@ -794,4 +846,34 @@ export function resolveKBrainLocalId(backendId: string): string {
     getKBrainConversationId(backendId, baseUrl()) ??
     ensureKBrainConversationId(backendId, baseUrl())
   );
+}
+
+export type KBrainSharedHistory = {
+  conversationId: string;
+  title: string;
+  messages: Message[];
+  redactToolContent: boolean;
+};
+
+/**
+ * Resolve a public share token against K-brain. The backend already applies the
+ * share's redaction (tool results and tool calls are omitted), so the redaction
+ * flag is derived from the projection instead of trusting a separate field.
+ */
+export async function resolveKBrainHistoryShare(token: string): Promise<KBrainSharedHistory> {
+  const value = token.trim();
+  if (!value) throw new Error("share token is required");
+  const shared = await client().resolveShareToken(value);
+  const source = Array.isArray(shared.messages) ? shared.messages : [];
+  const redactToolContent = !source.some(
+    (message) => message.role === "tool" || (message.tool_calls?.length ?? 0) > 0,
+  );
+  return {
+    // Never mint a local alias for a token visitor; fall back to the backend id.
+    conversationId:
+      getKBrainConversationId(shared.conversation_id, baseUrl()) ?? shared.conversation_id,
+    title: shared.title?.trim() || "K-brain session",
+    messages: convertMessages(source),
+    redactToolContent,
+  };
 }

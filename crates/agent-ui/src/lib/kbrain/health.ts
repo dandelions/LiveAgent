@@ -164,6 +164,64 @@ export function capabilityAtLeast(
   return isNonNegativeInteger(value) && value >= minimum;
 }
 
+/** Sandbox mechanisms that cannot keep protected workspace paths read-only. */
+const MECHANISMS_WITHOUT_PATH_PROTECTION: ReadonlySet<string> = new Set(["landlock"]);
+
+/**
+ * Whether a supported run_sandbox capability leaves the protected workspace
+ * paths (`.liveagent/`, `.k-brain/`, `.git/hooks`, `.git/config`) writable.
+ * Those files are used outside the sandbox, so LiveAgent treats such a sandbox
+ * as unavailable. An explicit `path_protection` wins; older backends omit it and
+ * only ever used mechanisms that protect the paths, so a missing field counts
+ * as protected unless the mechanism is known not to be. An unsupported sandbox
+ * answers false: it is unavailable for its own reason.
+ */
+export function runSandboxLacksPathProtection(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  const value = raw as Record<string, unknown>;
+  if (value.supported !== true) return false;
+  if (typeof value.path_protection === "boolean") return !value.path_protection;
+  return (
+    typeof value.mechanism === "string" && MECHANISMS_WITHOUT_PATH_PROTECTION.has(value.mechanism)
+  );
+}
+
+/**
+ * Whether the backend can confine a run as `options.sandbox` asks (capability
+ * run_sandbox): supported on this machine, keeping the protected workspace
+ * paths read-only and, for an offline run, able to cut the network.
+ */
+export function supportsRunSandbox(
+  health: Pick<KBrainHealth, "capabilities">,
+  sandbox: { network: boolean },
+): boolean {
+  const raw = health.capabilities.run_sandbox;
+  if (!raw || typeof raw !== "object") return false;
+  const value = raw as Record<string, unknown>;
+  return (
+    value.supported === true &&
+    !runSandboxLacksPathProtection(value) &&
+    (sandbox.network || value.network_control === true)
+  );
+}
+
+/**
+ * Whether K-brain offers to install its Windows sandbox accounts so the offline
+ * sandbox can cut the network (`sandbox_setup` 1 and `run_sandbox.setup_available`),
+ * and the run sandbox cannot do so yet. Setup never makes a sandbox without path
+ * protection usable, so that one stays unavailable rather than offered a fix.
+ */
+export function offersRunSandboxSetup(health: Pick<KBrainHealth, "capabilities">): boolean {
+  if (!hasFrozenCapability(health, "sandbox_setup")) return false;
+  const raw = health.capabilities.run_sandbox;
+  if (!isObject(raw)) return false;
+  return (
+    raw.setup_available === true &&
+    !(raw.supported === true && raw.network_control === true) &&
+    !runSandboxLacksPathProtection(raw)
+  );
+}
+
 export function supportsPermissionMode(
   health: Pick<KBrainHealth, "capabilities">,
   mode: string,

@@ -2,32 +2,29 @@ import {
   AssistantBubble,
   LiveAssistantStatus,
 } from "@liveagent/ui/components/chat/AssistantBubble";
+import { BackgroundNoticeMessage } from "@liveagent/ui/components/chat/BackgroundNoticeMessage";
 import { ChatEmptyState } from "@liveagent/ui/components/chat/ChatEmptyState";
 import { ChatFileLinkContextMenuHost } from "@liveagent/ui/components/chat/ChatFileLinkContextMenu";
 import { ContextCheckpointCard } from "@liveagent/ui/components/chat/ContextCheckpointCard";
 import { EditableUserMessageBubble } from "@liveagent/ui/components/chat/EditableUserMessageBubble";
+import { ProcessDisclosureProvider } from "@liveagent/ui/components/chat/processDisclosure";
 import { RetryDetailsBlock } from "@liveagent/ui/components/chat/RetryDetailsBlock";
 import {
   TranscriptAssistantMessageActions,
   TranscriptUserMessageActions,
 } from "@liveagent/ui/components/chat/TranscriptMessageActions";
-import { UserAttachmentCards } from "@liveagent/ui/components/chat/UserAttachmentCards";
+import { TranscriptQuoteSelection } from "@liveagent/ui/components/chat/TranscriptQuoteSelection";
+import { UserMessageBubbleBody } from "@liveagent/ui/components/chat/UserMessageBubbleBody";
 import { Loader2 } from "@liveagent/ui/components/IconSet";
 import { useLocale } from "@liveagent/ui/i18n/LocaleContext";
 import { normalizeLiveToolStatus } from "@liveagent/ui/lib/chat/assistantStatus";
 import type { ChatFileLink } from "@liveagent/ui/lib/chat/chatFileLinks";
 import type { ConversationMentionReference } from "@liveagent/ui/lib/chat/mentionReferences";
 import type { ReplyShareSource } from "@liveagent/ui/lib/chat/replyShare";
-import {
-  type PendingUploadedFile,
-  splitUserAttachmentsForDisplay,
-} from "@liveagent/ui/lib/chat/uploadedFiles";
+import type { PendingUploadedFile } from "@liveagent/ui/lib/chat/uploadedFiles";
 import type { UploadedImagePreviewLoader } from "@liveagent/ui/lib/chat/uploadedImagePreview";
 import { useCommitDetailsLoader } from "@liveagent/ui/lib/chat/useCommitDetailsLoader";
-import {
-  type CommitDetailsLoader,
-  UserMessageContent,
-} from "@liveagent/ui/lib/chat/userMessageContent";
+import type { CommitDetailsLoader } from "@liveagent/ui/lib/chat/userMessageContent";
 import { chatDuration } from "@liveagent/ui/lib/chat/workTiming";
 import type { GitClient } from "@liveagent/ui/lib/git/types";
 import { copyTextToClipboard } from "@liveagent/ui/lib/shared/clipboard";
@@ -127,6 +124,10 @@ type GatewayTranscriptProps = {
   onSuggestionSelect?: (text: string) => void;
   readOnly?: boolean;
   redactToolContent?: boolean;
+  /** Start the agent process disclosures expanded (settings, #1154). */
+  expandProcessByDefault?: boolean;
+  /** Selected message text → composer blockquote. Omit to disable the quote button. */
+  onQuoteSelection?: (text: string) => void;
 };
 
 // Stream-born rows keep Streamdown's streaming render mode forever — even
@@ -171,6 +172,7 @@ function resolveNearestScrollViewport(element: HTMLElement | null) {
 }
 
 function HistoryLoadingState(props: { title?: string }) {
+  const { t } = useLocale();
   const title = props.title?.trim();
   return (
     <div className={GATEWAY_TRANSCRIPT_SHELL_CLASS}>
@@ -191,7 +193,9 @@ function HistoryLoadingState(props: { title?: string }) {
           >
             <Loader2 className="size-5 animate-spin text-muted-foreground" />
           </div>
-          <div className="max-w-112 text-sm font-medium text-foreground/90">正在加载会话历史</div>
+          <div className="max-w-112 text-sm font-medium text-foreground/90">
+            {t("chat.gatewayHistory.loading")}
+          </div>
           {title ? (
             <div className="mt-1 max-w-112 truncate text-xs text-muted-foreground">{title}</div>
           ) : null}
@@ -218,42 +222,6 @@ function CheckpointCard(props: {
           readOnly={readOnly}
         />
       </div>
-    </div>
-  );
-}
-
-function GatewayUserMessageBubbleBody(props: {
-  text: string;
-  attachments: PendingUploadedFile[];
-  workspaceRoot?: string;
-  onLoadUploadedImagePreview?: UploadedImagePreviewLoader;
-  loadCommitDetails?: CommitDetailsLoader;
-}) {
-  const { text, attachments, workspaceRoot, onLoadUploadedImagePreview, loadCommitDetails } = props;
-  const { visibleFiles, pastedTextFiles } = splitUserAttachmentsForDisplay(attachments, text);
-
-  return (
-    <div
-      className={cn(
-        "ml-auto w-fit max-w-full",
-        "whitespace-pre-wrap rounded-2xl rounded-br-md bg-[hsl(var(--chat-user-bg))] px-4 py-2.5",
-        "font-chat text-sm leading-relaxed break-words text-[hsl(var(--chat-user-fg))] [overflow-wrap:anywhere]",
-      )}
-    >
-      <UserAttachmentCards
-        files={visibleFiles}
-        workspaceRoot={workspaceRoot}
-        onLoadUploadedImagePreview={onLoadUploadedImagePreview}
-        imagePreviewMode="imageKind"
-      />
-      {text ? (
-        <UserMessageContent
-          text={text}
-          pastedTextFiles={pastedTextFiles}
-          loadCommitDetails={loadCommitDetails}
-          legacyInlineFileMentions
-        />
-      ) : null}
     </div>
   );
 }
@@ -296,15 +264,15 @@ const GatewayUserMessageRowBody = memo(function GatewayUserMessageRowBody(props:
     loadCommitDetails,
     onResendFromEdit,
   } = props;
-  const { locale, t } = useLocale();
+  const { t } = useLocale();
   const effectiveMessageRef = row.messageRef;
   const missingStableRef = !effectiveMessageRef;
   const editDisabled = readOnly || isStreaming || !onResendFromEdit || missingStableRef;
-  const editTitle = missingStableRef
-    ? locale === "en-US"
-      ? "This older message cannot be edited because it has no stable message identifier."
-      : "旧历史缺少稳定消息标识，无法编辑重发"
-    : t("chat.edit");
+  const editTitle = missingStableRef ? t("chat.gatewayHistory.editUnavailable") : t("chat.edit");
+
+  if (row.backgroundNotice) {
+    return <BackgroundNoticeMessage text={row.text} />;
+  }
 
   if (isEditing && effectiveMessageRef) {
     return (
@@ -332,12 +300,15 @@ const GatewayUserMessageRowBody = memo(function GatewayUserMessageRowBody(props:
       className="chat-user-bubble-wrap group relative ml-auto max-w-user-bubble-web"
       data-user-bubble-wrap
     >
-      <GatewayUserMessageBubbleBody
+      <UserMessageBubbleBody
+        messageKey={row.key}
         text={row.text}
         attachments={row.attachments}
         workspaceRoot={workspaceRoot}
         onLoadUploadedImagePreview={onLoadUploadedImagePreview}
+        imagePreviewMode="imageKind"
         loadCommitDetails={loadCommitDetails}
+        legacyInlineFileMentions
       />
       <TranscriptUserMessageActions
         timestamp={row.timestamp}
@@ -403,7 +374,7 @@ const GatewayAssistantMessageActions = memo(function GatewayAssistantMessageActi
     onBranchConversation,
     branchPendingMessageId,
   } = props;
-  const { locale, t } = useLocale();
+  const { t } = useLocale();
   const replyText = row.rounds
     .map((round) => getRoundText(round).trim())
     .filter((text) => text.length > 0)
@@ -424,11 +395,7 @@ const GatewayAssistantMessageActions = memo(function GatewayAssistantMessageActi
     [replyText, retryPrompt, row.timestamp],
   );
   const retryDisabled = isStreaming || !onResendFromEdit || !retryMessageRef;
-  const retryTitle = retryMessageRef
-    ? t("chat.retry")
-    : locale === "en-US"
-      ? "This reply cannot be retried because its prompt has no stable message identifier."
-      : "旧历史缺少稳定消息标识，无法重试";
+  const retryTitle = retryMessageRef ? t("chat.retry") : t("chat.gatewayHistory.retryUnavailable");
   const branchPending = branchPendingMessageId != null;
   const isRowBranchPending =
     branchPending && !!retryMessageRef && branchPendingMessageId === retryMessageRef.messageId;
@@ -596,7 +563,7 @@ const GatewayTranscriptListRegion = memo(function GatewayTranscriptListRegion(pr
     readOnly = false,
     redactToolContent = false,
   } = props;
-  const { locale } = useLocale();
+  const { t } = useLocale();
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const historyIdentityKey = `${conversationId ?? ""}\n${rows[0]?.key ?? ""}`;
@@ -902,12 +869,8 @@ const GatewayTranscriptListRegion = memo(function GatewayTranscriptListRegion(pr
                 )}
               >
                 {isLoadingMoreHistory
-                  ? locale === "en-US"
-                    ? "Loading earlier history..."
-                    : "正在加载更早历史..."
-                  : locale === "en-US"
-                    ? "Load earlier history"
-                    : "加载更早历史"}
+                  ? t("chat.gatewayHistory.loadingEarlier")
+                  : t("chat.gatewayHistory.loadEarlier")}
               </button>
             </div>
           );
@@ -1105,6 +1068,8 @@ export function GatewayTranscript({
   onSuggestionSelect,
   readOnly = false,
   redactToolContent = false,
+  expandProcessByDefault = false,
+  onQuoteSelection,
 }: GatewayTranscriptProps) {
   const transcriptListRef = useRef<HTMLDivElement | null>(null);
   const [transcriptScrollViewport, setTranscriptScrollViewport] = useState<HTMLDivElement | null>(
@@ -1162,37 +1127,39 @@ export function GatewayTranscript({
         {/* Keyed remount per conversation: per-conversation state (measured
             heights, scroll-to-end latch) initializes fresh, and row keys can
             never collide across conversations in the itemSizeCache. */}
-        <GatewayTranscriptListRegion
-          key={conversationId ?? "shared"}
-          conversationId={conversationId}
-          rows={rows}
-          liveStartIndex={liveStartIndex}
-          activeTurnKey={activeTurnKey}
-          contentWidth={contentWidth}
-          scrollViewport={transcriptScrollViewport}
-          isViewportFollowing={isViewportFollowing}
-          viewportFollowing={viewportFollowing}
-          navRef={navRef}
-          onAnchorUserRowChange={onAnchorUserRowChange}
-          hasMoreHistory={hasMoreHistory}
-          isLoadingMoreHistory={isLoadingMoreHistory}
-          onLoadEarlierHistory={onLoadEarlierHistory}
-          isStreaming={isStreaming}
-          showUsage={showUsage}
-          usageContextWindow={usageContextWindow}
-          workspaceRoot={workspaceRoot}
-          gitClient={gitClient}
-          onOpenFileLink={onOpenFileLink}
-          onLoadUploadedImagePreview={onLoadUploadedImagePreview}
-          onResendFromEdit={onResendFromEdit}
-          onBranchConversation={onBranchConversation}
-          branchPendingMessageId={branchPendingMessageId}
-          toolStatus={toolStatus}
-          toolStatusIsCompaction={toolStatusIsCompaction}
-          retryAttempts={retryAttempts}
-          readOnly={readOnly}
-          redactToolContent={redactToolContent}
-        />
+        <ProcessDisclosureProvider expandByDefault={expandProcessByDefault}>
+          <GatewayTranscriptListRegion
+            key={conversationId ?? "shared"}
+            conversationId={conversationId}
+            rows={rows}
+            liveStartIndex={liveStartIndex}
+            activeTurnKey={activeTurnKey}
+            contentWidth={contentWidth}
+            scrollViewport={transcriptScrollViewport}
+            isViewportFollowing={isViewportFollowing}
+            viewportFollowing={viewportFollowing}
+            navRef={navRef}
+            onAnchorUserRowChange={onAnchorUserRowChange}
+            hasMoreHistory={hasMoreHistory}
+            isLoadingMoreHistory={isLoadingMoreHistory}
+            onLoadEarlierHistory={onLoadEarlierHistory}
+            isStreaming={isStreaming}
+            showUsage={showUsage}
+            usageContextWindow={usageContextWindow}
+            workspaceRoot={workspaceRoot}
+            gitClient={gitClient}
+            onOpenFileLink={onOpenFileLink}
+            onLoadUploadedImagePreview={onLoadUploadedImagePreview}
+            onResendFromEdit={onResendFromEdit}
+            onBranchConversation={onBranchConversation}
+            branchPendingMessageId={branchPendingMessageId}
+            toolStatus={toolStatus}
+            toolStatusIsCompaction={toolStatusIsCompaction}
+            retryAttempts={retryAttempts}
+            readOnly={readOnly}
+            redactToolContent={redactToolContent}
+          />
+        </ProcessDisclosureProvider>
         {shouldShowInlineError ? (
           <div
             className={cn(
@@ -1205,6 +1172,13 @@ export function GatewayTranscript({
         ) : null}
       </div>
       <div className="col-2 h-gateway-transcript-bottom-spacer-h" />
+      {onQuoteSelection && !readOnly ? (
+        <TranscriptQuoteSelection
+          rootRef={transcriptListRef}
+          scopeKey={conversationId}
+          onQuote={onQuoteSelection}
+        />
+      ) : null}
       <ChatFileLinkContextMenuHost />
     </div>
   );

@@ -46,8 +46,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Intel is cross-compiled on the Apple Silicon runner: the
+          # macos-15-intel runners take roughly twice as long to compile, and
+          # every bundled sidecar is either prebuilt per target (K-brain) or
+          # cross-compiled with CGO disabled (gateway).
           - name: Intel
-            runner: macos-15-intel
+            runner: macos-15
             target: x86_64-apple-darwin
             suffix: x64
           - name: Apple Silicon
@@ -79,7 +83,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/agent-gui/src-tauri
+          # Cargo workspace root is the repo root, so artifacts live in ./target.
+          workspaces: ". -> target"
+          key: ${{ matrix.target }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile --filter liveagent... --filter @liveagent/gateway-webui...
@@ -161,6 +167,22 @@ jobs:
         working-directory: crates/agent-gui
         run: pnpm tauri build --config src-tauri/tauri.macos.release.conf.json --config src-tauri/tauri.macos.preview.conf.json --config "$LIVEAGENT_TAURI_VERSION_CONFIG" --target "${{ matrix.target }}" --bundles app
 
+      - name: Verify macOS executables match the target architecture
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            x86_64-*) expected=x86_64 ;;
+            aarch64-*) expected=arm64 ;;
+            *) echo "::error::unsupported macOS target ${{ matrix.target }}"; exit 1 ;;
+          esac
+          macos_dir="target/${{ matrix.target }}/release/bundle/macos/LiveAgent.app/Contents/MacOS"
+          for bin in "$macos_dir"/*; do
+            file -b "$bin" | grep -q '^Mach-O' || continue
+            archs="$(lipo -archs "$bin")"
+            echo "$(basename "$bin"): $archs"
+            [ "$archs" = "$expected" ] || { echo "::error::$bin is $archs, expected $expected"; exit 1; }
+          done
+
       - name: Verify macOS package contains backend and computer helper
         run: node scripts/release/verify-kbrain-packaging.mjs --target "${{ matrix.target }}" --binary-dir crates/agent-gui/src-tauri/binaries --bundle-dir "target/${{ matrix.target }}/release/bundle/macos/LiveAgent.app" --no-receipt-hash
 
@@ -216,14 +238,25 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # 与 CI 和 Linux 发布任务一样装官方 release。choco 源出错时安装会失败，
+      # 但旧步骤最后一条命令是 Out-File，步骤仍显示成功，十几分钟后才在构建里报找不到 protoc。
       - name: Install protobuf compiler
+        env:
+          PROTOC_VERSION: "34.0"
         run: |
-          choco install protoc -y --no-progress
-          "$env:ChocolateyInstall\lib\protoc\tools\bin" | Out-File -Append $env:GITHUB_PATH
+          $archive = Join-Path $env:RUNNER_TEMP "protoc.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "protoc-$env:PROTOC_VERSION"
+          Invoke-WebRequest -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v$env:PROTOC_VERSION/protoc-$env:PROTOC_VERSION-win64.zip" -OutFile $archive
+          Expand-Archive -Path $archive -DestinationPath $destination -Force
+          $protoc = Join-Path $destination "bin\protoc.exe"
+          & $protoc --version
+          if ($LASTEXITCODE -ne 0) { throw "protoc verification failed: $LASTEXITCODE" }
+          "PROTOC=$protoc" | Out-File -Append $env:GITHUB_ENV
+          (Split-Path $protoc) | Out-File -Append $env:GITHUB_PATH
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/agent-gui/src-tauri
+          workspaces: ". -> target"
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile --filter liveagent... --filter @liveagent/gateway-webui...
@@ -358,7 +391,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: crates/agent-gui/src-tauri
+          workspaces: ". -> target"
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile --filter liveagent... --filter @liveagent/gateway-webui...

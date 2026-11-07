@@ -35,6 +35,7 @@ import {
   type PendingUploadedFile,
   parsePastedTextDisplayReferences,
 } from "@liveagent/ui/lib/chat/uploadedFiles";
+import { stripMarkdownCitationMarkers } from "@liveagent/ui/lib/markdownCitations";
 import {
   cachedDateTimeFormat,
   cachedNumberFormat,
@@ -1105,7 +1106,10 @@ export const UserMessageContent = memo(function UserMessageContent({
   loadCommitDetails?: CommitDetailsLoader;
   legacyInlineFileMentions?: boolean;
 }) {
-  const normalizedText = useMemo(() => normalizeLogicalLineEndings(text), [text]);
+  const normalizedText = useMemo(
+    () => stripMarkdownCitationMarkers(normalizeLogicalLineEndings(text)),
+    [text],
+  );
   const parts = useMemo(
     () =>
       withLeadingCommand(
@@ -1130,7 +1134,7 @@ export const UserMessageContent = memo(function UserMessageContent({
   ) : null;
   if (!hasChip) {
     return (
-      <span className="chat-user-message-content">
+      <span className="chat-user-message-content" data-quote-source="user">
         {normalizedText}
         {trailingNewlineAnchor}
       </span>
@@ -1138,7 +1142,7 @@ export const UserMessageContent = memo(function UserMessageContent({
   }
 
   return (
-    <span className="chat-user-message-content">
+    <span className="chat-user-message-content" data-quote-source="user">
       {parts.map((part, idx) => {
         const key = userMessageSegmentKey(part, idx);
         if (part.type === "mention") {

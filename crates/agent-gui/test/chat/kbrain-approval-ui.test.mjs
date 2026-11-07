@@ -128,6 +128,7 @@ async function renderToolRow(item, props = {}) {
     "@liveagent/ui/components/chat/PlanModeCard": { PlanModeCard: () => null },
     "@liveagent/adapters/assistantBubble": {
       readAskUserQuestionDeadline: () => undefined,
+      useAskUserQuestionPending: () => false,
       usePlanDecisionState: () => ({ pending: false, approved: false }),
       retainRunningToolContent: false,
       submitAskUserQuestionAnswers() {},
@@ -186,4 +187,30 @@ test("both hosts read the marker: the desktop from its store, WebUI from the syn
   const webAdapter = web.loadModule("src/agent-ui-adapters/assistantBubble.ts");
   assert.deepEqual(webAdapter.usePermissionAutoResolved("x", { __toolPermissionAutoResolved: { source: "read_only" } }), { source: "read_only" });
   assert.equal(webAdapter.usePermissionAutoResolved("x", { command: "ls" }), null);
+});
+
+test("an edit approval renders K-brain's diff rows with line numbers and the cut note", async () => {
+  const { host, cleanup } = await renderBar([{
+    toolCallId: "e1",
+    toolName: "Edit",
+    summary: "src/app.ts",
+    preview: {
+      path: "src/app.ts",
+      before: "",
+      after: "",
+      truncated: true,
+      diff: "11   const keep = true;\n12 - const port = 3000;\n12 + const port = 8080;\n… +3 more lines",
+    },
+  }]);
+  try {
+    const figure = host.querySelector("[data-chat-code-diff]");
+    assert.equal(Boolean(figure), true, "the diff view is shown");
+    assert.match(figure.textContent, /src\/app\.ts/);
+    assert.match(figure.textContent, /\+1-1/);
+    assert.match(figure.textContent, /12const port = 8080;/);
+    assert.equal(host.querySelector("[data-diff-note]")?.textContent, "… +3 more lines");
+    assert.match(host.textContent, /预览已截断/);
+  } finally {
+    await cleanup();
+  }
 });

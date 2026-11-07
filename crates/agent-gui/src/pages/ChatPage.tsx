@@ -22,7 +22,6 @@ import {
 import { ThemeToggleButton } from "@liveagent/ui/components/ThemeToggleButton";
 import { useConfirmDialog } from "@liveagent/ui/components/ui/confirm-dialog";
 import { SidebarProvider, useSidebar } from "@liveagent/ui/components/ui/sidebar";
-import { toast } from "@liveagent/ui/components/ui/toast-manager";
 import { PaneChrome } from "@liveagent/ui/components/workbench/PaneChrome";
 import {
   type ProjectToolPaneEnvironment,
@@ -40,6 +39,14 @@ import { isWorkspacePreviewPath } from "@liveagent/ui/components/workspace-edito
 import { useLocale } from "@liveagent/ui/i18n/index";
 import { getAutomationState, useAutomation } from "@liveagent/ui/lib/automation/index";
 import { formatCheckpointRewoundNotification } from "@liveagent/ui/lib/chat/checkpointRewind";
+import {
+  type CommandPaletteAction,
+  isMacLikePlatform,
+} from "@liveagent/ui/lib/chat/commandPalette";
+import {
+  buildCommandPaletteActions,
+  SHARED_COMMAND_PALETTE_SETTINGS_SECTIONS,
+} from "@liveagent/ui/lib/chat/commandPaletteActions";
 import type {
   ComposerCommandHost,
   ComposerTurnCommand,
@@ -53,10 +60,12 @@ import {
   useInsertCodeReviewSkill,
 } from "@liveagent/ui/lib/chat/useComposerActions";
 import { useMentionApps } from "@liveagent/ui/lib/chat/useMentionApps";
+import { parseModelValue } from "@liveagent/ui/lib/models/modelValue";
 import { useThinkingLiveVersion } from "@liveagent/ui/lib/models/useThinkingLive";
 import { setPreferredMonacoNlsLocale } from "@liveagent/ui/lib/monacoNls";
 import { releaseProjectToolFromDock } from "@liveagent/ui/lib/projectTools/releaseProjectToolFromDock";
 import { useRightDockSettings } from "@liveagent/ui/lib/projectTools/useRightDockSettings";
+import { normalizeSidebarShortcuts } from "@liveagent/ui/lib/settings/sidebarShortcuts";
 import type { ChatRuntimeControls } from "@liveagent/ui/lib/settings/types";
 import { buildGatewayPublicBaseUrl } from "@liveagent/ui/lib/shared/gatewayPublicUrl";
 import { cn } from "@liveagent/ui/lib/shared/utils";
@@ -137,12 +146,7 @@ import {
   createConversationStateFromContext,
   type RenderTimelineItem,
 } from "../lib/chat/conversation/conversationState";
-import {
-  buildConversationStateFromWindow,
-  CHAT_HISTORY_WINDOW_MESSAGES,
-  type ChatHistorySummary,
-  getChatHistoryWindow,
-} from "../lib/chat/history/chatHistory";
+import type { ChatHistorySummary } from "../lib/chat/history/chatHistory";
 import {
   buildFallbackConversationTitle,
   createConversationIdentity,
@@ -158,6 +162,7 @@ import { publishGoalState } from "../lib/kbrain/goalStore";
 import { subscribeHistoryImported } from "../lib/kbrain/manualHistoryImport";
 import { getKBrainSessionId } from "../lib/kbrain/mapping";
 import { watchKBrainHistory } from "../lib/kbrain/watchHistory";
+import { createUnreadConversationStore } from "../lib/notifications/runAttention";
 import { createProviderRuntimeConfig, toModelValue } from "../lib/providers/llm";
 import {
   applyConversationThinking,
@@ -170,6 +175,7 @@ import {
   isThinkingAlwaysOnForModel,
   normalizeChatRuntimeControlsForProvider,
   normalizeSelectedModelForProviders,
+  openRightDockSingletonTab,
   parseSelectedModelJson,
   resolveEffectiveTheme,
   resolveWorkspaceResources,
@@ -186,6 +192,7 @@ import { tauriSftpClient } from "../lib/sftp/tauriSftpClient";
 import { createGuiSidebarBackend } from "../lib/sidebar/guiSidebarBackend";
 import { desktopSttTransport } from "../lib/stt/desktopSttTransport";
 import { createSubagentStoreManager } from "../lib/subagents";
+import { toggleDesktopWindowPin } from "../lib/system/windowPin";
 import { tauriTerminalClient } from "../lib/terminal/tauriTerminalClient";
 import { cancelPendingAskUserQuestionsForConversation } from "../lib/tools/askUserQuestionTools";
 import {
@@ -216,7 +223,6 @@ import { useConversationPaneHostBridge } from "./chat/conversations/useConversat
 import { useConversationRuntimeEntrySnapshot } from "./chat/conversations/useConversationRuntimeEntrySnapshot";
 import type {
   EnsureGatewayBridgeConversationReadyOptions,
-  PrepareEditResend,
   SendChatAction,
 } from "./chat/gateway/gatewayBridgeTypes";
 import { useGatewayBridgeListeners } from "./chat/gateway/useGatewayBridgeListeners";
@@ -224,10 +230,7 @@ import { useGatewayBridgeReadiness } from "./chat/gateway/useGatewayBridgeReadin
 import { useGatewayRunMirrorCoordinator } from "./chat/gateway/useGatewayRunMirrorCoordinator";
 import { useGatewayStatus } from "./chat/gateway/useGatewayStatus";
 import { useBranchConversation } from "./chat/history/useBranchConversation";
-import {
-  branchConversationWithReload,
-  useConversationHistoryActions,
-} from "./chat/history/useConversationHistoryActions";
+import { useConversationHistoryActions } from "./chat/history/useConversationHistoryActions";
 import { useSharedHistory } from "./chat/history/useSharedHistory";
 import { useChatPageRuntimeStore } from "./chat/hooks/useChatPageRuntimeStore";
 import {
@@ -241,6 +244,7 @@ import { useNotifyToasts } from "./chat/hooks/useNotifyToasts";
 import { MAX_UPLOAD_FILES, usePendingUploads } from "./chat/hooks/usePendingUploads";
 import { useTauriFileDrop } from "./chat/hooks/useTauriFileDrop";
 import { useUploadZoneDrop } from "./chat/hooks/useUploadZoneDrop";
+import { RunAttentionNotifier } from "./chat/notifications/RunAttentionNotifier";
 import {
   getQueuedConversationIds,
   removeQueuedChatTurnsForConversation,
@@ -249,7 +253,6 @@ import { useChatTurnQueue } from "./chat/queue/useChatTurnQueue";
 import { createChatRuntimeHost } from "./chat/runtime/ChatRuntimeHost";
 import {
   pruneIdleConversationRuntimeCaches,
-  setConversationRuntimeCacheEntry,
   syncMovedConversationRuntimeWorkdir,
 } from "./chat/runtime/chatPageRuntime";
 import { createGuiClarifyRunner } from "./chat/runtime/clarifyRunner";
@@ -868,6 +871,7 @@ function ChatPageContent(props: ChatPageProps) {
     handleRightDockInsertFileMention,
     handleRightDockInsertCommitMention,
     handleRightDockInsertGitFileMention,
+    handleRightDockInsertComposerSegments,
     handleInsertCodeMention,
     handleEmptyStateSuggestion,
   } = useComposerActions(composerRef);
@@ -1579,70 +1583,6 @@ function ChatPageContent(props: ChatPageProps) {
     setContext(currentRequestContext);
   }, [currentRequestContext, setContext]);
 
-  const prepareEditResend = useCallback<PrepareEditResend>(
-    async (requestedConversationId, messageRef, options) => {
-      const sourceConversationId =
-        requestedConversationId.trim() || currentConversationIdRef.current.trim();
-      if (!sourceConversationId) throw new Error("当前会话不存在，无法编辑重发");
-      if (!kBrainBackendEnabled) return { conversationId: sourceConversationId, messageRef };
-      const summary = await branchConversationWithReload(
-        sourceConversationId,
-        messageRef,
-        reloadConversation,
-      );
-      sidebarStore.upsertLocal({ ...summary, isPending: undefined });
-      const childWindow = await getChatHistoryWindow({
-        id: summary.id,
-        maxMessages: CHAT_HISTORY_WINDOW_MESSAGES,
-        includeActiveSegment: true,
-      });
-      if (!childWindow.activeSegment) throw new Error("编辑重发分支缺少活跃历史");
-      const childState = buildConversationStateFromWindow(childWindow);
-      const childRef = childState.transcript.items
-        .filter((item): item is Extract<typeof item, { kind: "user" }> => item.kind === "user")
-        .find((item) => item.messageRef?.messageId === messageRef.messageId)?.messageRef;
-      if (!childRef) throw new Error("编辑重发分支缺少稳定消息标识");
-      const sourceEntry = conversationRuntimeCacheRef.current.get(sourceConversationId);
-      if (!sourceEntry) throw new Error("当前会话运行状态不存在，无法编辑重发");
-      const childEntry = {
-        ...sourceEntry,
-        state: childState,
-        sessionId: childWindow.conversation.sessionId ?? childWindow.conversation.id,
-        createdAt: childWindow.conversation.createdAt,
-        workdir: childWindow.conversation.cwd,
-        isSending: false,
-        errorMessage: null,
-      };
-      setConversationRuntimeCacheEntry(conversationRuntimeCacheRef.current, summary.id, childEntry);
-      conversationPersistenceCursorRef.current.set(summary.id, {
-        activeSegmentIndex: childWindow.activeSegment?.segmentIndex ?? 0,
-        activeSegmentId: childWindow.activeSegment?.segmentId ?? `kbrain:${summary.sessionId}`,
-      });
-      if (options?.activate !== false) {
-        // Activate the child before its run starts. The source session remains
-        // available in the sidebar and is never edited.
-        await openInitialActionRef.current(summary.id);
-        toast.success(t("chat.editResendBranched"), {
-          id: `edit-resend-branch:${summary.id}`,
-          action: {
-            label: t("chat.editResendOpenSource"),
-            onClick: () => void openInitialActionRef.current(sourceConversationId),
-          },
-        });
-      }
-      return { conversationId: summary.id, messageRef: childRef };
-    },
-    [
-      conversationPersistenceCursorRef,
-      conversationRuntimeCacheRef,
-      currentConversationIdRef,
-      kBrainBackendEnabled,
-      reloadConversation,
-      sidebarStore,
-      t,
-    ],
-  );
-
   const { send } = useSendChatTurn({
     settings,
     workspaceProjects,
@@ -1709,7 +1649,6 @@ function ChatPageContent(props: ChatPageProps) {
     currentConversationIdRef,
     conversationRuntimeCacheRef,
     ensureGatewayBridgeConversationReadyRef,
-    prepareEditResend,
     sendActionRef,
     queueGatewayBridgeEventForRequest,
     shouldQueueGatewayChatRequest,
@@ -1981,6 +1920,7 @@ function ChatPageContent(props: ChatPageProps) {
 
   // 托盘/快捷键动作参数的 ref 镜像：监听 effect 是 []-dep，闭包内一律
   // 经 ref 取最新值（handleSelectWorkspaceProject 等依赖 settings，不稳定）。
+  const [unreadConversationStore] = useState(createUnreadConversationStore);
   const sidebarRunningConversationIds = useSidebarSelector(
     sidebarStore,
     selectRunningConversationIds,
@@ -2373,7 +2313,6 @@ function ChatPageContent(props: ChatPageProps) {
     isConversationHydrationFailed,
     currentConversationIdRef,
     onError: handleEditResendError,
-    prepareEditResend,
     sendActionRef,
   });
 
@@ -4059,6 +3998,7 @@ function ChatPageContent(props: ChatPageProps) {
         onInsertCodeReviewSkill: codeReviewSkill ? handleRightDockInsertCodeReviewSkill : undefined,
         onInsertCommitMention: handleRightDockInsertCommitMention,
         onInsertGitFileMention: handleRightDockInsertGitFileMention,
+        onInsertComposerSegments: handleRightDockInsertComposerSegments,
         focusRequest: gitReviewFocusRequest,
         onFocusRequestHandled: handleGitReviewFocusRequestHandled,
       },
@@ -4090,6 +4030,7 @@ function ChatPageContent(props: ChatPageProps) {
       handleOpenSshTerminal,
       handleRightDockInsertCodeReviewSkill,
       handleRightDockInsertCommitMention,
+      handleRightDockInsertComposerSegments,
       handleRightDockInsertFileMention,
       handleRightDockInsertGitFileMention,
       openWorkspaceEditorFile,
@@ -4269,6 +4210,82 @@ function ChatPageContent(props: ChatPageProps) {
       </div>
     ) : null;
 
+  // Cmd/Ctrl+K palette: the sidebar reads this snapshot only when it opens, so
+  // the closure is rebuilt per render without re-rendering the sidebar.
+  const buildCommandPaletteActionsLatestRef = useRef<() => CommandPaletteAction[]>(() => []);
+  buildCommandPaletteActionsLatestRef.current = () => {
+    const projectToolsAvailable = !projectToolsUserDisabledMessage;
+    return buildCommandPaletteActions({
+      t,
+      isMac: isMacLikePlatform(),
+      onNewConversation: () => {
+        const wasInHub = activeView !== "chat";
+        setActiveView("chat");
+        if (!wasInHub || !isDraftConversation) handleNewConversation();
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => composerRef.current?.focus());
+        });
+      },
+      onOpenWorkspace: isAgentMode ? handleOpenCreateWorkspaceProject : undefined,
+      onOpenSettings: (section) => onOpenSettings(section as Parameters<typeof onOpenSettings>[0]),
+      settingsSections: [
+        ...SHARED_COMMAND_PALETTE_SETTINGS_SECTIONS,
+        { id: "shortcuts", labelKey: "settings.navShortcuts" },
+        { id: "about", labelKey: "settings.navAbout" },
+      ],
+      sidebar: { open: sidebarOpen, onToggle: handleToggleSidebar },
+      theme: { current: settings.theme, onToggle: onToggleTheme },
+      projectTools: projectToolsAvailable
+        ? {
+            open: activeView === "chat" && rightDockOpen,
+            onToggle: () => {
+              const open = activeView === "chat" && rightDockOpen;
+              setActiveView("chat");
+              setRightDockOpen(!open);
+            },
+            onOpenTool: terminalProjectPathKey
+              ? (tool) => {
+                  setActiveView("chat");
+                  setRightDockOpen(true);
+                  setSettings((prev) =>
+                    openRightDockSingletonTab(prev, terminalProjectPathKey, tool),
+                  );
+                }
+              : undefined,
+          }
+        : undefined,
+      resourceHubs: {
+        visible: normalizeSidebarShortcuts(settings.customSettings.sidebarShortcuts),
+        onOpen: (resource) => {
+          cacheActiveComposerDraft();
+          setRightDockOpen(false);
+          setActiveView(`${resource}-hub`);
+        },
+      },
+      conversationView:
+        activeView === "chat" && hasConversationReply && !workbenchHasMultiplePanes
+          ? { active: renderedConversationView, onChange: setActiveConversationView }
+          : undefined,
+      executionMode: { isAgent: isAgentMode, onSelect: handleSelectExecutionMode },
+      models: hasModels
+        ? {
+            options: modelOptions,
+            selectedValue,
+            onSelect: (value) => {
+              const parsed = parseModelValue(value);
+              if (parsed) handleSelectModel(parsed);
+            },
+          }
+        : undefined,
+      onStopRun: isSending ? () => stopSendingActionRef.current() : undefined,
+      windowPin: isKBrainBrowserHost() ? undefined : { onToggle: toggleDesktopWindowPin },
+    });
+  };
+  const getCommandPaletteActions = useCallback(
+    () => buildCommandPaletteActionsLatestRef.current(),
+    [],
+  );
+
   return (
     <div
       data-app-frame="three-column"
@@ -4343,6 +4360,14 @@ function ChatPageContent(props: ChatPageProps) {
         className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
       >
         {workbenchDragGhost}
+        <RunAttentionNotifier
+          sidebarStore={sidebarStore}
+          approvalStore={conversationRuntimeRegistry.approvals}
+          questionStore={conversationRuntimeRegistry.questions}
+          unreadStore={unreadConversationStore}
+          visibleConversationId={activeView === "chat" ? currentConversationId : ""}
+          enabled={settings.customSettings.runNotifications}
+        />
         {/* ---- Left column: navigation/sidebar ---- */}
         <ChatSidebarContainer
           pinnedOrder={settings.system.sidebarPinnedOrder}
@@ -4362,10 +4387,12 @@ function ChatPageContent(props: ChatPageProps) {
           store={sidebarStore}
           approvalStore={conversationRuntimeRegistry.approvals}
           questionStore={conversationRuntimeRegistry.questions}
+          unreadStore={unreadConversationStore}
           currentConversationId={currentConversationId}
           isOpen={sidebarOpen}
           fontScale={settings.customSettings.fontScale.sidebar}
           conversationSearchRequestKey={conversationSearchRequestKey}
+          getCommandPaletteActions={getCommandPaletteActions}
           activeView={activeView}
           showProjects={isAgentMode}
           projects={workspaceProjects}
@@ -4642,6 +4669,7 @@ function ChatPageContent(props: ChatPageProps) {
               }
               onInsertCommitMention={handleRightDockInsertCommitMention}
               onInsertGitFileMention={handleRightDockInsertGitFileMention}
+              onInsertComposerSegments={handleRightDockInsertComposerSegments}
             />
           </WorkspaceToolsPanel>
         </WorkspacePanelGroup>

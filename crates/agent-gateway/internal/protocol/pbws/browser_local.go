@@ -270,6 +270,19 @@ func (c *browserConn) handleKBrainChatCommand(requestID, agentID string, body ha
 		model = &kbrain.ModelRef{Provider: provider, Model: body.SelectedModel.Model}
 	}
 	options := kbrainOptions(body)
+	prompt := kbrain.PromptRequest{Prompt: body.Message, PromptCommand: body.PromptCommand, Model: model, Options: options, HookPolicy: "backend", HookScopeID: start.ConversationID}
+	if len(body.UploadedFiles) > 0 {
+		paths := make([]string, 0, len(body.UploadedFiles))
+		for _, file := range body.UploadedFiles {
+			paths = append(paths, file.RelativePath)
+		}
+		content, err := c.srv.kbrainRelay.Uploads().Content(paths)
+		if err != nil {
+			c.sm.FailChatCommand(agentID, runID, "attachment_unavailable", err.Error())
+			return
+		}
+		prompt.Content = content
+	}
 	callbacks := c.srv.kbrainCallbacks(start.AgentID)
 	ready := make(chan struct{})
 	onEvent, onControl := callbacks.OnEvent, callbacks.OnControl
@@ -281,7 +294,7 @@ func (c *browserConn) handleKBrainChatCommand(requestID, agentID string, body ha
 		<-ready
 		onControl(runID, control)
 	}
-	queued, err := c.srv.kbrainRelay.StartWithCWD(context.Background(), start.RunID, start.ConversationID, body.ClientRequestID, body.Workdir, kbrain.PromptRequest{Prompt: body.Message, PromptCommand: body.PromptCommand, Model: model, Options: options}, body.QueuePolicy, callbacks, chatcmd.HasComposerCommand(body))
+	queued, err := c.srv.kbrainRelay.StartWithCWD(context.Background(), start.RunID, start.ConversationID, body.ClientRequestID, body.Workdir, prompt, body.QueuePolicy, callbacks, chatcmd.HasComposerCommand(body))
 	if err == nil && queued {
 		// Settle the browser startup watchdog before a queued run can start.
 		onControl(start.RunID, &gatewayv2.ChatControlEvent{RequestId: start.RunID, ConversationId: start.ConversationID, Type: "queued_in_gui"})
@@ -314,8 +327,10 @@ func kbrainOptions(body handler.ChatRequestBody) *kbrain.RunOptions {
 		options.PermissionMode = "always"
 	case "autoReview":
 		options.PermissionMode = "auto_review"
-	case "sandboxOffline":
-		options.ApprovalPolicy = "deny"
+	case "sandbox", "sandboxOffline":
+		// File edits proceed; commands run inside the backend's OS sandbox.
+		options.PermissionMode = "auto_edit"
+		options.Sandbox = &kbrain.RunSandbox{Mode: "workspace", Network: body.CommandSafetyMode == "sandbox"}
 	}
 	if body.RuntimeControls != nil {
 		options.Reasoning = body.RuntimeControls.Reasoning

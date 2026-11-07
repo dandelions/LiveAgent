@@ -2,6 +2,7 @@ import { Check, Goal, Pause, Play, SquarePen, Trash2, X } from "@liveagent/ui/co
 import { useConfirmDialog } from "@liveagent/ui/components/ui/confirm-dialog";
 import { useLocale } from "@liveagent/ui/i18n/index";
 import { cn } from "@liveagent/ui/lib/shared/utils";
+import { formatShortcutLabel } from "@liveagent/ui/lib/shortcuts/shortcutKeys";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 
 /** 目标栏展示的会话目标；status 取 K-brain goal 状态里会持续显示的几种。 */
@@ -17,7 +18,8 @@ export type ComposerGoalBarState = {
 
 export type ComposerGoalBarActions = {
   onPause: () => unknown;
-  onResume: () => unknown;
+  /** 不提供时（运行端不支持续跑，例如直连 K-brain 的网关）暂停态不显示继续按钮。 */
+  onResume?: () => unknown;
   onUpdate: (goal: string) => unknown;
   onClear: () => unknown;
 };
@@ -134,6 +136,7 @@ export function ComposerGoalBar({
           .replace("{max}", String(state.maxRounds))
       : null;
   const locked = disabled || busy;
+  const resume = actions.onResume;
 
   return (
     <div
@@ -160,7 +163,9 @@ export function ComposerGoalBar({
         </span>
         {editing ? (
           <span className="min-w-10 flex-1 truncate text-muted-foreground/70">
-            {t("chat.goalBar.editHint")}
+            {t("chat.goalBar.editHint")
+              .replace("{save}", formatShortcutLabel("Mod+Enter"))
+              .replace("{cancel}", formatShortcutLabel("Escape"))}
           </span>
         ) : (
           <span className="min-w-10 flex-1 truncate text-muted-foreground" title={state.goal}>
@@ -210,16 +215,18 @@ export function ComposerGoalBar({
               >
                 <SquarePen className="size-3.5" />
               </button>
-              <button
-                type="button"
-                className={iconButton}
-                disabled={locked}
-                onClick={() => void run(running ? actions.onPause : actions.onResume)}
-                title={running ? t("chat.goalBar.pause") : t("chat.goalBar.resume")}
-                aria-label={running ? t("chat.goalBar.pause") : t("chat.goalBar.resume")}
-              >
-                {running ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
-              </button>
+              {running || resume ? (
+                <button
+                  type="button"
+                  className={iconButton}
+                  disabled={locked}
+                  onClick={() => void run(running || !resume ? actions.onPause : resume)}
+                  title={running ? t("chat.goalBar.pause") : t("chat.goalBar.resume")}
+                  aria-label={running ? t("chat.goalBar.pause") : t("chat.goalBar.resume")}
+                >
+                  {running ? <Pause className="size-3.5" /> : <Play className="size-3.5" />}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className={iconButton}

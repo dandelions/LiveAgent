@@ -4,7 +4,9 @@ import http from "node:http";
 import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
-const { resolveKBrainPermissionMode } = loader.loadModule("@liveagent/ui/lib/chat/permissionModes");
+const { resolveKBrainPermissionMode, resolveKBrainRunSandbox } = loader.loadModule(
+  "@liveagent/ui/lib/chat/permissionModes",
+);
 const { normalizeCommandSafetyMode, strictestCommandSafetyMode } = loader.loadModule("src/lib/settings");
 const { normalizeGatewayCommandSafetyMode } = loader.loadModule("src/pages/chat/gateway/gatewayBridgeTypes");
 
@@ -15,6 +17,91 @@ test("permission choices map to K-brain and plan always takes precedence", () =>
     assert.equal(resolveKBrainPermissionMode(mode), expected);
     assert.equal(resolveKBrainPermissionMode(mode, true), "plan");
   }
+});
+
+test("sandbox modes auto-edit and confine commands with the backend's OS sandbox", () => {
+  for (const [mode, network] of [["sandbox", true], ["sandboxOffline", false]]) {
+    assert.equal(normalizeCommandSafetyMode(mode), mode);
+    assert.equal(normalizeGatewayCommandSafetyMode(mode), mode);
+    assert.equal(resolveKBrainPermissionMode(mode), "auto_edit");
+    assert.equal(resolveKBrainPermissionMode(mode, true), "plan");
+    assert.deepEqual(resolveKBrainRunSandbox(mode), { mode: "workspace", network });
+  }
+  for (const mode of ["ask", "autoEdit", "autoReview", "always", "auto", undefined]) {
+    assert.equal(resolveKBrainRunSandbox(mode), undefined);
+  }
+});
+
+test("a sandboxed run is refused, never sent unconfined, when the backend cannot enforce it", async (t) => {
+  const posts = [];
+  let runSandbox;
+  const server = http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/v1/health") {
+      const capabilities = { permission_modes: ["auto_edit"] };
+      if (runSandbox) capabilities.run_sandbox = runSandbox;
+      res.end(JSON.stringify({ status: "ok", version: "kbrain.agent.v1", capabilities }));
+      return;
+    }
+    posts.push(JSON.parse(raw));
+    res.end(JSON.stringify({ version: "kbrain.agent.v1", conversation_id: "session", run_id: "run", accepted_seq: 1 }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const { createKBrainClient } = loader.loadModule("src/lib/kbrain/client");
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const run = (network) =>
+    createKBrainClient({ baseUrl: url }).startRun({
+      conversation_id: "session",
+      client_request_id: `r-${posts.length}-${network}`,
+      prompt: "hi",
+      options: { mode: "agent", permission_mode: "auto_edit", sandbox: { mode: "workspace", network } },
+    });
+
+  await assert.rejects(run(true), /cannot sandbox commands/);
+  runSandbox = { supported: true, network_control: false };
+  await assert.rejects(run(false), /offline sandbox/);
+  assert.equal(posts.length, 0, "nothing reaches the backend unconfined");
+  await run(true);
+  runSandbox = { supported: true, network_control: true };
+  await run(false);
+  // A sandbox that leaves .liveagent and .git/hooks writable is no sandbox for LiveAgent.
+  runSandbox = { supported: true, mechanism: "landlock", network_control: true, read_masking: false, path_protection: false };
+  await assert.rejects(run(true), /protected paths/);
+  await assert.rejects(run(false), /protected paths/);
+  runSandbox = { supported: true, mechanism: "bubblewrap", network_control: true, read_masking: true, path_protection: true };
+  await run(true);
+  assert.deepEqual(posts.map((body) => body.options.sandbox), [
+    { mode: "workspace", network: true },
+    { mode: "workspace", network: false },
+    { mode: "workspace", network: true },
+  ]);
+});
+
+test("run sandbox health gate requires path protection", () => {
+  const { supportsRunSandbox, runSandboxLacksPathProtection } = loader.loadModule("@liveagent/ui/lib/kbrain/health");
+  const health = (runSandbox) => ({ capabilities: { run_sandbox: runSandbox } });
+  const online = { network: true };
+  const offline = { network: false };
+  const landlock = { supported: true, mechanism: "landlock", network_control: true, read_masking: false, path_protection: false };
+  assert.equal(runSandboxLacksPathProtection(landlock), true);
+  assert.equal(supportsRunSandbox(health(landlock), online), false);
+  assert.equal(supportsRunSandbox(health(landlock), offline), false);
+  // Older K-brain omits the field and only used mechanisms that protect the paths.
+  const legacy = { supported: true, mechanism: "seatbelt", network_control: true };
+  assert.equal(runSandboxLacksPathProtection(legacy), false);
+  assert.equal(supportsRunSandbox(health(legacy), online), true);
+  assert.equal(supportsRunSandbox(health(legacy), offline), true);
+  // ...except Landlock, which never protects them.
+  assert.equal(runSandboxLacksPathProtection({ supported: true, mechanism: "landlock", network_control: true }), true);
+  const protectedSandbox = { ...landlock, mechanism: "bubblewrap", read_masking: true, path_protection: true };
+  assert.equal(supportsRunSandbox(health(protectedSandbox), online), true);
+  assert.equal(supportsRunSandbox(health(protectedSandbox), offline), true);
+  assert.equal(runSandboxLacksPathProtection(undefined), false);
+  assert.equal(runSandboxLacksPathProtection({ ...landlock, supported: false }), false, "unsupported for its own reason");
+  assert.equal(supportsRunSandbox({ capabilities: {} }, online), false);
 });
 
 test("the retired full-access mode migrates to always allow", () => {
@@ -116,4 +203,74 @@ test("runs opt into per-run AI review only when the backend advertises it", asyn
   health = null;
   await run(createKBrainClient({ baseUrl: url }), "normal");
   assert.equal("review_scope" in posts.at(-1).options, false, "a relay without health still runs");
+});
+
+test("agent turns carry the sandbox the composer mode asks for", () => {
+  const { canonicalRunOptions } = loader.loadModule("src/pages/chat/turns/runKBrainConversationTurn");
+  const agent = (commandSafetyMode) =>
+    canonicalRunOptions({ effectiveWorkdir: "/w", runtime: {}, commandSafetyMode });
+  assert.deepEqual(agent("sandbox").sandbox, { mode: "workspace", network: true });
+  assert.equal(agent("sandbox").permission_mode, "auto_edit");
+  assert.deepEqual(agent("sandboxOffline").sandbox, { mode: "workspace", network: false });
+  assert.equal("sandbox" in agent("ask"), false);
+  assert.equal("sandbox" in agent("always"), false);
+  // Plan mode keeps the sandbox for anything it lets through.
+  const plan = canonicalRunOptions({ effectiveWorkdir: "/w", runtime: {}, commandSafetyMode: "sandbox", planModeEnabled: true });
+  assert.equal(plan.permission_mode, "plan");
+  assert.deepEqual(plan.sandbox, { mode: "workspace", network: true });
+});
+
+test("the desktop reads the sandbox capability from K-brain health", () => {
+  const { sandboxCapabilityFromHealth } = loader.loadModule("src/agent-ui-adapters/sandboxCapability");
+  const old = sandboxCapabilityFromHealth({ capabilities: { permission_modes: ["auto_edit"] } });
+  assert.equal(old.supported, false);
+  assert.match(old.reason, /update K-brain/);
+  assert.deepEqual(
+    sandboxCapabilityFromHealth({
+      capabilities: {
+        run_sandbox: { supported: true, version: "kbrain.sandbox.v1", mechanism: "seatbelt", platform: "darwin", network_control: true, read_masking: true, modes: ["workspace"] },
+      },
+    }),
+    { supported: true, mechanism: "seatbelt", platform: "darwin", network_control: true, read_masking: true },
+  );
+  const unsupported = sandboxCapabilityFromHealth({
+    capabilities: { run_sandbox: { supported: false, network_control: true, reason: "bwrap not found" } },
+  });
+  assert.equal(unsupported.supported, false);
+  assert.equal(unsupported.network_control, false, "no offline sandbox without a sandbox");
+  assert.equal(unsupported.reason, "bwrap not found");
+  const reason = "bwrap is not installed; using Landlock (ABI 6) with seccomp";
+  const landlock = sandboxCapabilityFromHealth({
+    capabilities: {
+      run_sandbox: { supported: true, mechanism: "landlock", platform: "linux", network_control: true, read_masking: false, path_protection: false, reason },
+    },
+  });
+  assert.deepEqual(
+    landlock,
+    { supported: false, mechanism: "landlock", platform: "linux", network_control: false, read_masking: false, path_protection: false, reason },
+    "protected paths left writable disable both sandbox modes",
+  );
+  assert.deepEqual(
+    sandboxCapabilityFromHealth({
+      capabilities: {
+        run_sandbox: { supported: true, mechanism: "bubblewrap", platform: "linux", network_control: true, read_masking: true, path_protection: true },
+      },
+    }),
+    { supported: true, mechanism: "bubblewrap", platform: "linux", network_control: true, read_masking: true, path_protection: true },
+  );
+  // Landlock from a backend that predates the field is still unprotected.
+  const unlabelled = sandboxCapabilityFromHealth({
+    capabilities: { run_sandbox: { supported: true, mechanism: "landlock", platform: "linux", network_control: true } },
+  });
+  assert.equal(unlabelled.supported, false);
+  assert.equal(unlabelled.path_protection, false);
+  // An unsupported sandbox keeps the backend's reason; path protection is moot.
+  const bwrapMissing = sandboxCapabilityFromHealth({
+    capabilities: {
+      run_sandbox: { supported: false, mechanism: "bubblewrap", platform: "linux", network_control: false, read_masking: false, path_protection: false, reason: "bubblewrap (bwrap) is not installed" },
+    },
+  });
+  assert.equal(bwrapMissing.supported, false);
+  assert.equal("path_protection" in bwrapMissing, false);
+  assert.equal(bwrapMissing.reason, "bubblewrap (bwrap) is not installed");
 });

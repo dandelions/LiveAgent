@@ -9,6 +9,7 @@ import {
   type ForwardedRef,
   forwardRef,
   memo,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
@@ -27,6 +28,10 @@ import { KBrainGoalBarHost } from "../composer/KBrainGoalBarHost";
 import type { ConversationPaneHostHandle } from "../conversations/useConversationPaneHostBridge";
 import { useConversationSurfaceSnapshot } from "../conversations/useConversationSurfaceSnapshot";
 import { buildQueuedChatTurnPreview } from "../queue/chatTurnQueue";
+import {
+  KBrainSubagentPaneHost,
+  KBrainSubagentRunningChip,
+} from "../subagents/KBrainSubagentPaneHost";
 
 const CheckpointRewindProvider = isKBrainBackendEnabled()
   ? KBrainCheckpointRewindProvider
@@ -180,7 +185,6 @@ const RegisteredConversationPaneHostContent = forwardRef<
   const composerRef = useRef<MentionComposerHandle | null>(null);
   const scrollFollowRef = useRef<ScrollFollowHandle | null>(null);
   const [composerOverlayHeight, setComposerOverlayHeight] = useState(0);
-  const [composerFloatingOverhang, setComposerFloatingOverhang] = useState(0);
   const [composerCenterOffset, setComposerCenterOffset] = useState(0);
   // Background panes send through their own conversation-scoped pipeline; the
   // handler owns clear-on-send/restore-on-failure for this pane's composer.
@@ -197,6 +201,10 @@ const RegisteredConversationPaneHostContent = forwardRef<
         : null,
     [controller, sendDraft],
   );
+
+  const handleQuoteSelection = useCallback((text: string) => {
+    composerRef.current?.insertQuote(text);
+  }, []);
 
   useImperativeHandle(
     forwardedRef,
@@ -232,7 +240,8 @@ const RegisteredConversationPaneHostContent = forwardRef<
     });
   }, [controller, isBackgroundPane]);
 
-  return (
+  const kbrainSubagents = isKBrainBackendEnabled();
+  const surface = (
     <ConversationSurface
       paneId={paneId}
       contentWidth={transcript.contentWidth}
@@ -270,8 +279,8 @@ const RegisteredConversationPaneHostContent = forwardRef<
                   isSending={isSending}
                   isCompactionRunning={isCompactionRunning}
                   bottomReservePx={composerOverlayHeight}
-                  floatingOverhangPx={composerFloatingOverhang}
                   composerCenterOffsetPx={composerCenterOffset}
+                  onQuoteSelection={handleQuoteSelection}
                 />
               </CheckpointRewindProvider>
             </ChangedFilesActionsProvider>
@@ -299,15 +308,22 @@ const RegisteredConversationPaneHostContent = forwardRef<
               onManualCompactConfirm={controller.compact}
               manualCompactBlocked={isCompactionRunning}
               onHeightChange={setComposerOverlayHeight}
-              onFloatingOverhangChange={setComposerFloatingOverhang}
               onCenterOffsetChange={setComposerCenterOffset}
               taskProgressBar={
-                <CurrentTaskProgress
-                  key={snapshot.conversationId}
-                  historyItems={historyItems}
-                  liveTranscriptStore={transcript.liveTranscriptStore}
-                  isConversationRunning={isSending || isConversationRunning}
-                />
+                <>
+                  <CurrentTaskProgress
+                    key={snapshot.conversationId}
+                    historyItems={historyItems}
+                    liveTranscriptStore={transcript.liveTranscriptStore}
+                    isConversationRunning={isSending || isConversationRunning}
+                  />
+                  {kbrainSubagents && !trajectoryActive ? (
+                    <KBrainSubagentRunningChip
+                      key={`subagents-${snapshot.conversationId}`}
+                      conversationId={snapshot.conversationId}
+                    />
+                  ) : null}
+                </>
               }
               approvalBar={
                 snapshot.approvals.length > 0 ? (
@@ -347,6 +363,18 @@ const RegisteredConversationPaneHostContent = forwardRef<
         };
       }}
     />
+  );
+  if (!kbrainSubagents) return surface;
+  // The subagent pane sits beside this conversation, so split panes each get their own.
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      {surface}
+      <KBrainSubagentPaneHost
+        conversationId={conversationId}
+        workdir={transcript.workspaceRoot}
+        onOpenFileLink={transcript.onOpenFileLink}
+      />
+    </div>
   );
 });
 

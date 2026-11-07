@@ -125,7 +125,13 @@ type Message struct {
 	HostedSearch []json.RawMessage `json:"hosted_search,omitempty"`
 	StopReason   string            `json:"stop_reason,omitempty"`
 	CreatedAt    time.Time         `json:"created_at,omitempty"`
+	// Origin is "background" on a user-role notice K-brain delivered on its own
+	// (a wait result, a process exit, a background task report).
+	Origin string `json:"origin,omitempty"`
 }
+
+// OriginBackground marks a user-role message the user did not write.
+const OriginBackground = "background"
 
 type ContentBlock struct {
 	Type     string `json:"type"`
@@ -140,6 +146,27 @@ type ToolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
+	// ExitCode, TimedOut and DurationMs describe how the call ran (history only;
+	// a shell tool's exit status, 0 included). Display only.
+	ExitCode   *int  `json:"exit_code,omitempty"`
+	TimedOut   bool  `json:"timed_out,omitempty"`
+	DurationMs int64 `json:"duration_ms,omitempty"`
+	// QuestionAnswers are the answers recorded on a question or AskUserQuestion
+	// call (Stack-Cairn/K-brain#168), as in question.resolved. Display only.
+	QuestionAnswers []QuestionAnswer `json:"question_answers,omitempty"`
+}
+
+// QuestionAnswer is one answer to question.requested, as K-brain records it.
+// SelectedLabels (capability question_selected_labels) are the options picked;
+// with them, SelectedLabel is the user's own text and only set with Custom.
+// Old-style answers have no SelectedLabels: SelectedLabel is the typed text
+// when Custom, otherwise the option picked.
+type QuestionAnswer struct {
+	QuestionID     string   `json:"question_id"`
+	Prompt         string   `json:"prompt,omitempty"`
+	SelectedLabel  string   `json:"selected_label,omitempty"`
+	SelectedLabels []string `json:"selected_labels,omitempty"`
+	Custom         bool     `json:"custom,omitempty"`
 }
 
 type Usage struct {
@@ -161,6 +188,15 @@ type RunOptions struct {
 	Tools           *ToolSelection  `json:"tools,omitempty"`
 	PlanModeEnabled bool            `json:"plan_mode_enabled,omitempty"`
 	MCPServerIDs    []string        `json:"mcp_server_ids,omitempty"`
+	// Sandbox confines the run's commands with the backend's OS sandbox
+	// (capability run_sandbox). Runs asking for it are refused, never started
+	// unconfined, when the backend cannot enforce it.
+	Sandbox *RunSandbox `json:"sandbox,omitempty"`
+}
+
+type RunSandbox struct {
+	Mode    string `json:"mode"`
+	Network bool   `json:"network"`
 }
 
 type WorkspaceRoot struct {
@@ -178,6 +214,14 @@ type PromptRequest struct {
 	ConversationID  string `json:"conversation_id"`
 	ClientRequestID string `json:"client_request_id"`
 	Prompt          string `json:"prompt,omitempty"`
+	// Content follows Prompt in the user message: attachments as canonical blocks.
+	Content []ContentBlock `json:"content,omitempty"`
+	// TurnID names the user message, so checkpoints and rewind find the turn.
+	TurnID string `json:"turn_id,omitempty"`
+	// HookPolicy "backend" runs the session hooks in K-brain; HookScopeID groups
+	// the hook state of one Gateway conversation.
+	HookPolicy  string `json:"hook_policy,omitempty"`
+	HookScopeID string `json:"hook_scope_id,omitempty"`
 	// PromptCommand 表示 Prompt 是 "/name args" 提示词指令，由 K-brain 展开，历史保留原文。
 	PromptCommand bool        `json:"prompt_command,omitempty"`
 	Model         *ModelRef   `json:"model,omitempty"`
@@ -394,11 +438,7 @@ func (c *Client) StartRun(ctx context.Context, sessionID string, in PromptReques
 	var out RunAccepted
 	// Every run needs a valid handshake: a backend that contradicts
 	// kbrain.agent.v1 must not accept work in any permission mode.
-	mode := ""
-	if in.Options != nil {
-		mode = in.Options.PermissionMode
-	}
-	if err := c.requireHandshake(ctx, mode); err != nil {
+	if err := c.requireRunOptions(ctx, in.Options); err != nil {
 		return out, 0, err
 	}
 	in = c.withReviewScope(ctx, in)

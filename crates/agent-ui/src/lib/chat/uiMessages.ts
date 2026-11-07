@@ -6,7 +6,11 @@ import type {
   ToolResultMessage,
   Usage,
 } from "@liveagent/ui/lib/chat/agentTypes";
-import { ASK_USER_QUESTION_DEADLINE_ARG } from "@liveagent/ui/lib/chat/askUserQuestion";
+import {
+  ASK_USER_QUESTION_DEADLINE_ARG,
+  ASK_USER_QUESTION_PENDING_ARG,
+  KBRAIN_QUESTION_ORIGINAL_ARGUMENTS_ARG,
+} from "@liveagent/ui/lib/chat/askUserQuestion";
 import { estimateThinkingReplayTokenUnits } from "@liveagent/ui/lib/chat/contextUsage";
 import {
   enrichHostedSearchContentWithText,
@@ -16,6 +20,7 @@ import {
   resolveHostedSearchTextBoundary,
   splitTextAroundHostedSearch,
 } from "@liveagent/ui/lib/chat/hostedSearch";
+import { summarizeKBrainToolArgs } from "@liveagent/ui/lib/chat/kbrainToolSummaries";
 import {
   EXIT_PLAN_MODE_APPROVED_ARG,
   EXIT_PLAN_MODE_PENDING_ARG,
@@ -498,11 +503,41 @@ export function summarizeToolCall(
                                                   : null,
                                                 args.submit === true ? "submit=true" : null,
                                               ]
-                                            : [];
+                                            : name === "lsp"
+                                              ? summarizeLspToolCall(args)
+                                              : name === "web_fetch" || name === "WebFetch"
+                                                ? summarizeWebFetchToolCall(args)
+                                                : (summarizeKBrainToolArgs(name, args) ?? []);
 
   const summary = parts.filter(Boolean).join(" ");
   if (!summary) return includeName ? name : "";
   return includeName ? `${name} ${summary}` : summary;
+}
+
+// K-brain lsp: `definition src/a.go:12:5`, `documentSymbol src/a.go`,
+// `workspaceSymbol query=Handler`. 行列号是 1-based，与 Read 的行号一致。
+function summarizeLspToolCall(args: Record<string, unknown>) {
+  const path = summarizeToolArg(args.path);
+  const line = typeof args.line === "number" ? args.line : undefined;
+  const character = typeof args.character === "number" ? args.character : undefined;
+  const position =
+    path && line !== undefined
+      ? `${path}:${line}${character !== undefined ? `:${character}` : ""}`
+      : path;
+  return [
+    typeof args.operation === "string" ? summarizeToolArg(args.operation) : null,
+    position,
+    typeof args.query === "string" ? `query=${summarizeToolArg(args.query)}` : null,
+  ];
+}
+
+// web_fetch 行以 URL 为主体；分页参数只在模型显式传入时出现。
+function summarizeWebFetchToolCall(args: Record<string, unknown>) {
+  return [
+    summarizeToolArg(typeof args.url === "string" ? args.url : args.uri, 120),
+    typeof args.offset === "number" && args.offset > 0 ? `offset=${args.offset}` : null,
+    typeof args.max_chars === "number" ? `maxChars=${args.max_chars}` : null,
+  ];
 }
 
 function summarizeImageSourceArg(value: unknown) {
@@ -581,6 +616,8 @@ const DISPLAY_SYNTHETIC_ARG_KEYS = new Set([
   TOOL_APPROVAL_NOTICE_ARG,
   TOOL_APPROVAL_PREVIEW_ARG,
   ASK_USER_QUESTION_DEADLINE_ARG,
+  ASK_USER_QUESTION_PENDING_ARG,
+  KBRAIN_QUESTION_ORIGINAL_ARGUMENTS_ARG,
   EXIT_PLAN_MODE_PENDING_ARG,
   EXIT_PLAN_MODE_APPROVED_ARG,
 ]);

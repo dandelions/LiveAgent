@@ -6,6 +6,7 @@ import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 const loader = createTsModuleLoader();
 const mapping = loader.loadModule("src/lib/kbrain/mapping.ts");
 const history = loader.loadModule("src/lib/kbrain/history.ts");
+const conversationState = loader.loadModule("src/lib/chat/conversation/conversationState.ts");
 const DEFAULT_KBRAIN_URL = "http://127.0.0.1:47321";
 const runtimeConnection = loader.loadModule("src/lib/kbrain/runtimeConnection.ts");
 
@@ -213,6 +214,92 @@ test("HTTP history restoration preserves cancelled, truncated and tool-use assis
   });
 });
 
+test("background notices from K-brain render as notices, not as user messages", async () => {
+  installStorage();
+  const notice = "[wait w1 done] condition met (ran every 2s):\n$ cat build.log\n\nBUILD-READY";
+  const session = makeSession({
+    tasks: [],
+    messages: [
+      { id: "u-1", role: "user", content: [{ type: "text", text: "build it, then continue" }] },
+      { id: "a-1", role: "assistant", content: [{ type: "text", text: "started" }], provider: "fixture", model: "fixture-model" },
+      { id: "u-2", role: "user", origin: "background", content: [{ type: "text", text: notice }] },
+      { id: "a-2", role: "assistant", content: [{ type: "text", text: "continuing" }], provider: "fixture", model: "fixture-model" },
+    ],
+    message_count: 4,
+  });
+  await withHttpFixture(async (_request, response) => {
+    sendJson(response, {
+      session, revision: session.revision, oldest_offset: 0, has_more_before: false,
+      total_message_count: session.messages.length, active_messages: session.messages,
+    });
+  }, async () => {
+    mapping.setKBrainSessionId("background-notice", session.id);
+    const restored = await history.getKBrainHistoryWindow("background-notice");
+    const users = restored.segments.flatMap((segment) => segment.messages).filter((message) => message.role === "user");
+    assert.deepEqual(users.map((message) => message.liveAgentBackgroundNotice === true), [false, true]);
+    const state = conversationState.createConversationStateFromContext({ messages: [] });
+    const withHistory = conversationState.appendMessagesToConversation(state, restored.segments.flatMap((segment) => segment.messages));
+    const items = withHistory.transcript.items.filter((item) => item.kind === "user");
+    assert.deepEqual(items.map((item) => [item.text, item.backgroundNotice === true]), [
+      ["build it, then continue", false],
+      [notice, true],
+    ]);
+  });
+});
+
+// K-brain 0.107.17 and earlier saved these notices without origin, so long chats
+// that span the upgrade still hold them (#1211).
+test("runtime notices saved before K-brain set origin still render as notices", async () => {
+  installStorage();
+  const legacy = [
+    '[process bash-1793875844913105000 completed exit_code=0]\n$ sleep 5; echo READY\n\nLast output:\nREADY\n\nFull log: ManagedProcess(action="read_log", process_id="bash-1793875844913105000") or /tmp/k-brain-managed-process-1.log',
+    "[process mp-1793875844913105001 timed_out] build\n$ sleep 30\n\nFull log: ManagedProcess(action=\"read_log\", process_id=\"mp-1793875844913105001\") or /tmp/k-brain-managed-process-2.log",
+    "[subagent count-files-3 done] count files\n\n42 files",
+    "[subagent sub-4 cancelled] 统计文件\n\ncontext canceled",
+    "[subagent count-files-5] prepare subagent workspace: not a git repository",
+    "[wait wait-cat-build-log-6 done] condition met (ran every 2s):\n$ cat build.log\n\nBUILD-READY",
+    "[wait wait-cat-build-log-7 timeout] deadline elapsed without the condition being met:\n$ cat build.log",
+    "[wait wait-cat-build-log-8] gave up: command failed 5 consecutive times (last: exit status 1)\n\nLast output:\n",
+    "[workflow run-19a5c2d3e4f-1-ab12 complete] review\n\n{}",
+    // Goal rounds, the new-context notice and the output-limit reminder had no origin up to 0.107.18.
+    "[goal 10/100] Draft the v1.3 release notes",
+    "[goal 1/3] 整理发布说明\n第二行",
+    "A new context window is active. Continue the current task using the available workspace and tools. The previous conversation was intentionally discarded.\n\nCurrent task:\nship it",
+    "<system-reminder>\nYour previous response was cut off because it reached the output token limit. Continue exactly where it stopped. Do not repeat text you already wrote.\n</system-reminder>",
+  ];
+  const typed = [
+    "[process bash-1 completed] what does this mean?",
+    "[subagent] why did it stop?",
+    "[wait] how long is left?",
+    "please check [process bash-1 completed exit_code=0]\n$ ls",
+    "[goal] what is the goal?",
+    "[goal 0/3] start",
+    "/goal Draft the v1.3 release notes",
+    "what does [goal 2/5] mean?",
+    "A new context window is active, right?",
+  ];
+  const texts = [...legacy, ...typed];
+  const messages = texts.flatMap((text, index) => [
+    { id: `u-${index}`, role: "user", content: [{ type: "text", text }] },
+    { id: `a-${index}`, role: "assistant", content: [{ type: "text", text: "ok" }], provider: "fixture", model: "fixture-model" },
+  ]);
+  const session = makeSession({ tasks: [], messages, message_count: messages.length });
+  await withHttpFixture(async (_request, response) => {
+    sendJson(response, {
+      session, revision: session.revision, oldest_offset: 0, has_more_before: false,
+      total_message_count: messages.length, active_messages: messages,
+    });
+  }, async () => {
+    mapping.setKBrainSessionId("legacy-notice", session.id);
+    const restored = await history.getKBrainHistoryWindow("legacy-notice");
+    const users = restored.segments.flatMap((segment) => segment.messages).filter((message) => message.role === "user");
+    assert.deepEqual(
+      users.map((message) => [message.content[0]?.text ?? message.content, message.liveAgentBackgroundNotice === true]),
+      texts.map((text, index) => [text, index < legacy.length]),
+    );
+  });
+});
+
 test("task projections are counted once on newest windows while full active context stays intact", async () => {
   installStorage();
   const session = makeSession();
@@ -293,5 +380,38 @@ test("history restoration normalizes null hosted search queries and sources from
     assert.deepEqual(searches[0].sources, []);
     assert.deepEqual(searches[1].queries, ["北京海淀 天气"]);
     assert.equal(searches[1].sources[0].url, "https://weather.example.com/haidian");
+  });
+});
+
+test("tasks linked to their subagent call stay on that call instead of a synthetic card", async () => {
+  installStorage();
+  const session = makeSession({
+    messages: [
+      { id: "u1", role: "user", content: [{ type: "text", text: "survey it" }], created_at: "2026-11-05T00:00:01Z" },
+      { id: "a1", role: "assistant", content: [], tool_calls: [{ id: "call-1", name: "subagent", arguments: { description: "Review" } }], created_at: "2026-11-05T00:00:02Z" },
+      { id: "t1", role: "tool", tool_call_id: "call-1", name: "subagent", content: [{ type: "text", text: "Reviewed" }], created_at: "2026-11-05T00:00:09Z" },
+      { id: "a2", role: "assistant", content: [{ type: "text", text: "done" }], created_at: "2026-11-05T00:00:10Z" },
+    ],
+    tasks: [
+      { id: "child-linked", parent_id: "run-1", parent_tool_call_id: "call-1", description: "Review", status: "done", model: { provider: "fixture", model: "fixture-model" }, report: "Reviewed" },
+      { id: "child-legacy", parent_id: "run-1", description: "Inspect", status: "done", model: { provider: "fixture", model: "fixture-model" }, report: "Inspected" },
+    ],
+  });
+  await withHttpFixture(async (_request, response) => sendJson(response, {
+    session, revision: session.revision, oldest_offset: 0, has_more_before: false,
+    total_message_count: session.messages.length, active_messages: session.messages,
+  }), async () => {
+    mapping.setKBrainSessionId("linked-tasks", session.id);
+    const restored = await history.getKBrainHistoryWindow("linked-tasks");
+    const messages = restored.activeSegment.messages;
+    const callIds = messages.flatMap((message) =>
+      message.role === "assistant"
+        ? message.content.filter((block) => block.type === "toolCall").map((block) => block.id)
+        : [],
+    );
+    assert.deepEqual(callIds, ["call-1", "kbrain-subagent:child-legacy"]);
+    // The real call keeps its place, before the reply that followed it.
+    assert.equal(messages[1].content.find((block) => block.type === "toolCall").id, "call-1");
+    assert.equal(messages[2].toolCallId, "call-1");
   });
 });

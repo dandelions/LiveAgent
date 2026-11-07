@@ -1,7 +1,20 @@
-import type { AssistantMessage, ToolCall, ToolResultMessage } from "@liveagent/app/lib/agentTypes";
-import type { ComposerTurnCommand } from "@liveagent/ui/lib/chat/composerCommands";
-import { resolveKBrainPermissionMode } from "@liveagent/ui/lib/chat/permissionModes";
+import type {
+  AssistantMessage,
+  Message,
+  ToolCall,
+  ToolResultMessage,
+} from "@liveagent/app/lib/agentTypes";
 import {
+  ASK_USER_QUESTION_TOOL_NAME,
+  kbrainQuestionAnswerPayload,
+} from "@liveagent/ui/lib/chat/askUserQuestion";
+import type { ComposerTurnCommand } from "@liveagent/ui/lib/chat/composerCommands";
+import {
+  resolveKBrainPermissionMode,
+  resolveKBrainRunSandbox,
+} from "@liveagent/ui/lib/chat/permissionModes";
+import {
+  approvalPreviewFromKBrain,
   approvalPreviewFromToolCall,
   clampApprovalText,
 } from "@liveagent/ui/lib/chat/toolApprovalArgs";
@@ -38,6 +51,11 @@ import {
   resolveUploadStagingRoot,
   withUploadStagingRoot,
 } from "../../../lib/kbrain/uploadStagingRoot";
+import {
+  ingestKBrainSubagentEvent,
+  noteKBrainSubagentTurnEnded,
+  noteKBrainSubagentTurnStarted,
+} from "../../../lib/subagents/kbrainSubagentStore";
 import { requestBackendQuestion } from "../../../lib/tools/askUserQuestionTools";
 import { recordPermissionAutoResolved } from "../../../lib/tools/permissionAutoResolved";
 import { projectBackendPlan } from "../../../lib/tools/planModeTools";
@@ -55,7 +73,7 @@ const SESSION_SCOPE_LABEL_MAX_CHARS = 300;
 
 type Params = RunAgentConversationTurnParams | RunTextConversationTurnParams;
 
-function canonicalRunOptions(params: Params, uploadsRoot?: string): KBrainRunOptions {
+export function canonicalRunOptions(params: Params, uploadsRoot?: string): KBrainRunOptions {
   const agentMode = "effectiveWorkdir" in params;
   const workspaceRoots = [
     {
@@ -73,6 +91,7 @@ function canonicalRunOptions(params: Params, uploadsRoot?: string): KBrainRunOpt
   const policies = canonicalKBrainToolPolicies(configured);
   const safety = agentMode && "commandSafetyMode" in params ? params.commandSafetyMode : undefined;
   const reasoning = params.runtime.reasoning;
+  const sandbox = agentMode ? resolveKBrainRunSandbox(safety) : undefined;
   return {
     mode: agentMode ? "agent" : "chat",
     ...(reasoning ? { reasoning } : {}),
@@ -83,6 +102,7 @@ function canonicalRunOptions(params: Params, uploadsRoot?: string): KBrainRunOpt
       agentMode && params.planModeEnabled === true,
     ),
     ...(roots.length ? { workspace_roots: roots } : {}),
+    ...(sandbox ? { sandbox } : {}),
     ...(Object.keys(policies).length ? { tools: { policies } } : {}),
     ...(agentMode && params.planModeEnabled !== undefined
       ? { plan_mode_enabled: params.planModeEnabled }
@@ -156,6 +176,16 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
   // Calls K-brain allowed without asking, keyed by tool call; the marker can arrive
   // before or after the call itself.
   const autoResolvedCallIds = new Set<string>();
+  const pushGatewayToolCall = (call: ToolCall) => {
+    gatewayBridgeEvents.queueEvent({
+      type: "tool_call",
+      id: call.id,
+      name: call.name,
+      arguments: buildGatewayToolCallPreviewArguments(call),
+      conversation_id: params.conversationId,
+      round: callRounds.get(call.id) ?? round,
+    });
+  };
   const onToolCall = (call: ToolCall) => {
     calls.set(call.id, call);
     callRounds.set(call.id, round);
@@ -167,9 +197,12 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
       type: "tool_call",
       id: call.id,
       name: call.name,
-      arguments: autoResolvedCallIds.has(call.id)
-        ? buildGatewayToolCallPreviewArguments(call)
-        : withoutApprovalSyntheticArgs(call.arguments),
+      // AskUserQuestion carries the pending marker from the start, so WebUI keeps the
+      // card closed until K-brain registers the question.
+      arguments:
+        autoResolvedCallIds.has(call.id) || call.name === ASK_USER_QUESTION_TOOL_NAME
+          ? buildGatewayToolCallPreviewArguments(call)
+          : withoutApprovalSyntheticArgs(call.arguments),
       conversation_id: params.conversationId,
       round,
     });
@@ -179,15 +212,7 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
     if (!recordPermissionAutoResolved(toolCallId, marker)) return;
     autoResolvedCallIds.add(toolCallId);
     const call = calls.get(toolCallId);
-    if (!call) return;
-    gatewayBridgeEvents.queueEvent({
-      type: "tool_call",
-      id: call.id,
-      name: call.name,
-      arguments: buildGatewayToolCallPreviewArguments(call),
-      conversation_id: params.conversationId,
-      round: callRounds.get(call.id) ?? round,
-    });
+    if (call) pushGatewayToolCall(call);
   };
   const projectToolResult = (call: ToolCall, result: ToolResultMessage) => {
     const prior = results.get(call.id);
@@ -223,7 +248,8 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
       });
     } else projectToolResult(call, result);
   };
-  // 运行中命令的输出快照只更新实时轮次里的工具卡，不进历史，也不转发给 WebUI。
+  // 运行中命令的输出快照只更新实时轮次里的工具卡，不进历史；WebUI 收到同一份
+  // 完整快照（替换而非追加），工具结果到达后忽略。
   const onToolOutput = (toolCallId: string, output: string) => {
     if (results.has(toolCallId)) return;
     const callRound = callRounds.get(toolCallId);
@@ -235,6 +261,13 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
         ),
       transcriptStore,
     );
+    gatewayBridgeEvents.queueEvent({
+      type: "tool_output",
+      id: toolCallId,
+      output,
+      round: callRound,
+      conversation_id: params.conversationId,
+    });
   };
   hookLifecycle.startAgent();
   const command = "composerCommand" in params ? params.composerCommand : undefined;
@@ -255,6 +288,7 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
   let goalInvolved = command?.kind === "goal" || answersGoal;
   const readGoalState = () => latestGoalState;
   let attachClientRequestId: string | undefined;
+  noteKBrainSubagentTurnStarted(params.conversationId);
   try {
     const uploadsRoot = await resolveUploadStagingRoot();
     for (;;) {
@@ -305,6 +339,17 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
         },
         onHostedSearch: (search) => {
           update((target) => upsertHostedSearchToRound(target, search));
+          gatewayBridgeEvents.queueEvent({
+            type: "hosted_search",
+            id: search.id,
+            ...(search.provider ? { provider: search.provider } : {}),
+            status: search.status,
+            queries: search.queries,
+            sources: search.sources,
+            ...(search.updatedAt === undefined ? {} : { updatedAt: search.updatedAt }),
+            round,
+            conversation_id: params.conversationId,
+          });
         },
         onToolCall,
         onToolResult,
@@ -314,18 +359,26 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
           request: KBrainQuestionRequest,
           signal?: AbortSignal,
         ): Promise<KBrainQuestionAnswer[]> => {
-          const answers = await requestBackendQuestion({
+          const pending = requestBackendQuestion({
             toolCallId: request.tool_call_id,
             conversationId: params.conversationId,
             questions: request.questions,
             deadlineAt: request.deadline_at,
             signal,
           });
-          return answers.map((answer) => ({
-            question_id: answer.questionId,
-            selected_label: answer.selectedLabel,
-            ...(answer.custom ? { custom: true } : {}),
-          }));
+          // Re-push the call when the question registers and when it settles: WebUI
+          // reads the pending marker and the backend deadline from its arguments.
+          const call = calls.get(request.tool_call_id);
+          if (call) pushGatewayToolCall(call);
+          let answers: Awaited<typeof pending>;
+          try {
+            answers = await pending;
+          } finally {
+            if (call) pushGatewayToolCall(call);
+          }
+          // Multi-select picks go as selected_labels; the client sends them as joined
+          // custom labels to backends without capability question_selected_labels.
+          return answers.map(kbrainQuestionAnswerPayload);
         },
         onPermissionRequest: async (request, signal, refusal) => {
           // Key the approval by its tool call so the Gateway preview overlays the
@@ -362,8 +415,11 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
             sessionWide: request.scope === "session",
             rememberRules,
             defaultScope: request.suggestion?.default_scope,
-            // The edit being approved, from the call's full arguments.
-            preview: call ? approvalPreviewFromToolCall(request.tool, call.arguments) : undefined,
+            // The edit being approved: K-brain's own preview of the change when it sends
+            // one, else worked out from the call's full arguments.
+            preview:
+              approvalPreviewFromKBrain(request.tool, request.preview) ??
+              (call ? approvalPreviewFromToolCall(request.tool, call.arguments) : undefined),
             notice: refusal,
             signal: signal
               ? AbortSignal.any([approvalController.signal, signal])
@@ -383,7 +439,11 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
           return scope ? { decision: "allow_always", scope } : "allow_always";
         },
         onPermissionAutoResolved,
+        onSubagentEvent: (event) =>
+          ingestKBrainSubagentEvent(params.conversationId, event.conversation_id, event),
         onSubagent: (subagent) => {
+          // Backends that link a subagent to its tool call show it on that call's card.
+          if (subagent.parent_tool_call_id) return;
           const id = `kbrain-subagent:${subagent.id}`;
           const call: ToolCall = {
             type: "toolCall",
@@ -467,11 +527,17 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
           ? goalState
           : undefined;
       if (nextRound?.next_client_request_id) {
-        // 把刚完成的一轮落进转录区，并先显示后端为下一轮写入的用户消息。
+        // 把刚完成的一轮落进转录区，并先显示后端为下一轮写入的用户消息。这条消息
+        // 是后端写的，按通知显示，与历史回读（origin background）一致。
         params.settleLiveTranscript(transcriptStore);
         params.applyConversationState(
           appendMessagesToConversation(state, [
-            { role: "user", content: nextRound.next_prompt ?? "", timestamp: Date.now() },
+            {
+              role: "user",
+              content: nextRound.next_prompt ?? "",
+              timestamp: Date.now(),
+              liveAgentBackgroundNotice: true,
+            } as Message,
           ]),
         );
         hookLifecycle.ensureMessageEnded();
@@ -507,6 +573,7 @@ export async function runKBrainConversationTurn(params: Params): Promise<void> {
         publish: publishGoalState,
       });
     }
+    noteKBrainSubagentTurnEnded(params.conversationId);
     approvalController.abort();
     cancellation.userStop.signal.removeEventListener("abort", cancelApprovals);
     status(null);

@@ -43,11 +43,20 @@ import {
   type CheckpointRewoundInfo,
   formatCheckpointRewoundNotification,
 } from "@liveagent/ui/lib/chat/checkpointRewind";
+import {
+  type CommandPaletteAction,
+  isMacLikePlatform,
+} from "@liveagent/ui/lib/chat/commandPalette";
+import {
+  buildCommandPaletteActions,
+  SHARED_COMMAND_PALETTE_SETTINGS_SECTIONS,
+} from "@liveagent/ui/lib/chat/commandPaletteActions";
 import type { ComposerCommandHost } from "@liveagent/ui/lib/chat/composerCommands";
 import type { PendingUploadedFile } from "@liveagent/ui/lib/chat/uploadedFiles";
 import { mergePendingUploadedFiles } from "@liveagent/ui/lib/chat/uploadedFiles";
 import { parseModelValue } from "@liveagent/ui/lib/models/modelValue";
 import { kbrainResourceHostCapabilities } from "@liveagent/ui/lib/resourceHost";
+import { normalizeSidebarShortcuts } from "@liveagent/ui/lib/settings/sidebarShortcuts";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { useSidebarSelector } from "@liveagent/ui/lib/sidebar/useSidebarSelector";
 import {
@@ -98,6 +107,7 @@ import {
   getNextTheme,
   getRightDockFileTreeState,
   getSshProjectHostIds,
+  openRightDockSingletonTab,
   updateExecutionModeFromChatSelection,
   updateRightDockFileTreeState,
   updateSshProjectHostIds,
@@ -135,6 +145,7 @@ import { useWindowFileDropGuard } from "./hooks/useWindowFileDropGuard";
 import { sendComposerCommandTurn } from "./sendComposerCommandTurn";
 import { GatewaySidebarContainer } from "./sidebar/GatewaySidebarContainer";
 import { UserMenu } from "./UserMenu";
+import { WebGoalBarHost } from "./WebGoalBarHost";
 import { createWebComposerCommandHost } from "./webComposerCommandHost";
 import {
   GatewayConversationPaneHost,
@@ -275,6 +286,7 @@ export function GatewayAppView({
     handleRightDockFileTreeStateChange,
     handleRightDockInsertCodeReviewSkill,
     handleRightDockInsertCommitMention,
+    handleRightDockInsertComposerSegments,
     handleRightDockInsertFileMention,
     handleRightDockInsertGitFileMention,
     handleRightDockProjectStateChange,
@@ -461,6 +473,12 @@ export function GatewayAppView({
     viewForConversation,
     setConversationView,
   } = useConversationViewState(displayedConversationId);
+  const handleQuoteSelection = useCallback(
+    (text: string) => {
+      composerRef.current?.insertQuote(text);
+    },
+    [composerRef],
+  );
   const trajectoryHost = useMemo(
     () => createGatewayTrajectoryHost(api, handleOpenChatFileLink),
     [api, handleOpenChatFileLink],
@@ -665,7 +683,10 @@ export function GatewayAppView({
           files = materialized.uploadedFiles;
           referencedConversations = materialized.referencedConversations;
         } catch (error) {
-          addNotify("error", asErrorMessage(error, "大段粘贴内容导入失败"));
+          addNotify(
+            "error",
+            asErrorMessage(error, translate("chat.largePasteImportFailed", settings.locale)),
+          );
           return;
         }
         if (!text && files.length === 0) return;
@@ -707,6 +728,7 @@ export function GatewayAppView({
     queuedChatTurnsForDisplayedConversation.length,
     sendChat,
     setPendingUploadsForConversation,
+    settings.locale,
     submitCurrentComposerToGuiQueue,
     updatePendingUploadsForConversation,
   ]);
@@ -978,10 +1000,8 @@ export function GatewayAppView({
           hostRef={transcriptStageRef}
           width={settings.customSettings.chatTranscript.width}
           onWidthChange={handleChatTranscriptWidthChange}
-          resizeLabel={
-            settings.locale === "en-US" ? "Resize conversation content" : "调整对话正文宽度"
-          }
-          resetLabel={settings.locale === "en-US" ? "Double-click to reset" : "双击恢复默认宽度"}
+          resizeLabel={translate("chat.transcript.resizeWidth", settings.locale)}
+          resetLabel={translate("chat.transcript.resizeWidthReset", settings.locale)}
           // The history overlay below is a blocking panel layer above the
           // handles; suspend them for exactly as long as it is mounted (#749).
           suspended={conversationOpenState.showOverlay}
@@ -1082,6 +1102,7 @@ export function GatewayAppView({
         onInsertCodeReviewSkill: codeReviewSkill ? handleRightDockInsertCodeReviewSkill : undefined,
         onInsertCommitMention: handleRightDockInsertCommitMention,
         onInsertGitFileMention: handleRightDockInsertGitFileMention,
+        onInsertComposerSegments: handleRightDockInsertComposerSegments,
         focusRequest: gitReviewFocusRequest,
         onFocusRequestHandled: handleGitReviewFocusRequestHandled,
       },
@@ -1122,6 +1143,7 @@ export function GatewayAppView({
     handleOpenSshTerminal,
     handleRightDockInsertCodeReviewSkill,
     handleRightDockInsertCommitMention,
+    handleRightDockInsertComposerSegments,
     handleRightDockInsertFileMention,
     handleRightDockInsertGitFileMention,
     isAgentMode,
@@ -1342,6 +1364,71 @@ export function GatewayAppView({
     [workbenchController.leasedDockSessionIds],
   );
 
+  // Cmd/Ctrl+K palette: rebuilt per render, read by the sidebar only when it opens.
+  const buildCommandPaletteActionsLatestRef = useRef<() => CommandPaletteAction[]>(() => []);
+  buildCommandPaletteActionsLatestRef.current = () =>
+    buildCommandPaletteActions({
+      t: (key) => translate(key, settings.locale),
+      isMac: isMacLikePlatform(),
+      onNewConversation: handleSidebarNewConversation,
+      onOpenWorkspace: isAgentMode ? handleOpenCreateWorkspaceProject : undefined,
+      onOpenSettings: (section) => openSettings(section as Parameters<typeof openSettings>[0]),
+      // The WebUI hides the remote section (see the SettingsPage below).
+      settingsSections: [
+        ...SHARED_COMMAND_PALETTE_SETTINGS_SECTIONS.filter((section) => section.id !== "remote"),
+        { id: "shortcuts", labelKey: "settings.navShortcuts" },
+      ],
+      sidebar: { open: sidebarOpen, onToggle: () => setSidebarOpen((open) => !open) },
+      theme: {
+        current: settings.theme,
+        onToggle: () => setSettings((prev) => ({ ...prev, theme: getNextTheme(prev.theme) })),
+      },
+      projectTools: projectToolsDisabledMessage
+        ? undefined
+        : {
+            open: activeView === "chat" && rightDockOpen,
+            onToggle: () => {
+              const open = activeView === "chat" && rightDockOpen;
+              setActiveView("chat");
+              setRightDockOpen(!open);
+            },
+            onOpenTool: terminalProjectPathKey
+              ? (tool) => {
+                  setActiveView("chat");
+                  setRightDockOpen(true);
+                  setSettings((prev) =>
+                    openRightDockSingletonTab(prev, terminalProjectPathKey, tool),
+                  );
+                }
+              : undefined,
+          },
+      resourceHubs: {
+        visible: normalizeSidebarShortcuts(settings.customSettings.sidebarShortcuts),
+        onOpen: handleSidebarOpenResourceHub,
+      },
+      conversationView:
+        activeView === "chat" && hasConversationReply && !workbenchHasMultiplePanes
+          ? { active: renderedConversationView, onChange: setActiveConversationView }
+          : undefined,
+      executionMode: { isAgent: isAgentMode, onSelect: handleSelectExecutionMode },
+      models:
+        modelOptions.length > 0
+          ? {
+              options: modelOptions,
+              selectedValue,
+              onSelect: (value) => {
+                const parsed = parseModelValue(value);
+                if (parsed) handleSelectModel(parsed);
+              },
+            }
+          : undefined,
+      onStopRun: composerIsSending ? handlePrimaryComposerStop : undefined,
+    });
+  const getCommandPaletteActions = useCallback(
+    () => buildCommandPaletteActionsLatestRef.current(),
+    [],
+  );
+
   // 拖拽幽灵:跟随指针的载荷标题,提交/取消后随 dragState 清空。
   const workbenchDragGhost =
     sessionWorkbench.enabled && workbenchController.dragState ? (
@@ -1520,6 +1607,7 @@ export function GatewayAppView({
                 sidebarShortcuts={settings.customSettings.sidebarShortcuts}
                 onOpenSettings={openSettings}
                 onOpenResourceHub={handleSidebarOpenResourceHub}
+                getCommandPaletteActions={getCommandPaletteActions}
               />
 
               {shareConversation ? (
@@ -1693,6 +1781,8 @@ export function GatewayAppView({
                             ) : (
                               <section
                                 ref={transcriptStageRef}
+                                // Scopes Esc-to-stop to this transcript + composer.
+                                data-conversation-scope=""
                                 className="gateway-transcript-stage relative min-h-0 flex-1 overflow-hidden @container"
                                 // Preferred (persisted) width, so a fresh mount paints at
                                 // the user's width instead of the default.
@@ -1740,6 +1830,10 @@ export function GatewayAppView({
                                             contentWidth={
                                               settings.customSettings.chatTranscript.width
                                             }
+                                            expandProcessByDefault={
+                                              settings.customSettings.chatTranscript
+                                                .expandProcessByDefault
+                                            }
                                             isViewportFollowing={transcriptFollow.isFollowing}
                                             viewportFollowing={transcriptFollowing}
                                             navRef={transcriptNavRef}
@@ -1774,6 +1868,7 @@ export function GatewayAppView({
                                             onBranchConversation={handleBranchConversation}
                                             branchPendingMessageId={branchPendingMessageId}
                                             onSuggestionSelect={handleEmptyStateSuggestion}
+                                            onQuoteSelection={handleQuoteSelection}
                                           />
                                         </CheckpointRewindProvider>
                                       </ChangedFilesActionsProvider>
@@ -1782,16 +1877,14 @@ export function GatewayAppView({
                                       hostRef={transcriptStageRef}
                                       width={settings.customSettings.chatTranscript.width}
                                       onWidthChange={handleChatTranscriptWidthChange}
-                                      resizeLabel={
-                                        settings.locale === "en-US"
-                                          ? "Resize conversation content"
-                                          : "调整对话正文宽度"
-                                      }
-                                      resetLabel={
-                                        settings.locale === "en-US"
-                                          ? "Double-click to reset"
-                                          : "双击恢复默认宽度"
-                                      }
+                                      resizeLabel={translate(
+                                        "chat.transcript.resizeWidth",
+                                        settings.locale,
+                                      )}
+                                      resetLabel={translate(
+                                        "chat.transcript.resizeWidthReset",
+                                        settings.locale,
+                                      )}
                                       suspended={conversationOpenState.showOverlay}
                                     />
                                     {displayedTranscriptRowCount > 0 &&
@@ -1816,8 +1909,14 @@ export function GatewayAppView({
                                     type="button"
                                     className={GATEWAY_SCROLL_TO_BOTTOM_CLASS}
                                     onClick={transcriptFollow.jumpToBottom}
-                                    aria-label="滚动到底部"
-                                    title="滚动到底部"
+                                    aria-label={translate(
+                                      "chat.transcript.scrollToBottom",
+                                      settings.locale,
+                                    )}
+                                    title={translate(
+                                      "chat.transcript.scrollToBottom",
+                                      settings.locale,
+                                    )}
                                   >
                                     <ChevronDown className="size-4" />
                                   </button>
@@ -1863,6 +1962,19 @@ export function GatewayAppView({
                                   searchMentionableConversations={searchMentionableConversations}
                                   mentionApps={mentionApps}
                                   commandHost={composerCommandHost}
+                                  goalBar={
+                                    <WebGoalBarHost
+                                      key={`goal-${displayedConversationId}`}
+                                      conversationId={
+                                        isLocalDraftConversationId(displayedConversationId)
+                                          ? undefined
+                                          : displayedConversationId
+                                      }
+                                      client={api ?? undefined}
+                                      commandHost={composerCommandHost}
+                                      running={composerIsSending}
+                                    />
+                                  }
                                   executionMode={settings.system.executionMode}
                                   hasModels={modelOptions.length > 0}
                                   currentModelLabel={currentModelLabel}
@@ -1967,7 +2079,13 @@ export function GatewayAppView({
                                         } catch (error) {
                                           addNotify(
                                             "error",
-                                            asErrorMessage(error, "大段粘贴内容导入失败"),
+                                            asErrorMessage(
+                                              error,
+                                              translate(
+                                                "chat.largePasteImportFailed",
+                                                settings.locale,
+                                              ),
+                                            ),
                                           );
                                           return;
                                         }
@@ -2202,6 +2320,7 @@ export function GatewayAppView({
                       }
                       onInsertCommitMention={handleRightDockInsertCommitMention}
                       onInsertGitFileMention={handleRightDockInsertGitFileMention}
+                      onInsertComposerSegments={handleRightDockInsertComposerSegments}
                       onClose={handleRightDockClose}
                     />
                   ) : null}
@@ -2238,6 +2357,8 @@ export function GatewayAppView({
 
           {settingsOpen ? (
             <div
+              // The settings overlay covers the chat, so the Cmd/Ctrl+K palette stays closed.
+              data-command-palette-suppressed=""
               className={cn(
                 GATEWAY_SETTINGS_OVERLAY_CLASS,
                 // Keep the settled translate at none: a transformed settings scroller

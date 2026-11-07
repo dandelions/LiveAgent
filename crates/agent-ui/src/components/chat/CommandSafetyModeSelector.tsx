@@ -1,5 +1,5 @@
 import { loadAIApprovalState } from "@liveagent/adapters/aiApprovalReadiness";
-import { useSandboxCapability } from "@liveagent/adapters/sandboxCapability";
+import { setUpOfflineSandbox, useSandboxCapability } from "@liveagent/adapters/sandboxCapability";
 import type { CommandSafetyMode } from "@liveagent/app/lib/settings";
 import {
   Check,
@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   ShieldOff,
   SquarePen,
+  Wrench,
   Zap,
 } from "@liveagent/ui/components/IconSet";
 import { Button } from "@liveagent/ui/components/ui/button";
@@ -24,6 +25,7 @@ import { COMPOSER_CONTROL_TRIGGER_CLASS } from "@liveagent/ui/lib/chat/composerC
 import { useAIApprovalReviewerConfigured } from "@liveagent/ui/lib/settings/aiApprovalReadiness";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { useState } from "react";
+import { OfflineSandboxSetupDialog } from "./OfflineSandboxSetupDialog";
 
 const MODE_I18N_KEYS: Record<CommandSafetyMode, string> = {
   ask: "chat.safety.ask",
@@ -46,8 +48,17 @@ const MODE_DESC_I18N_KEYS: Record<CommandSafetyMode, string> = {
 };
 
 // "Full access" (auto) is retired: auto review takes its place in the list and
-// saved "auto" values are migrated to "always" by settings normalization.
-const SAFETY_MODES = ["ask", "autoEdit", "autoReview", "always"] as const;
+// saved "auto" values are migrated to "always" by settings normalization. The
+// sandboxes sit between the reviewed modes and always allow, ordered by how much
+// each one lets through without asking.
+const SAFETY_MODES = [
+  "ask",
+  "autoEdit",
+  "autoReview",
+  "sandbox",
+  "sandboxOffline",
+  "always",
+] as const;
 
 /**
  * 读掩蔽是平台/后端相关的能力,不能作为跨平台的肯定承诺(P2#7)。
@@ -92,6 +103,8 @@ function triggerIconClass(mode: CommandSafetyMode, reviewerMissing: boolean) {
     return "size-4 shrink-0 text-emerald-600 dark:text-emerald-400";
   }
   if (mode === "ask") return "size-4 shrink-0 text-sky-600 dark:text-sky-400";
+  // Always allow runs everything without review; keep the risk visible.
+  if (mode === "always") return "size-4 shrink-0 text-amber-600 dark:text-amber-400";
   return "size-4 shrink-0 text-muted-foreground";
 }
 
@@ -116,22 +129,40 @@ export function CommandSafetyModeSelector(props: {
     if (open) setMenuOpenings((count) => count + 1);
   };
   const capability = useSandboxCapability();
+  // Each opening remounts the setup dialog so it starts at the confirmation.
+  const [setupOpenings, setSetupOpenings] = useState(0);
+  const [setupOpen, setSetupOpen] = useState(false);
   // 写围栏(sandbox):平台不支持时禁用。桌面端探测返回前(null)乐观启用,由执行层
   // fail-closed 兜底;WebUI 执行端平台未知,同样交由 fail-closed。
-  const sandboxUnavailable = capability !== null && !capability.supported;
+  // 受保护路径(.liveagent、.git/hooks 等)在沙箱内仍可写(path_protection=false,
+  // 如 Linux 的 Landlock 回退)时,这些文件随后会在沙箱外被使用,等同逃逸,按不可用处理。
+  const sandboxLacksPathProtection = capability?.path_protection === false;
+  const sandboxUnavailable =
+    capability !== null && (!capability.supported || sandboxLacksPathProtection);
   // 断网(sandboxOffline):额外要求平台可断网。探测判定 network_control=false 时
   // (如 Windows 派生不出 AppContainer SID)仅此项禁用,sandbox 仍可用。
   const offlineUnavailable =
     sandboxUnavailable || (capability !== null && !capability.network_control);
   // 禁用时的说明文案:整体不可用优先,否则为“仅断网不可用”。
-  const disabledHint = sandboxUnavailable
-    ? t("chat.safety.sandboxUnavailable")
-    : t("chat.safety.sandboxOfflineUnavailable");
+  // The backend's reason (for example a missing bubblewrap) follows the fixed text.
+  // Without path protection the fixed explanation replaces the backend's reason.
+  const disabledHint =
+    (sandboxUnavailable
+      ? t("chat.safety.sandboxUnavailable")
+      : t("chat.safety.sandboxOfflineUnavailable")) +
+    (sandboxLacksPathProtection
+      ? `: ${t("chat.safety.sandboxNoPathProtection")}`
+      : capability?.reason
+        ? `: ${capability.reason}`
+        : "");
   // 联网写围栏后端是否缺失读掩蔽(Windows 受限令牌);缺失时 sandbox 项换用不承诺
   // “敏感目录不可读”的文案。探测返回前(null)以及 WebUI(永远拿不到桌面 mechanism)
   // 保守按缺失处理,避免先给出过强承诺。
   const sandboxLacksReadMasking =
-    capability === null ? true : MECHANISMS_WITHOUT_READ_MASKING.has(capability.mechanism);
+    capability === null
+      ? true
+      : capability.read_masking === false ||
+        MECHANISMS_WITHOUT_READ_MASKING.has(capability.mechanism);
   const modeDescKey = (mode: CommandSafetyMode) =>
     mode === "sandbox" && sandboxLacksReadMasking
       ? "chat.safety.sandboxDescNoReadMask"
@@ -152,92 +183,131 @@ export function CommandSafetyModeSelector(props: {
     (selected === "autoReview" && reviewerMissing
       ? ` · ${t("chat.safety.autoReviewNeedsModel")}`
       : "");
-  const modes: readonly CommandSafetyMode[] =
-    selected === "sandbox" || selected === "sandboxOffline"
-      ? [...SAFETY_MODES, selected]
-      : SAFETY_MODES;
+  const modes: readonly CommandSafetyMode[] = SAFETY_MODES;
+  // Windows without the sandbox accounts: K-brain can install them (UAC) so the
+  // offline sandbox can cut the network. Only the desktop adapter reports it, and
+  // only for a backend on this machine; a sandbox without path protection stays
+  // unavailable whatever setup would do.
+  const setupOffered =
+    capability?.setup_available === true &&
+    !capability.network_control &&
+    !sandboxLacksPathProtection;
 
   return (
-    <DropdownMenu open={menuOpen} onOpenChange={handleMenuOpenChange}>
-      <DropdownMenuTrigger
-        render={
-          <Button
-            variant="ghost"
-            disabled={disabled}
-            className={cn(
-              COMPOSER_CONTROL_TRIGGER_CLASS,
-              "w-8 justify-center gap-0 px-0",
-              "data-popup-open:bg-muted/60 web:max-480:flex-none web:max-480:w-8 web:max-480:min-w-8 web:max-480:justify-center web:max-480:gap-0 web:max-480:px-0",
-            )}
-          />
-        }
-        title={shortcutHint ? `${selectedLabel} (${shortcutHint})` : selectedLabel}
-        aria-label={`${t("chat.safety.label")}: ${selectedLabel}`}
-      >
-        {modeIcon(selected, triggerIconClass(selected, reviewerMissing))}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        variant="soft"
-        className="flex w-[324px] max-w-[calc(100vw-16px)] flex-col gap-0.5 overflow-hidden"
-        side="top"
-        align="start"
-      >
-        {modes.map((mode) => {
-          const entryDisabled =
-            mode === "sandbox"
-              ? sandboxUnavailable
-              : mode === "sandboxOffline"
-                ? offlineUnavailable
-                : false;
-          const isSelected = mode === selected;
-          const needsReviewer = mode === "autoReview" && reviewerMissing;
-          const item = (
-            <DropdownMenuItem
-              key={mode}
-              disabled={entryDisabled}
-              onSelect={() => onChange(mode)}
+    <>
+      <DropdownMenu open={menuOpen} onOpenChange={handleMenuOpenChange}>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              variant="ghost"
+              disabled={disabled}
               className={cn(
-                "h-auto items-start gap-2.5 py-2 text-xs whitespace-normal",
-                isSelected && "bg-accent text-accent-foreground",
+                COMPOSER_CONTROL_TRIGGER_CLASS,
+                "w-8 justify-center gap-0 px-0",
+                "data-popup-open:bg-muted/60 web:max-480:flex-none web:max-480:w-8 web:max-480:min-w-8 web:max-480:justify-center web:max-480:gap-0 web:max-480:px-0",
               )}
-            >
-              {modeIcon(mode, "mt-0.5 size-3.5 shrink-0 text-muted-foreground")}
-              <span className="flex min-w-0 flex-1 flex-col">
-                <span className="font-medium leading-4">{t(MODE_I18N_KEYS[mode])}</span>
-                <span
-                  className={cn(
-                    "text-tiny font-normal leading-4 text-muted-foreground",
-                    needsReviewer && "text-amber-700 dark:text-amber-400",
-                  )}
-                >
-                  {entryDisabled
-                    ? disabledHint
-                    : needsReviewer
-                      ? t("chat.safety.autoReviewNeedsModel")
-                      : t(modeDescKey(mode))}
+            />
+          }
+          title={shortcutHint ? `${selectedLabel} (${shortcutHint})` : selectedLabel}
+          aria-label={`${t("chat.safety.label")}: ${selectedLabel}`}
+        >
+          {modeIcon(selected, triggerIconClass(selected, reviewerMissing))}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          variant="soft"
+          className="flex w-[324px] max-w-[calc(100vw-16px)] flex-col gap-0.5 overflow-hidden"
+          side="top"
+          align="start"
+        >
+          {modes.map((mode) => {
+            const entryDisabled =
+              mode === "sandbox"
+                ? sandboxUnavailable
+                : mode === "sandboxOffline"
+                  ? offlineUnavailable
+                  : false;
+            const isSelected = mode === selected;
+            const needsReviewer = mode === "autoReview" && reviewerMissing;
+            const item = (
+              <DropdownMenuItem
+                key={mode}
+                disabled={entryDisabled}
+                onSelect={() => onChange(mode)}
+                className={cn(
+                  "h-auto items-start gap-2.5 py-2 text-xs whitespace-normal",
+                  isSelected && "bg-accent text-accent-foreground",
+                )}
+              >
+                {modeIcon(mode, "mt-0.5 size-3.5 shrink-0 text-muted-foreground")}
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="font-medium leading-4">{t(MODE_I18N_KEYS[mode])}</span>
+                  <span
+                    className={cn(
+                      "text-tiny font-normal leading-4 text-muted-foreground",
+                      needsReviewer && "text-amber-700 dark:text-amber-400",
+                    )}
+                  >
+                    {entryDisabled
+                      ? disabledHint
+                      : needsReviewer
+                        ? t("chat.safety.autoReviewNeedsModel")
+                        : t(modeDescKey(mode))}
+                  </span>
                 </span>
-              </span>
-              {isSelected ? (
-                <Check className="mt-0.5 size-3.5 shrink-0 text-primary" />
-              ) : (
-                <span className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-              )}
-            </DropdownMenuItem>
-          );
-          if (!needsReviewer || !onConfigureAutoReview) return item;
-          return [
-            item,
-            <DropdownMenuItem
-              key="configure-reviewer"
-              onSelect={onConfigureAutoReview}
-              className="h-auto items-center gap-2.5 py-1.5 pl-8 text-xs"
-            >
-              <Settings className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="font-medium">{t("chat.safety.configureReviewer")}</span>
-            </DropdownMenuItem>,
-          ];
-        })}
-      </DropdownMenuContent>
-    </DropdownMenu>
+                {isSelected ? (
+                  <Check className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                ) : (
+                  <span className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                )}
+              </DropdownMenuItem>
+            );
+            if (mode === "sandboxOffline" && entryDisabled && setupOffered) {
+              return [
+                item,
+                <DropdownMenuItem
+                  key="setup-offline-sandbox"
+                  onSelect={() => {
+                    setSetupOpenings((count) => count + 1);
+                    setSetupOpen(true);
+                  }}
+                  title={capability?.setup_hint || undefined}
+                  className="h-auto items-start gap-2.5 py-1.5 pl-8 text-xs whitespace-normal"
+                >
+                  <Wrench className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="font-medium leading-4">{t("chat.safety.setupOffline")}</span>
+                    <span className="text-tiny font-normal leading-4 text-muted-foreground">
+                      {t("chat.safety.setupOfflineDesc")}
+                    </span>
+                  </span>
+                </DropdownMenuItem>,
+              ];
+            }
+            if (!needsReviewer || !onConfigureAutoReview) return item;
+            return [
+              item,
+              <DropdownMenuItem
+                key="configure-reviewer"
+                onSelect={onConfigureAutoReview}
+                className="h-auto items-center gap-2.5 py-1.5 pl-8 text-xs"
+              >
+                <Settings className="size-3.5 shrink-0 text-muted-foreground" />
+                <span className="font-medium">{t("chat.safety.configureReviewer")}</span>
+              </DropdownMenuItem>,
+            ];
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {setupOpenings > 0 ? (
+        <OfflineSandboxSetupDialog
+          key={setupOpenings}
+          open={setupOpen}
+          hint={capability?.setup_hint}
+          onOpenChange={setSetupOpen}
+          onRun={setUpOfflineSandbox}
+          onUseOffline={() => onChange("sandboxOffline")}
+        />
+      ) : null}
+    </>
   );
 }

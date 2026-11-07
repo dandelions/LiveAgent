@@ -100,6 +100,7 @@ import {
 } from "../constants";
 import { isLocalDraftConversationId } from "../gatewayLocalDraft";
 import type { SendChatFn } from "../types";
+import { WebGoalBarHost } from "../WebGoalBarHost";
 import { resolveWorkbenchComposerInputDisabled } from "./composerInputState";
 
 type ChatQueueSnapshotLike = Parameters<
@@ -502,6 +503,9 @@ export function GatewayConversationPaneHost(props: GatewayConversationPaneHostPr
 
   // ---- 发送/停止:严格按本 Pane 的 conversationId 路由(桌面端口径) --------
   const composerRef = useRef<MentionComposerHandle | null>(null);
+  const handleQuoteSelection = useCallback((text: string) => {
+    composerRef.current?.insertQuote(text);
+  }, []);
   const sendInFlightRef = useRef(false);
   const workdir = context.workdirForConversation(conversationId);
   const workdirRef = useRef(workdir);
@@ -610,7 +614,9 @@ export function GatewayConversationPaneHost(props: GatewayConversationPaneHostPr
           uploadedFiles = materialized.uploadedFiles;
           referencedConversations = materialized.referencedConversations;
         } catch (error) {
-          context.notifyError(error instanceof Error ? error.message : "大段粘贴内容导入失败");
+          context.notifyError(
+            error instanceof Error ? error.message : t("chat.largePasteImportFailed"),
+          );
           return;
         }
         if (!text && uploadedFiles.length === 0) return;
@@ -644,7 +650,7 @@ export function GatewayConversationPaneHost(props: GatewayConversationPaneHostPr
         sendInFlightRef.current = false;
       }
     })();
-  }, [context, conversationId, paneRuntimeControls]);
+  }, [context, conversationId, paneRuntimeControls, t]);
 
   const handleStop = useCallback(() => {
     // 与桌面端/聚焦舞台一致:有排队回合先"停当前、跑下一条",否则纯停止。
@@ -858,6 +864,7 @@ export function GatewayConversationPaneHost(props: GatewayConversationPaneHostPr
         usePrimary ? (primary?.branchPendingMessageId ?? undefined) : undefined
       }
       onSuggestionSelect={usePrimary ? primary?.onSuggestionSelect : () => onFocusPane()}
+      onQuoteSelection={handleQuoteSelection}
     />
   );
 
@@ -950,8 +957,8 @@ export function GatewayConversationPaneHost(props: GatewayConversationPaneHostPr
                   type="button"
                   className={GATEWAY_SCROLL_TO_BOTTOM_CLASS}
                   onClick={handleJumpToBottom}
-                  aria-label="滚动到底部"
-                  title="滚动到底部"
+                  aria-label={t("chat.transcript.scrollToBottom")}
+                  title={t("chat.transcript.scrollToBottom")}
                 >
                   <ChevronDown className="size-4" />
                 </button>
@@ -992,6 +999,15 @@ export function GatewayConversationPaneHost(props: GatewayConversationPaneHostPr
             searchMentionableConversations={context.searchMentionableConversations}
             mentionApps={context.mentionApps}
             commandHost={usePrimary && primary ? primary.commandHost : backgroundCommandHost}
+            goalBar={
+              <WebGoalBarHost
+                key={`goal-${conversationId}`}
+                conversationId={isDraft ? undefined : conversationId}
+                client={context.api}
+                commandHost={usePrimary && primary ? primary.commandHost : backgroundCommandHost}
+                running={usePrimary ? (primary?.isSending ?? isRunning) : isRunning}
+              />
+            }
             executionMode={context.settings.system.executionMode}
             hasModels={context.hasModels}
             currentModelLabel={modelLabel}

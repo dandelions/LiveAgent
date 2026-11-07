@@ -155,6 +155,9 @@ function createToolCallItemRenderer() {
         readAskUserQuestionDeadline() {
           return undefined;
         },
+        useAskUserQuestionPending() {
+          return false;
+        },
         usePlanDecisionState() {
           return { pending: false, approved: false };
         },
@@ -528,6 +531,56 @@ test("ProcessWait and ProcessStop summaries expose their session cursor", () => 
   );
 });
 
+test("lsp summaries show the operation with its file position or query", () => {
+  const summarize = (args) =>
+    uiMessages.summarizeToolCall(
+      { type: "toolCall", id: "lsp-1", name: "lsp", arguments: args },
+      { includeName: false },
+    );
+
+  assert.equal(
+    summarize({
+      operation: "definition",
+      path: "internal/tools/lsp_tool.go",
+      line: 38,
+      character: 6,
+    }),
+    "definition internal/tools/lsp_tool.go:38:6",
+  );
+  assert.equal(
+    summarize({ operation: "references", path: "src/a.go", line: 12 }),
+    "references src/a.go:12",
+  );
+  assert.equal(
+    summarize({ operation: "documentSymbol", path: "src/a.go" }),
+    "documentSymbol src/a.go",
+  );
+  assert.equal(
+    summarize({ operation: "workspaceSymbol", query: "LSPTool" }),
+    "workspaceSymbol query=LSPTool",
+  );
+  assert.equal(summarize({}), "");
+});
+
+test("web_fetch summaries lead with the URL and add paging only when requested", () => {
+  const summarize = (name, args) =>
+    uiMessages.summarizeToolCall(
+      { type: "toolCall", id: "fetch-1", name, arguments: args },
+      { includeName: false },
+    );
+
+  assert.equal(
+    summarize("web_fetch", { url: "https://go.dev/doc/effective_go" }),
+    "https://go.dev/doc/effective_go",
+  );
+  assert.equal(
+    summarize("web_fetch", { url: "https://go.dev/doc/", offset: 20_000, max_chars: 5_000 }),
+    "https://go.dev/doc/ offset=20000 maxChars=5000",
+  );
+  assert.equal(summarize("web_fetch", { url: "https://go.dev/", offset: 0 }), "https://go.dev/");
+  assert.equal(summarize("WebFetch", { uri: "https://example.com/a" }), "https://example.com/a");
+});
+
 test("shell session metadata is omitted from generic tool result details", () => {
   const renderToolDisplay = createToolArgsRenderer();
   const details = {
@@ -851,4 +904,23 @@ test("failed file operations keep an expandable error disclosure", () => {
   assert.match(html, /chat\.tool\.file\.edit\.failed/);
   assert.match(html, /aria-expanded="false"/);
   assert.doesNotMatch(html, /data-chat-file-link/);
+});
+
+test("generic results show K-brain run info as one line instead of raw details JSON", () => {
+  const renderToolDisplay = createToolArgsRenderer();
+  const toolCall = { type: "toolCall", id: "native-bash", name: "bash", arguments: { command: "exit 3" } };
+  const onlyRunInfo = renderToolDisplay.renderResult(toolCall, { kbrainRun: { exitCode: 3, durationMs: 16 } });
+  assert.match(onlyRunInfo, /data-tool-run-info=""/);
+  assert.match(onlyRunInfo, /3 · 16ms/);
+  assert.doesNotMatch(onlyRunInfo, /kbrainRun|exitCode|durationMs/);
+
+  const withOther = renderToolDisplay.renderResult(toolCall, {
+    kbrainRun: { exitCode: 0 },
+    note: "kept",
+  });
+  assert.match(withOther, /data-tool-run-info=""/);
+  assert.match(withOther, /note/);
+  assert.doesNotMatch(withOther, /kbrainRun/);
+
+  assert.equal(renderToolDisplay.renderResult(toolCall, {}), "");
 });

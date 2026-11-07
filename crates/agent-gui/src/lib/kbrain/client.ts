@@ -1,8 +1,14 @@
 import {
+  KBRAIN_QUESTION_SELECTED_LABELS_CAPABILITY,
+  legacyKBrainQuestionAnswer,
+} from "@liveagent/ui/lib/chat/askUserQuestion";
+import {
   hasFrozenCapability,
   type KBrainHealth,
   readKBrainHealthResponse,
+  runSandboxLacksPathProtection,
   supportsPermissionMode,
+  supportsRunSandbox,
 } from "@liveagent/ui/lib/kbrain/health";
 import { createKBrainQueueClient } from "./queueClient";
 import { fetchKBrain, KBrainTransportError } from "./transport";
@@ -33,6 +39,8 @@ import {
   type KBrainSharedProjection,
   type KBrainShareStatus,
   type KBrainSlashCommand,
+  type KBrainSubagentList,
+  type KBrainSubagentTranscript,
   type KBrainSyncSnapshot,
   type KBrainSyncSnapshotPage,
   type KBrainTextGenerateRequest,
@@ -675,6 +683,20 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
         );
       }
     }
+    const sandbox = input.options?.sandbox;
+    if (sandbox) {
+      const health = await getHealth(signal);
+      if (!supportsRunSandbox(health, sandbox)) {
+        // Never drop the field and run the commands unconfined.
+        throw new Error(
+          runSandboxLacksPathProtection(health.capabilities.run_sandbox)
+            ? "K-brain cannot sandbox commands on this machine: its sandbox cannot keep protected paths (.liveagent, .git/hooks) read-only; install bubblewrap or allow unprivileged user namespaces, or choose another execution mode."
+            : sandbox.network
+              ? "K-brain cannot sandbox commands on this machine; choose another execution mode or update the backend."
+              : "K-brain cannot run an offline sandbox on this machine; choose another execution mode or update the backend.",
+        );
+      }
+    }
     const body = { ...input, options: await scopedRunOptions(input.options, signal) };
     const path = `/v1/sessions/${encodeURIComponent(input.conversation_id)}/runs`;
     let accepted: KBrainRunAccepted;
@@ -829,12 +851,30 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
     });
   }
 
+  /**
+   * Capability question_selected_labels: multi-select answers go as `selected_labels`.
+   * Older backends reject the field as unknown (400), so without the capability, or when
+   * /v1/health cannot be read, the answers go as joined labels marked custom. Read fresh
+   * for each answer that needs it, so a backend updated mid-session is seen.
+   */
+  async function answersForBackend(
+    answers: KBrainQuestionAnswer[],
+  ): Promise<KBrainQuestionAnswer[]> {
+    if (!answers.some((answer) => (answer.selected_labels?.length ?? 0) > 0)) return answers;
+    const structured = await getHealth().then(
+      (health) => hasFrozenCapability(health, KBRAIN_QUESTION_SELECTED_LABELS_CAPABILITY),
+      () => false,
+    );
+    return structured ? answers : answers.map(legacyKBrainQuestionAnswer);
+  }
+
   async function resolveQuestion(
     conversationId: string,
     questionId: string,
     runId: string,
-    answers: KBrainQuestionAnswer[],
+    input: KBrainQuestionAnswer[],
   ): Promise<void> {
+    const answers = await answersForBackend(input);
     await request<unknown>(
       `/v1/sessions/${encodeURIComponent(conversationId)}/questions/${encodeURIComponent(questionId)}`,
       {
@@ -890,14 +930,75 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
     );
   }
 
-  async function subscribe(
+  function subscribe(
     conversationId: string,
     afterSeq: number,
     handlers: KBrainEventHandlers,
     signal?: AbortSignal,
   ): Promise<void> {
-    const response = await fetchKBrain(
+    return readEventStream(
       `/v1/sessions/${encodeURIComponent(conversationId)}/events?after_seq=${encodeURIComponent(String(afterSeq))}`,
+      conversationId,
+      afterSeq,
+      true,
+      handlers,
+      signal,
+    );
+  }
+
+  /** The session's subagents, foreground and background, oldest first. */
+  function listSubagents(conversationId: string, signal?: AbortSignal) {
+    return request<KBrainSubagentList>(
+      `/v1/sessions/${encodeURIComponent(conversationId)}/subagents`,
+      { signal },
+    );
+  }
+
+  /** One subagent's read-only transcript so far, running or ended. */
+  function getSubagentTranscript(conversationId: string, taskId: string, signal?: AbortSignal) {
+    return request<KBrainSubagentTranscript>(
+      `/v1/sessions/${encodeURIComponent(conversationId)}/subagents/${encodeURIComponent(taskId)}`,
+      { signal },
+    );
+  }
+
+  /** Stops one subagent; the parent run goes on. */
+  async function cancelSubagent(conversationId: string, taskId: string): Promise<void> {
+    await request<unknown>(
+      `/v1/sessions/${encodeURIComponent(conversationId)}/subagents/${encodeURIComponent(taskId)}/cancel`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
+  /** Follows one subagent's events; the stream ends after its terminal event. Its
+   *  sequence numbers are the session's, so they increase but skip other events. */
+  function subscribeSubagent(
+    conversationId: string,
+    taskId: string,
+    afterSeq: number,
+    handlers: KBrainEventHandlers,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return readEventStream(
+      `/v1/sessions/${encodeURIComponent(conversationId)}/subagents/${encodeURIComponent(taskId)}/events?after_seq=${encodeURIComponent(String(afterSeq))}`,
+      conversationId,
+      afterSeq,
+      false,
+      handlers,
+      signal,
+    );
+  }
+
+  async function readEventStream(
+    path: string,
+    conversationId: string,
+    afterSeq: number,
+    contiguous: boolean,
+    handlers: KBrainEventHandlers,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const response = await fetchKBrain(
+      path,
       {
         headers: { Accept: "text/event-stream" },
         signal,
@@ -928,7 +1029,10 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
         if (event.conversation_id !== conversationId) {
           throw new Error("K-brain event belongs to a different conversation");
         }
-        if (!Number.isSafeInteger(event.seq) || event.seq !== lastSeq + 1) {
+        if (
+          !Number.isSafeInteger(event.seq) ||
+          (contiguous ? event.seq !== lastSeq + 1 : event.seq <= lastSeq)
+        ) {
           throw new Error(
             `Malformed K-brain event sequence: expected ${lastSeq + 1}, got ${String(event.seq)}`,
           );
@@ -1013,6 +1117,10 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
     setShare,
     resolveShareToken,
     subscribe,
+    listSubagents,
+    getSubagentTranscript,
+    cancelSubagent,
+    subscribeSubagent,
   };
 }
 

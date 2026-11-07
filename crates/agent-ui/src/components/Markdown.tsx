@@ -41,6 +41,7 @@ import {
   shouldSkipExternalLinkConfirmation,
 } from "../lib/externalLinkPreference";
 import { parseChatMarkdownBlocks } from "../lib/markdownBlocks";
+import { stripMarkdownCitationMarkers } from "../lib/markdownCitations";
 import {
   getCollapsedCodeBlockPreview,
   resolveCodeBlockRenderPolicy,
@@ -53,6 +54,7 @@ import {
 import { normalizeLatexDelimiters } from "../lib/normalizeLatexDelimiters";
 import { copyTextToClipboard } from "../lib/shared/clipboard";
 import { cn } from "../lib/shared/utils";
+import { createStreamingBlockParser } from "../lib/streamingMarkdownBlocks";
 import { MarkdownMermaidBlock } from "./markdown/MarkdownMermaidBlock";
 import {
   CHAT_MARKDOWN_CLASS,
@@ -212,6 +214,7 @@ export type MarkdownProps = {
   // the flip never invalidates Streamdown's memoized blocks; the caret slot
   // itself stays mounted for the whole life of a streaming-mode block.
   showCaret?: boolean;
+  citationAtDocumentEnd?: boolean;
   readOnly?: boolean;
   // Extra component overrides merged over the built-in map. Used by the
   // workspace file preview to render images and links against workspace
@@ -230,6 +233,32 @@ export type MarkdownProps = {
 // code 走包装插件：有界 LRU + 流式增长块 300ms 节流（见 markdownCodeHighlight.ts）。
 // 删除线只认 `~~text~~`，单个 `~` 按普通字符显示（见 markdownStrikethrough.ts）。
 const streamdownPlugins = { code: throttledCodePlugin, math, cjk: cjkDoubleTildeStrikethrough };
+// Streamdown folds these props into the value of the context every block,
+// code block and table reads. Fresh literals per render would hand that
+// context a new value on each streaming update, re-rendering the consumers in
+// every already-finished block and walking the whole tree to find them.
+type StreamdownProps = ComponentProps<typeof Streamdown>;
+const streamdownShikiThemes: StreamdownProps["shikiTheme"] = ["github-light", "github-dark"];
+function streamdownControls(interactive: boolean): StreamdownProps["controls"] {
+  return {
+    code: false,
+    mermaid: { copy: interactive, download: false, fullscreen: false, panZoom: interactive },
+    table: false,
+  };
+}
+const interactiveStreamdownControls = streamdownControls(true);
+const readOnlyStreamdownControls = streamdownControls(false);
+const renderExternalLinkModal = (modalProps: LinkSafetyModalProps) => (
+  <ExternalLinkModal {...modalProps} />
+);
+const interactiveLinkSafety: StreamdownProps["linkSafety"] = {
+  enabled: true,
+  renderModal: renderExternalLinkModal,
+};
+const readOnlyLinkSafety: StreamdownProps["linkSafety"] = {
+  enabled: false,
+  renderModal: renderExternalLinkModal,
+};
 const remarkPlugins = [
   ...Object.entries(defaultRemarkPlugins).map(([name, plugin]) =>
     name === "gfm" ? withDoubleTildeStrikethrough(plugin) : plugin,
@@ -667,37 +696,54 @@ export function CollapsibleCodePre({
   );
 }
 
-const streamdownTranslations = {
-  close: "关闭",
-  copied: "已复制",
-  copyCode: "复制代码",
-  copyLink: "复制链接",
-  copyTable: "复制表格",
-  copyTableAsCsv: "复制为 CSV",
-  copyTableAsMarkdown: "复制为 Markdown",
-  copyTableAsTsv: "复制为 TSV",
-  downloadDiagram: "下载图表",
-  downloadDiagramAsMmd: "下载为 Mermaid",
-  downloadDiagramAsPng: "下载为 PNG",
-  downloadDiagramAsSvg: "下载为 SVG",
-  downloadFile: "下载文件",
-  downloadImage: "下载图片",
-  downloadTable: "下载表格",
-  downloadTableAsCsv: "下载为 CSV",
-  downloadTableAsMarkdown: "下载为 Markdown",
-  exitFullscreen: "退出全屏",
-  externalLinkWarning: "请确认目标站点可信后再继续。",
-  imageNotAvailable: "图片暂不可用",
-  mermaidFormatMmd: "Mermaid 源码",
-  mermaidFormatPng: "PNG 图片",
-  mermaidFormatSvg: "SVG 图片",
-  openExternalLink: "打开外部链接",
-  openLink: "打开链接",
+const STREAMDOWN_TRANSLATION_KEYS = {
+  close: "chat.markdown.streamdown.close",
+  copied: "chat.markdown.streamdown.copied",
+  copyCode: "chat.markdown.streamdown.copyCode",
+  copyLink: "chat.markdown.streamdown.copyLink",
+  copyTable: "chat.markdown.streamdown.copyTable",
+  copyTableAsCsv: "chat.markdown.streamdown.copyTableAsCsv",
+  copyTableAsMarkdown: "chat.markdown.streamdown.copyTableAsMarkdown",
+  copyTableAsTsv: "chat.markdown.streamdown.copyTableAsTsv",
+  downloadDiagram: "chat.markdown.streamdown.downloadDiagram",
+  downloadDiagramAsMmd: "chat.markdown.streamdown.downloadDiagramAsMmd",
+  downloadDiagramAsPng: "chat.markdown.streamdown.downloadDiagramAsPng",
+  downloadDiagramAsSvg: "chat.markdown.streamdown.downloadDiagramAsSvg",
+  downloadFile: "chat.markdown.streamdown.downloadFile",
+  downloadImage: "chat.markdown.streamdown.downloadImage",
+  downloadTable: "chat.markdown.streamdown.downloadTable",
+  downloadTableAsCsv: "chat.markdown.streamdown.downloadTableAsCsv",
+  downloadTableAsMarkdown: "chat.markdown.streamdown.downloadTableAsMarkdown",
+  exitFullscreen: "chat.markdown.streamdown.exitFullscreen",
+  externalLinkWarning: "chat.markdown.streamdown.externalLinkWarning",
+  imageNotAvailable: "chat.markdown.streamdown.imageNotAvailable",
+  mermaidFormatMmd: "chat.markdown.streamdown.mermaidFormatMmd",
+  mermaidFormatPng: "chat.markdown.streamdown.mermaidFormatPng",
+  mermaidFormatSvg: "chat.markdown.streamdown.mermaidFormatSvg",
+  openExternalLink: "chat.markdown.streamdown.openExternalLink",
+  openLink: "chat.markdown.streamdown.openLink",
+  viewFullscreen: "chat.markdown.streamdown.viewFullscreen",
+} as const satisfies Partial<Record<keyof StreamdownTranslations, string>>;
+
+const STREAMDOWN_STATIC_TRANSLATIONS = {
   tableFormatCsv: "CSV",
   tableFormatMarkdown: "Markdown",
   tableFormatTsv: "TSV",
-  viewFullscreen: "全屏查看",
 } satisfies Partial<StreamdownTranslations>;
+
+type LocalizedStreamdownTranslations = Record<keyof typeof STREAMDOWN_TRANSLATION_KEYS, string> &
+  typeof STREAMDOWN_STATIC_TRANSLATIONS;
+
+function useStreamdownTranslations(): LocalizedStreamdownTranslations {
+  const { t } = useLocale();
+  return useMemo(() => {
+    const localized = { ...STREAMDOWN_STATIC_TRANSLATIONS } as LocalizedStreamdownTranslations;
+    for (const [name, key] of Object.entries(STREAMDOWN_TRANSLATION_KEYS)) {
+      localized[name as keyof typeof STREAMDOWN_TRANSLATION_KEYS] = t(key);
+    }
+    return localized;
+  }, [t]);
+}
 
 async function openExternalLink(url: string, fallback: () => void) {
   try {
@@ -716,6 +762,8 @@ export function ExternalLinkModal({ isOpen, onClose, onConfirm, url }: LinkSafet
 }
 
 function ExternalLinkDialog({ onClose, onConfirm, url }: Omit<LinkSafetyModalProps, "isOpen">) {
+  const { t } = useLocale();
+  const streamdownTranslations = useStreamdownTranslations();
   const [dontRemind, setDontRemind] = useState(false);
   const checkboxId = useId();
 
@@ -773,7 +821,7 @@ function ExternalLinkDialog({ onClose, onConfirm, url }: Omit<LinkSafetyModalPro
               className="mr-auto flex shrink-0 cursor-pointer items-center gap-2 text-xs text-muted-foreground"
             >
               <Checkbox id={checkboxId} checked={dontRemind} onCheckedChange={setDontRemind} />
-              <span>不再提醒</span>
+              <span>{t("chat.markdown.externalLinkDontRemind")}</span>
             </label>
             <Button
               type="button"
@@ -838,16 +886,29 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
     className,
     renderMode = "static",
     showCaret = false,
+    citationAtDocumentEnd = true,
     readOnly = false,
     componentOverrides,
     preserveRelativeUrls = false,
     workdir,
     onOpenFileLink,
   } = props;
+  const streamdownTranslations = useStreamdownTranslations();
   const streaming = renderMode === "streaming";
+  // Streaming text only grows: split it incrementally and repair just the
+  // last block instead of letting Streamdown remend + re-lex all of it on
+  // every update (see streamingMarkdownBlocks).
+  const streamingBlockParser = useMemo(
+    () => (streaming ? createStreamingBlockParser() : null),
+    [streaming],
+  );
   const normalizedContent = useMemo(
-    () => normalizeLatexDelimiters(content, streaming && showCaret),
-    [content, showCaret, streaming],
+    () =>
+      normalizeLatexDelimiters(
+        stripMarkdownCitationMarkers(content, citationAtDocumentEnd, streaming),
+        streaming && showCaret,
+      ),
+    [citationAtDocumentEnd, content, showCaret, streaming],
   );
   const components = useMemo(() => {
     const baseComponents = readOnly ? markdownReadOnlyComponents : markdownComponents;
@@ -891,27 +952,15 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
         components={components}
         mode={streaming ? "streaming" : "static"}
         dir="auto"
-        parseIncompleteMarkdown
-        parseMarkdownIntoBlocksFn={parseChatMarkdownBlocks}
+        parseIncompleteMarkdown={streamingBlockParser === null}
+        parseMarkdownIntoBlocksFn={streamingBlockParser ?? parseChatMarkdownBlocks}
         normalizeHtmlIndentation
         isAnimating={showCaret}
         caret={streaming ? "block" : undefined}
         animated={false}
-        linkSafety={{
-          enabled: !readOnly,
-          renderModal: (modalProps) => <ExternalLinkModal {...modalProps} />,
-        }}
-        shikiTheme={["github-light", "github-dark"] as const}
-        controls={{
-          code: false,
-          mermaid: {
-            copy: !readOnly,
-            download: false,
-            fullscreen: false,
-            panZoom: !readOnly,
-          },
-          table: false,
-        }}
+        linkSafety={readOnly ? readOnlyLinkSafety : interactiveLinkSafety}
+        shikiTheme={streamdownShikiThemes}
+        controls={readOnly ? readOnlyStreamdownControls : interactiveStreamdownControls}
         translations={streamdownTranslations}
       >
         {normalizedContent}

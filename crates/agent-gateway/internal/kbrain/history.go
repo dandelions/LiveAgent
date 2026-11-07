@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -301,11 +302,50 @@ func sessionSummary(id string, session Session) *gatewayv2.ConversationSummary {
 		IsPinned: session.Pinned, IsShared: session.Shared, SelectedModelJson: string(model)}
 }
 
+// legacyBackgroundNotice matches the fixed headers of the notices K-brain 0.107.17
+// and earlier saved as plain user messages, without origin (#1211). Task ids and
+// statuses come from the backend, so typed text does not match by accident. Goal
+// continuation rounds, the new-context notice and the output-limit reminder carry
+// no origin up to 0.107.18; their text is fixed by the backend as well.
+var legacyBackgroundNotice = regexp.MustCompile(`^(?:` +
+	`\[process (?:mp|bash)-\d+ (?:completed|failed|cancelled|timed_out)(?: exit_code=-?\d+)?\][^\n]*\n\$ ` +
+	`|\[subagent [a-z0-9]+(?:-[a-z0-9]+)* (?:done|error|cancelled)\] ` +
+	`|\[subagent [a-z0-9]+(?:-[a-z0-9]+)*\] prepare subagent workspace` +
+	`|\[wait wait-[a-z0-9]+(?:-[a-z0-9]+)* (?:done|timeout)\] ` +
+	`|\[wait wait-[a-z0-9]+(?:-[a-z0-9]+)*\] gave up: ` +
+	`|\[workflow run-[0-9a-f]+(?:-[0-9a-f]+)+ [a-z_]+\] ` +
+	`|\[goal [1-9]\d*/[1-9]\d*\] \S` +
+	`|A new context window is active\. Continue the current task using the available workspace and tools\. The previous conversation was intentionally discarded\.(?:\n|$)` +
+	`|<system-reminder>\nYour previous response was cut off because it reached the output token limit[ .])`)
+
+// isBackgroundNotice reports whether a user message is a notice K-brain delivered
+// on its own rather than text the user wrote.
+func isBackgroundNotice(message Message) bool {
+	if message.Origin != "" {
+		return message.Origin == OriginBackground
+	}
+	var text strings.Builder
+	for _, block := range message.Content {
+		if block.Type == "text" {
+			text.WriteString(block.Text)
+		}
+	}
+	return legacyBackgroundNotice.MatchString(text.String())
+}
+
 // The WebUI history parser consumes LiveAgent messages, not canonical messages.
 // Each entry carries its canonical offset (firstOffset + slice index) so the
 // WebUI can match search hits, which report whole-session offsets.
 func historyMessagesJSON(messages []Message, firstOffset int32) (string, error) {
 	out := make([]map[string]any, 0, len(messages))
+	// A tool result is read against its call: the question tool's text answers
+	// against the questions asked, and run info sits on the call.
+	calls := map[string]ToolCall{}
+	for _, message := range messages {
+		for _, call := range message.ToolCalls {
+			calls[call.ID] = call
+		}
+	}
 	for i, message := range messages {
 		if message.Role != "user" && message.Role != "assistant" && message.Role != "tool" {
 			continue
@@ -330,9 +370,25 @@ func historyMessagesJSON(messages []Message, firstOffset int32) (string, error) 
 		if !message.CreatedAt.IsZero() {
 			entry["timestamp"] = message.CreatedAt.UnixMilli()
 		}
+		if message.Role == "user" && isBackgroundNotice(message) {
+			entry["liveAgentBackgroundNotice"] = true
+		}
 		if message.Role == "tool" {
-			entry["role"], entry["toolCallId"], entry["toolName"] = "toolResult", message.ToolCallID, message.Name
-			entry["isError"] = message.StopReason == "error" || message.StopReason == "cancelled"
+			isError := message.StopReason == "error" || message.StopReason == "cancelled"
+			entry["role"], entry["toolCallId"], entry["toolName"] = "toolResult", message.ToolCallID, toolResultName(message.Name)
+			entry["isError"] = isError
+			call, known := calls[message.ToolCallID]
+			var args map[string]any
+			if known && len(call.Arguments) > 0 {
+				_ = json.Unmarshal(call.Arguments, &args)
+			}
+			details := resultDetails(message.Name, historyText(message), args, isError, call.QuestionAnswers)
+			if known {
+				details = withRunInfo(message.Name, details, call.ExitCode, call.TimedOut, call.DurationMs)
+			}
+			if details != nil {
+				entry["details"] = details
+			}
 		}
 		if message.Role == "assistant" {
 			for _, search := range message.HostedSearch {
@@ -350,7 +406,16 @@ func historyMessagesJSON(messages []Message, firstOffset int32) (string, error) 
 						return "", fmt.Errorf("invalid history tool arguments at %d: %w", i, err)
 					}
 				}
-				content = append(content, map[string]any{"type": "toolCall", "id": call.ID, "name": call.Name, "arguments": args})
+				name := call.Name
+				if name == kbrainQuestionTool {
+					if record, ok := args.(map[string]any); ok {
+						args = normalizeQuestionToolArgs(record)
+					} else {
+						args = normalizeQuestionToolArgs(map[string]any{})
+					}
+					name = askUserQuestionTool
+				}
+				content = append(content, map[string]any{"type": "toolCall", "id": call.ID, "name": name, "arguments": args})
 			}
 			entry["content"], entry["api"], entry["provider"], entry["model"] = content, protocolVersion, message.Provider, message.Model
 			stop := message.StopReason

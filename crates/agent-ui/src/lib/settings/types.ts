@@ -154,6 +154,8 @@ export type FontScaleSettings = {
 
 export type ChatTranscriptSettings = {
   width: number;
+  /** Start thinking segments and tool-trace groups expanded (#1154). */
+  expandProcessByDefault: boolean;
 };
 
 /**
@@ -180,6 +182,9 @@ export type CustomSettings = {
   promptClarifyModel?: SelectedModel;
   chatSidebar: ChatSidebarSettings;
   chatTranscript: ChatTranscriptSettings;
+  // Desktop system notifications (and Dock badge) when a background run
+  // finishes or blocks on approval / a question. Device-local, never synced.
+  runNotifications: boolean;
   rightDock: RightDockSettings;
   composerContextDisplay: ComposerContextDisplayMode;
   // Empty strings select the built-in stacks for each typography role.

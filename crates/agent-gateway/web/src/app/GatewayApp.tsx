@@ -1872,6 +1872,7 @@ function useGatewayAppController() {
     handleRightDockFileTreeStateChange,
     handleRightDockInsertCodeReviewSkill,
     handleRightDockInsertCommitMention,
+    handleRightDockInsertComposerSegments,
     handleRightDockInsertFileMention,
     handleRightDockInsertGitFileMention,
     handleRightDockProjectStateChange,
@@ -2191,18 +2192,20 @@ function useGatewayAppController() {
 
   if (!token) {
     return (
-      <LoginPage
-        token={loginToken}
-        error={authError}
-        isSubmitting={authSubmitting}
-        onTokenChange={(nextToken) => {
-          setLoginToken(nextToken);
-          if (authError) {
-            setAuthError(null);
-          }
-        }}
-        onSubmit={handleLoginSubmit}
-      />
+      <LocaleContext.Provider value={localeContextValue}>
+        <LoginPage
+          token={loginToken}
+          error={authError}
+          isSubmitting={authSubmitting}
+          onTokenChange={(nextToken) => {
+            setLoginToken(nextToken);
+            if (authError) {
+              setAuthError(null);
+            }
+          }}
+          onSubmit={handleLoginSubmit}
+        />
+      </LocaleContext.Provider>
     );
   }
 
@@ -2358,6 +2361,7 @@ function useGatewayAppController() {
     handleRightDockFileTreeStateChange,
     handleRightDockInsertCodeReviewSkill,
     handleRightDockInsertCommitMention,
+    handleRightDockInsertComposerSegments,
     handleRightDockInsertFileMention,
     handleRightDockInsertGitFileMention,
     handleRightDockProjectStateChange,

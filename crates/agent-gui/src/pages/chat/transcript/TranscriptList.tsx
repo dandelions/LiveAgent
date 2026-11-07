@@ -5,6 +5,7 @@ import type { ConversationMentionReference } from "@liveagent/ui/lib/chat/mentio
 import type { PendingUploadedFile } from "@liveagent/ui/lib/chat/uploadedFiles";
 import { useCommitDetailsLoader } from "@liveagent/ui/lib/chat/useCommitDetailsLoader";
 import type { GitClient } from "@liveagent/ui/lib/git/types";
+import type { TranscriptFindSource } from "@liveagent/ui/lib/transcript-find/transcriptFindSource";
 import { createLiveRowScrollAdjustPolicy } from "@liveagent/ui/lib/transcript-virtual/liveScrollAdjustPolicy";
 import {
   buildTranscriptLayoutKey,
@@ -50,7 +51,9 @@ import { extractRenderUnitRange } from "./renderUnitRangeExtractor";
 import { createReplyHoverStore } from "./replyHoverStore";
 import { ReplyHoverProvider } from "./rowInteraction";
 import { createTranscriptRowModel } from "./rowModel";
+import { buildTranscriptFindEntries } from "./transcriptFindEntries";
 import { UserMessageRow } from "./UserMessageRow";
+import { useViewportClientSize } from "./useViewportClientSize";
 
 const TRANSCRIPT_MEASUREMENT_LAYOUT_VERSION = "assistant-activity-v3";
 
@@ -133,6 +136,9 @@ export type TranscriptListProps = {
   // ChatTranscript keeps the transcript hidden behind the loading overlay
   // until then, so estimate→measure corrections never show as jumps.
   onFirstLayoutSettled?: () => void;
+  // Find in conversation searches the row model, so it covers rows the
+  // virtualizer has not mounted.
+  findSource?: TranscriptFindSource;
 };
 
 // The whole transcript lives in one virtualized container. Assistant replies
@@ -164,6 +170,7 @@ export const TranscriptList = memo(function TranscriptList(props: TranscriptList
     onResendFromEdit,
     onBranchConversation,
     onFirstLayoutSettled,
+    findSource,
   } = props;
 
   const liveState = useSyncExternalStore(
@@ -199,6 +206,9 @@ export const TranscriptList = memo(function TranscriptList(props: TranscriptList
 
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
+  useEffect(() => {
+    findSource?.publish(() => buildTranscriptFindEntries(rows));
+  }, [findSource, rows]);
   const liveStartIndexRef = useRef(liveStartIndex);
   liveStartIndexRef.current = liveStartIndex;
   const getScrollElement = useCallback(() => scrollViewport, [scrollViewport]);
@@ -263,16 +273,28 @@ export const TranscriptList = memo(function TranscriptList(props: TranscriptList
   );
 
   const [savedScrollPosition] = useState(() => readTranscriptScrollPosition(conversationId));
-  const initialLayout = useMemo(
-    () =>
-      initialTranscriptLayout(
-        rows,
-        initialMeasurementsCache,
-        scrollViewport?.clientHeight ?? 0,
-        savedScrollPosition,
-      ),
-    [rows, initialMeasurementsCache, scrollViewport, savedScrollPosition],
-  );
+  const viewportSize = useViewportClientSize(scrollViewport);
+  const restoredScrollRef = useRef(false);
+  const settledRef = useRef(false);
+  // The initial layout walks every row. Only the one-shot restore below and the
+  // first-layout reveal watch read it, so once both are done the last result is
+  // kept: a streaming flush produces new `rows` every frame and must not pay an
+  // O(rows) walk for a value nobody reads any more.
+  const frozenInitialLayoutRef = useRef<ReturnType<typeof initialTranscriptLayout> | null>(null);
+  const initialLayoutConsumed =
+    restoredScrollRef.current && (settledRef.current || !onFirstLayoutSettled);
+  const initialLayout = useMemo(() => {
+    const frozen = frozenInitialLayoutRef.current;
+    if (frozen && initialLayoutConsumed) return frozen;
+    const layout = initialTranscriptLayout(
+      rows,
+      initialMeasurementsCache,
+      viewportSize.height,
+      savedScrollPosition,
+    );
+    frozenInitialLayoutRef.current = layout;
+    return layout;
+  }, [rows, initialMeasurementsCache, viewportSize, savedScrollPosition, initialLayoutConsumed]);
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement,
@@ -283,10 +305,7 @@ export const TranscriptList = memo(function TranscriptList(props: TranscriptList
     enabled: scrollViewport !== null,
     initialMeasurementsCache,
     initialOffset: initialLayout.offset,
-    initialRect: {
-      width: scrollViewport?.clientWidth ?? 0,
-      height: scrollViewport?.clientHeight ?? 0,
-    },
+    initialRect: { width: viewportSize.width, height: viewportSize.height },
     // Defer measurement-driven DOM writes out of WebKit's resize delivery.
     useAnimationFrameWithResizeObserver: true,
     measureElement: measureRowLive,
@@ -309,10 +328,10 @@ export const TranscriptList = memo(function TranscriptList(props: TranscriptList
     scrollAnchoring: "origin",
     // Keep half a viewport behind and two ahead of native compositor scrolls.
     // Bound the pixel budget so tall windows do not mount unbounded Markdown.
-    overscanPx: Math.min(800, Math.max(320, (scrollViewport?.clientHeight ?? 800) * 0.5)),
+    overscanPx: Math.min(800, Math.max(320, (scrollViewport ? viewportSize.height : 800) * 0.5)),
     directionalOverscanPx: Math.min(
       2400,
-      Math.max(960, (scrollViewport?.clientHeight ?? 800) * 1.5),
+      Math.max(960, (scrollViewport ? viewportSize.height : 800) * 1.5),
     ),
     rangeExtractor: extractVirtualRange,
   });
@@ -447,7 +466,6 @@ export const TranscriptList = memo(function TranscriptList(props: TranscriptList
 
   // Restore once before paint. Detached readers return to their message
   // anchor; new conversations and followers land at the latest message.
-  const restoredScrollRef = useRef(false);
   useLayoutEffect(() => {
     if (restoredScrollRef.current || scrollViewport === null || rows.length === 0) {
       return;
@@ -519,7 +537,6 @@ export const TranscriptList = memo(function TranscriptList(props: TranscriptList
   // — then reveals in one shot. The caller enables this only for large static
   // transcripts, and a short hard cap keeps startup responsive.
   const hasRows = rows.length > 0;
-  const settledRef = useRef(false);
   const onFirstLayoutSettledRef = useRef(onFirstLayoutSettled);
   onFirstLayoutSettledRef.current = onFirstLayoutSettled;
   useLayoutEffect(() => {

@@ -20,6 +20,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../../components/ui/dropdown-menu";
+import { KbdShortcut } from "../../components/ui/kbd";
 import { planningDateLocale } from "../../lib/planning/i18n";
 import { CalendarDisplaySettings } from "./CalendarDisplaySettings";
 import { type CalendarPreferences, isoWeek, lunarDate, lunarMonth } from "./calendarDisplay";
@@ -187,7 +188,13 @@ export function PlanningToolbar({
                 {VIEWS.map((v) => (
                   <DropdownMenuRadioItem key={v} value={v}>
                     <span className="flex-1">{viewLabel(v)}</span>
-                    <kbd className="text-xs text-muted-foreground">{VIEW_KEYS[v]}</kbd>
+                    <KbdShortcut
+                      compact
+                      shortcut={VIEW_KEYS[v]}
+                      variant="plain"
+                      size="inline"
+                      className="text-xs"
+                    />
                   </DropdownMenuRadioItem>
                 ))}
               </DropdownMenuRadioGroup>

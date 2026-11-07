@@ -7,15 +7,57 @@ import { createWebModuleLoader } from "../../test/helpers/load-web-module.mjs";
 const rootDir = fileURLToPath(new URL("../", import.meta.url));
 const loader = createWebModuleLoader({ rootDir });
 const { BUILTIN_TOOL_CATALOG } = loader.loadModule("@liveagent/ui/lib/tools/builtinToolCatalog.ts");
-const { groupRoundBlocks, isBuiltinShareToolName, resolveAssistantTurnLayout } =
-  loader.loadModule("@liveagent/ui/components/chat/assistant-bubble/assistantBubbleUtils.ts");
+const {
+  getToolActivityCategory,
+  getToolDisplayName,
+  getToolMeta,
+  groupRoundBlocks,
+  isBuiltinShareToolName,
+  resolveAssistantTurnLayout,
+} = loader.loadModule("@liveagent/ui/components/chat/assistant-bubble/assistantBubbleUtils.ts");
+const IconSet = loader.loadModule("@liveagent/ui/components/IconSet.tsx");
 
 test("shared history recognizes every catalog tool as builtin", () => {
   for (const entry of BUILTIN_TOOL_CATALOG) {
     assert.equal(isBuiltinShareToolName(entry.toolName), true, entry.toolName);
   }
   assert.equal(isBuiltinShareToolName("mcp_docs_search"), true);
+  for (const name of ["lsp", "web_fetch", "WebFetch"]) {
+    assert.equal(isBuiltinShareToolName(name), true, name);
+  }
   assert.equal(isBuiltinShareToolName("CustomTool"), false);
+});
+
+test("K-brain lsp and web_fetch rows get their own activity, icon and accent", () => {
+  assert.equal(getToolActivityCategory("lsp"), "code");
+  assert.equal(getToolMeta("lsp").Icon, IconSet.Braces);
+  assert.equal(getToolMeta("lsp").accent, "var(--tool-search-accent)");
+
+  for (const name of ["web_fetch", "WebFetch"]) {
+    assert.equal(getToolActivityCategory(name), "fetch", name);
+    assert.equal(getToolMeta(name).Icon, IconSet.Globe, name);
+  }
+
+  // Unknown tools keep the generic fallback instead of borrowing either mapping.
+  assert.equal(getToolActivityCategory("LSP"), "other");
+  assert.equal(getToolMeta("web_fetch_20250910").Icon, IconSet.Wrench);
+});
+
+test("K-brain mcp__<server>__<tool> rows show server and tool, and cua-driver stays distinct", () => {
+  assert.equal(getToolDisplayName("mcp__docs__search"), "docs · search");
+  assert.equal(getToolDisplayName("mcp_docs_search"), "docs · search");
+  assert.equal(getToolMeta("mcp__cua-driver__click").Icon, IconSet.Hand);
+  assert.equal(getToolMeta("mcp__docs__search").Icon, IconSet.Plug);
+});
+
+test("K-brain-only tools render with their own category and icon in the WebUI", () => {
+  assert.equal(getToolActivityCategory("wait"), "wait");
+  assert.equal(getToolMeta("wait").Icon, IconSet.Timer);
+  assert.equal(getToolActivityCategory("remember"), "memory");
+  assert.equal(getToolMeta("PlanningMutate").Icon, IconSet.CalendarDays);
+  for (const name of ["TerminalSession", "wait", "remember", "browser_exec", "computer_exec"]) {
+    assert.equal(isBuiltinShareToolName(name), true, name);
+  }
 });
 
 test("ordinary tool activity keeps one group identity as later tools append", () => {

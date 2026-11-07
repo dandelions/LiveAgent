@@ -193,6 +193,8 @@ macro_rules! app_invoke_handler {
             commands::update::app_release_announcement,
             commands::update::app_release_announcement_preview,
             commands::update::app_restart,
+            commands::data_dir::data_dir_status,
+            commands::data_dir::data_dir_migrate,
             commands::app::app_runtime_platform,
             commands::app::app_frontend_ready,
             commands::app::app_set_close_window_behavior,
@@ -213,6 +215,8 @@ macro_rules! app_invoke_handler {
             commands::planning::planning_export,
             commands::planning::planning_set_labels,
             commands::planning::planning_notification_test,
+            commands::notifications::chat_notification_deliver,
+            commands::notifications::app_set_badge_count,
             commands::planning::planning_subscription,
             commands::planning::planning_import,
             commands::cron::cron_validate_expression,
@@ -964,10 +968,15 @@ pub fn run() {
             move |app| {
                 commands::history_db::initialize_history_db()?;
                 configure_system_tray(app)?;
+                services::planning::notification::install(app.handle());
                 #[cfg(target_os = "windows")]
                 configure_windows_window_chrome(app)?;
                 #[cfg(target_os = "macos")]
                 install_fullscreen_exit_observer(app, hide_after_fullscreen_exit)?;
+                #[cfg(target_os = "macos")]
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                    runtime::webview_background::keep_webview_live_when_covered(&window);
+                }
                 if let Err(error) = commands::settings::initialize_system_proxy_from_db() {
                     eprintln!("failed to initialize system proxy state: {error}");
                 }

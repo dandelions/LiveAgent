@@ -1,3 +1,4 @@
+import type { KBrainQuestionAnswerPayload } from "@liveagent/ui/lib/chat/askUserQuestion";
 import type { CustomProvider, ProviderModelConfig } from "../settings";
 
 export const KBRAIN_PROTOCOL_VERSION = "kbrain.agent.v1" as const;
@@ -78,22 +79,43 @@ export type KBrainMessage = {
   hosted_search?: KBrainHostedSearch[];
   stop_reason?: string;
   created_at?: string;
+  /** "background" on a user-role notice K-brain delivered on its own (a wait result, a process exit). */
+  origin?: string;
 };
 
-export type KBrainToolCall = {
-  id: string;
-  name: string;
-  arguments: unknown;
+/** 调用如何运行（仅展示用，均可缺省）：命令类工具的退出码、是否超时，工具自身耗时。 */
+export type KBrainToolRunInfo = {
+  exit_code?: number;
+  timed_out?: boolean;
+  duration_ms?: number;
 };
 
-export type KBrainToolResult = {
-  content?: KBrainContentBlock[];
-  id: string;
-  name?: string;
-  output: string;
-  failed?: boolean;
-  cancelled?: boolean;
+/**
+ * The answers recorded on a `question` / `AskUserQuestion` call (Stack-Cairn/K-brain#168),
+ * in history `tool_calls[]` and on `tool.result`; the same shape as
+ * `question.resolved.answers`. Display only; absent for timed-out or cancelled questions
+ * and on older backends.
+ */
+export type KBrainQuestionAnswers = {
+  question_answers?: KBrainQuestionAnswer[];
 };
+
+export type KBrainToolCall = KBrainToolRunInfo &
+  KBrainQuestionAnswers & {
+    id: string;
+    name: string;
+    arguments: unknown;
+  };
+
+export type KBrainToolResult = KBrainToolRunInfo &
+  KBrainQuestionAnswers & {
+    content?: KBrainContentBlock[];
+    id: string;
+    name?: string;
+    output: string;
+    failed?: boolean;
+    cancelled?: boolean;
+  };
 
 export type KBrainQuestionOption = {
   label: string;
@@ -117,11 +139,11 @@ export type KBrainQuestionRequest = {
   questions: KBrainQuestion[];
 };
 
-export type KBrainQuestionAnswer = {
-  question_id: string;
-  selected_label: string;
-  custom?: boolean;
-};
+/**
+ * One answer to `question.requested`. `selected_labels` needs capability
+ * `question_selected_labels`; the client downgrades it for older backends.
+ */
+export type KBrainQuestionAnswer = KBrainQuestionAnswerPayload;
 
 export type KBrainHostedSearch = {
   type: "hostedSearch";
@@ -281,10 +303,30 @@ export type KBrainSubagent = {
   started_at?: string;
   updated_at?: string;
   ended_at?: string;
+  /** The parent's `subagent` tool call that started it (backends with subagent_transcripts). */
+  parent_tool_call_id?: string;
+  background?: boolean;
+  usage?: KBrainUsage;
+  tool_count?: number;
+  duration_ms?: number;
 };
 
 export type KBrainSubagentEvent = {
   subagent: KBrainSubagent;
+};
+
+/** GET /v1/sessions/{id}/subagents */
+export type KBrainSubagentList = {
+  subagents?: KBrainSubagent[];
+  last_seq?: number;
+};
+
+/** GET /v1/sessions/{id}/subagents/{task}: the transcript so far. */
+export type KBrainSubagentTranscript = {
+  subagent: KBrainSubagent;
+  messages?: KBrainMessage[];
+  last_seq?: number;
+  live?: boolean;
 };
 
 export type KBrainCreateSessionRequest = {
@@ -313,8 +355,30 @@ export type KBrainRunOptions = {
   workspace_roots?: Array<{ path: string; access: "read" | "write" }>;
   tools?: { policies?: Record<string, "ask" | "allow" | "deny"> };
   plan_mode_enabled?: boolean;
+  /** OS confinement for the run's commands; sent only when capability run_sandbox allows it. */
+  sandbox?: import("@liveagent/ui/lib/chat/permissionModes").KBrainRunSandbox;
   /** Desktop-executed tools offered to the model for this run (e.g. Browser). */
   client_tools?: KBrainClientToolDefinition[];
+};
+
+/** `capabilities.run_sandbox` in /v1/health; every field may be absent on older backends. */
+export type KBrainRunSandboxCapability = {
+  supported?: boolean;
+  version?: string;
+  mechanism?: string;
+  platform?: string;
+  network_control?: boolean;
+  read_masking?: boolean;
+  path_protection?: boolean;
+  modes?: string[];
+  reason?: string;
+  /**
+   * Windows (capability `sandbox_setup` 1): `POST /v1/sandbox/setup` can install the
+   * sandbox accounts that let the offline sandbox cut the network.
+   */
+  setup_available?: boolean;
+  /** Short English text for the user about setup; empty once `sandbox-user` works. */
+  setup_hint?: string;
 };
 
 export type KBrainClientToolDefinition = {

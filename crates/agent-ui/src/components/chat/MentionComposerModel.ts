@@ -141,12 +141,24 @@ export interface MentionComposerHandle {
   ) => ConversationReferenceInsertResult;
   insertCodeMention: (reference: CodeMentionReference) => void;
   /**
+   * Appends `text` to the end of the draft as a Markdown blockquote and parks
+   * the caret on a fresh line below it. Returns false when the composer is
+   * unavailable/disabled or the text is blank.
+   */
+  insertQuote: (text: string) => boolean;
+  /**
    * Runs the draft as a registered action/prompt command instead of sending.
    * Returns false (send normally) when the draft is not a registered command.
    */
   runCommandDraft: () => boolean;
   clear: () => void;
   focus: () => void;
+  /**
+   * Appends draft segments as their own paragraph at the end of the draft,
+   * then focuses the composer with the caret after them. Returns false when
+   * the composer is disabled or nothing was inserted.
+   */
+  appendSegments: (segments: MentionComposerDraftSegment[]) => boolean;
   beginTransientText: () => boolean;
   updateTransientText: (text: string) => void;
   commitTransientText: (text?: string) => void;

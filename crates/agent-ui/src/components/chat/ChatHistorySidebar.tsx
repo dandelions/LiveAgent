@@ -6,7 +6,9 @@ import {
   Cable,
   CalendarDays,
   Check,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   CirclePlus,
   Clock3,
   Folder,
@@ -35,7 +37,20 @@ import {
 import { Input } from "@liveagent/ui/components/ui/input";
 import { Skeleton } from "@liveagent/ui/components/ui/skeleton";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import {
+  type CommandPaletteAction,
+  isCommandPaletteShortcut,
+  isCommandPaletteSuppressed,
+  isMacLikePlatform,
+} from "@liveagent/ui/lib/chat/commandPalette";
+import { withCommandShortcuts } from "@liveagent/ui/lib/chat/commandPaletteActions";
 import { cn } from "@liveagent/ui/lib/shared/utils";
+import {
+  getShortcutCommand,
+  matchesShortcutCommand,
+  type ShortcutCommandId,
+} from "@liveagent/ui/lib/shortcuts/shortcutCommands";
+import { isKeyEventHandledElsewhere } from "@liveagent/ui/lib/shortcuts/shortcutKeys";
 import type {
   SidebarBatchDeleteOptions,
   SidebarBatchDeleteResult,
@@ -72,6 +87,7 @@ import {
   sliceWorkspaceProjectSections,
 } from "../../lib/workspaceProjects";
 import type { WorkspaceProjectGroup } from "../../lib/workspaceProjectTypes";
+import { ShortcutTooltip } from "../ui/shortcut-tooltip";
 import {
   Sidebar,
   SidebarContent,
@@ -84,6 +100,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarTrigger,
+  useSidebarToggleShortcut,
 } from "../ui/sidebar";
 import { HistoryRow, ProjectGroupHeader, ProjectRow } from "./ChatHistorySidebarRows";
 import {
@@ -124,6 +141,7 @@ const PROJECT_LIST_COLLAPSED_MAX = 30;
 const EMPTY_PROJECT_PATH_KEYS = new Set<string>();
 const EMPTY_APPROVAL_CONVERSATION_IDS = new Set<string>();
 const EMPTY_QUESTION_CONVERSATION_IDS = new Set<string>();
+const EMPTY_UNREAD_CONVERSATION_IDS = new Set<string>();
 const HISTORY_LOADING_SKELETON_ROWS = [
   { title: "w-36", meta: "w-20" },
   { title: "w-44", meta: "w-24" },
@@ -146,6 +164,16 @@ function isMobileSidebarLayout() {
   }
   return window.matchMedia(MOBILE_SIDEBAR_MEDIA_QUERY).matches;
 }
+
+const SIDEBAR_SHORTCUT_COMMANDS: readonly ShortcutCommandId[] = [
+  "newConversation",
+  "openSettings",
+  "searchConversations",
+  "previousConversation",
+  "nextConversation",
+  "toggleRightPanel",
+];
+const SHORTCUT_DIALOG_SELECTOR = "[role=dialog], [role=alertdialog], [aria-modal=true]";
 
 function useStableEvent<Args extends unknown[], Return>(
   handler: (...args: Args) => Return,
@@ -201,6 +229,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     runningConversationIds,
     approvalConversationIds = EMPTY_APPROVAL_CONVERSATION_IDS,
     questionConversationIds = EMPTY_QUESTION_CONVERSATION_IDS,
+    unreadConversationIds = EMPTY_UNREAD_CONVERSATION_IDS,
     listStatus,
     scopeKey = "",
     hasMore,
@@ -214,6 +243,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     isOpen,
     fontScale = 1,
     conversationSearchRequestKey,
+    getCommandPaletteActions,
     activeView = "chat",
     showProjects = false,
     projects = [],
@@ -271,8 +301,14 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     footerTrailing,
   } = props;
   const { t } = useLocale();
+  const sidebarToggleShortcut = useSidebarToggleShortcut();
 
   const [conversationSearchOpen, setConversationSearchOpen] = useState(false);
+  const [conversationSearchMode, setConversationSearchMode] = useState<"search" | "palette">(
+    "search",
+  );
+  const conversationSearchOpenRef = useRef(conversationSearchOpen);
+  conversationSearchOpenRef.current = conversationSearchOpen;
   const [revealedSearchConversationId, setRevealedSearchConversationId] = useState<string | null>(
     null,
   );
@@ -369,9 +405,68 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     }
     lastConversationSearchRequestKeyRef.current = conversationSearchRequestKey;
     if (!sectionsDisabled) {
+      setConversationSearchMode("search");
       setConversationSearchOpen(true);
     }
   }, [conversationSearchRequestKey, sectionsDisabled]);
+
+  const commandPaletteEnabled = Boolean(getCommandPaletteActions) && !sectionsDisabled;
+  // Shortcut commands the sidebar runs itself: the palette, plain search,
+  // stepping through the visible conversation list, and palette actions that
+  // already exist for the host (new conversation, settings, right panel).
+  const runSidebarShortcut = useStableEvent((command: ShortcutCommandId): boolean => {
+    if (command === "searchConversations") {
+      setConversationSearchMode("search");
+      setConversationSearchOpen(true);
+      return true;
+    }
+    if (command === "previousConversation" || command === "nextConversation") {
+      return stepConversation(command === "nextConversation" ? 1 : -1);
+    }
+    const paletteActionId = getShortcutCommand(command)?.paletteActionId;
+    const action = paletteActionId
+      ? getCommandPaletteActions?.().find((entry) => entry.id === paletteActionId)
+      : undefined;
+    if (!action) return false;
+    action.run();
+    return true;
+  });
+  useEffect(() => {
+    if (sectionsDisabled) return;
+    const isMac = isMacLikePlatform();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (commandPaletteEnabled && isCommandPaletteShortcut(event, isMac)) {
+        // A covering surface (the desktop settings overlay) owns the keyboard.
+        if (isCommandPaletteSuppressed()) return;
+        event.preventDefault();
+        if (event.repeat) return;
+        // The same chord closes an open palette (focus sits in its input).
+        if (conversationSearchOpenRef.current) {
+          setConversationSearchOpen(false);
+          return;
+        }
+        setConversationSearchMode("palette");
+        setConversationSearchOpen(true);
+        return;
+      }
+      if (isKeyEventHandledElsewhere(event) || isCommandPaletteSuppressed()) return;
+      const command = SIDEBAR_SHORTCUT_COMMANDS.find((id) =>
+        matchesShortcutCommand(event, id, isMac),
+      );
+      if (!command) return;
+      // An open dialog (the palette itself, confirmations) owns the keyboard.
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest(SHORTCUT_DIALOG_SELECTOR)) return;
+      const repeatable = command === "previousConversation" || command === "nextConversation";
+      if (event.repeat && !repeatable) {
+        event.preventDefault();
+        return;
+      }
+      if (runSidebarShortcut(command)) event.preventDefault();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [commandPaletteEnabled, runSidebarShortcut, sectionsDisabled]);
   const selectionAnchorRef = useRef<string | null>(null);
   const bulkConfirmOpenRef = useRef(false);
   // Bumped to invalidate an in-flight bulk delete: its shouldStop callback
@@ -503,6 +598,42 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     visibleProjectConversations,
   ]);
   const orderedConversationIds = useMemo(() => visibleItems.map((item) => item.id), [visibleItems]);
+  // Previous/next conversation follow the list as rendered (pinned first, then
+  // expanded projects); collapsed sections are skipped. No wrap-around.
+  const stepConversation = useStableEvent((direction: 1 | -1): boolean => {
+    const ids = orderedConversationIds;
+    if (ids.length === 0) return false;
+    const index = currentConversationId ? ids.indexOf(currentConversationId) : -1;
+    const nextIndex = index < 0 ? (direction > 0 ? 0 : ids.length - 1) : index + direction;
+    const nextId = ids[nextIndex];
+    if (!nextId) return true;
+    handleSelectConversation(nextId);
+    return true;
+  });
+  const getPaletteActions = useStableEvent((): CommandPaletteAction[] => {
+    const actions = [...(getCommandPaletteActions?.() ?? [])];
+    if (orderedConversationIds.length > 1) {
+      actions.push(
+        {
+          id: "previous-conversation",
+          group: "navigation",
+          label: t("shortcuts.command.previousConversation"),
+          keywords: ["previous", "up", "conversation"],
+          icon: ChevronUp,
+          run: () => void stepConversation(-1),
+        },
+        {
+          id: "next-conversation",
+          group: "navigation",
+          label: t("shortcuts.command.nextConversation"),
+          keywords: ["next", "down", "conversation"],
+          icon: ChevronDown,
+          run: () => void stepConversation(1),
+        },
+      );
+    }
+    return withCommandShortcuts(actions, isMacLikePlatform());
+  });
   const visibleRunningProjectPathKeys = useMemo(() => {
     // A conversation waiting on the user — for a tool approval or for an
     // AskUserQuestion answer — is suspended, not working. Both must drop out of
@@ -1175,6 +1306,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
         isRunning={runningConversationIds.has(item.id)}
         needsApproval={approvalConversationIds.has(item.id)}
         hasPendingQuestion={questionConversationIds.has(item.id)}
+        isUnread={unreadConversationIds.has(item.id) && currentConversationId !== item.id}
         isDeleteDisabled={runningConversationIds.has(item.id)}
         canShareConversation={canShareConversations}
         isRenaming={renamingId === item.id}
@@ -1234,6 +1366,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
       activeProjects,
       approvalConversationIds,
       questionConversationIds,
+      unreadConversationIds,
       enterSelectionMode,
       isBulkDeleting,
       isBulkMoving,
@@ -1364,6 +1497,8 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
       <Sidebar
         label={t("sidebar.navigation")}
         data-app-frame-column="sidebar"
+        // Esc leaves selection mode here; the composer's Esc-to-stop yields to it.
+        data-escape-owner={selectionMode ? "sidebar-selection" : undefined}
         className="chat-history-sidebar zone-font-scale bg-settings-rail group-data-[side=left]:border-r-0 [&_button:not(:disabled)]:cursor-pointer"
         style={{ "--zone-font-scale": fontScale } as CSSProperties}
       >
@@ -1414,28 +1549,42 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
               )}
 
               <div className="flex shrink-0 items-center gap-0.5">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  disabled={sectionsDisabled}
-                  onClick={() => setConversationSearchOpen(true)}
-                  title={t("chat.searchConversations")}
-                  aria-label={t("chat.searchConversations")}
-                  className="chat-history-search-button rounded-lg text-muted-foreground hover:text-foreground"
+                <ShortcutTooltip
+                  label={t("chat.searchConversations")}
+                  triggerDisabled={sectionsDisabled}
+                  side="bottom"
                 >
-                  <Search className="size-4" />
-                </Button>
-                {!hideCloseButton || isMobileMenuLayout ? (
-                  <SidebarTrigger
+                  <Button
                     type="button"
                     variant="ghost"
                     size="icon-sm"
-                    title={t("sidebar.closeSidebar")}
-                    className="shrink-0 rounded-lg text-muted-foreground hover:text-foreground desktop:min-[768px]:hidden"
+                    disabled={sectionsDisabled}
+                    onClick={() => {
+                      setConversationSearchMode("search");
+                      setConversationSearchOpen(true);
+                    }}
+                    aria-label={t("chat.searchConversations")}
+                    className="chat-history-search-button rounded-lg text-muted-foreground hover:text-foreground"
                   >
-                    <PanelLeftClose className="size-4" />
-                  </SidebarTrigger>
+                    <Search className="size-4" />
+                  </Button>
+                </ShortcutTooltip>
+                {!hideCloseButton || isMobileMenuLayout ? (
+                  <ShortcutTooltip
+                    label={t("sidebar.closeSidebar")}
+                    shortcut={sidebarToggleShortcut}
+                    side="bottom"
+                  >
+                    <SidebarTrigger
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={t("sidebar.closeSidebar")}
+                      className="shrink-0 rounded-lg text-muted-foreground hover:text-foreground desktop:min-[768px]:hidden"
+                    >
+                      <PanelLeftClose className="size-4" />
+                    </SidebarTrigger>
+                  </ShortcutTooltip>
                 ) : null}
               </div>
             </div>
@@ -2226,6 +2375,8 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
         conversations={items}
         currentWorkdir={currentConversationWorkdir}
         onSelectConversation={handleSelectConversation}
+        mode={conversationSearchMode}
+        getActions={getCommandPaletteActions ? getPaletteActions : undefined}
       />
     </>
   );

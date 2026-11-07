@@ -3,6 +3,7 @@ import {
   retainRunningToolContent,
   submitAskUserQuestionAnswers,
   submitPlanDecision,
+  useAskUserQuestionPending,
   usePendingToolApproval,
   usePermissionAutoResolved,
   usePlanDecisionState,
@@ -56,7 +57,9 @@ import {
   getToolMeta,
   isBuiltinShareToolName,
   isSubagentCardToolCall,
+  KBRAIN_SUBAGENT_TOOL_NAME,
 } from "./assistantBubbleUtils";
+import { SubagentToolCall } from "./SubagentToolCard";
 import { ToolPermissionMarker } from "./ToolPermissionMarker";
 import { ShellToolDisplay, ToolArgsDisplay, ToolResultDisplay } from "./ToolResultDisplay";
 
@@ -151,11 +154,14 @@ function ToolCallItem({
   // 提问卡运行期强制展开等待作答；应答落定后自动收起。
   const shouldKeepAskOpen = !readOnly && isAskUser && (Boolean(isRunning) || !result);
   const shouldCloseAnsweredAsk = isAskUser && Boolean(result);
-  // 截止时间和提交动作由宿主适配器提供，确保两端都使用各自的权威服务。
-  const askDeadlineAt =
-    isAskUser && isRunning && !result
-      ? readAskUserQuestionDeadline(item.toolCall.id, item.toolCall.arguments)
-      : undefined;
+  // 截止时间、挂起状态和提交动作由宿主适配器提供，确保两端都使用各自的权威服务。
+  // 工具调用先于提问登记到达（K-brain 的 AI 审查或审批门夹在中间），未登记时
+  // 卡片不可作答，否则提交只会得到“提问未挂起”。
+  const askPending = useAskUserQuestionPending(item.toolCall.id, item.toolCall.arguments);
+  const askAnswerable = isAskUser && Boolean(isRunning) && !result && !readOnly && askPending;
+  const askDeadlineAt = askAnswerable
+    ? readAskUserQuestionDeadline(item.toolCall.id, item.toolCall.arguments)
+    : undefined;
   const submitAskAnswers = useCallback(
     (answers: AskUserQuestionAnswer[]) => submitAskUserQuestionAnswers(item.toolCall.id, answers),
     [item.toolCall.id],
@@ -288,7 +294,7 @@ function ToolCallItem({
     ? t("chat.toolApproval.waitingStatus")
     : isRunning
       ? isAskUser
-        ? askQuestions.length > 0
+        ? askQuestions.length > 0 && askPending
           ? t("chat.askUser.waiting")
           : t("chat.askUser.preparing")
         : isPlanCard
@@ -578,7 +584,7 @@ function ToolCallItem({
               answers={askDetails?.answers}
               cancelled={askDetails?.cancelled === true}
               timedOut={askDetails?.timedOut === true}
-              interactive={Boolean(isRunning) && !result && !readOnly}
+              interactive={askAnswerable}
               deadlineAt={askDeadlineAt}
               onSubmit={submitAskAnswers}
             />
@@ -686,8 +692,24 @@ export function areToolTraceItemsEqual(previous: ToolTraceItem, next: ToolTraceI
   );
 }
 
+type ToolCallItemProps = Parameters<typeof ToolCallItem>[0];
+
+// A K-brain `subagent` call is a subagent card when the host can link it; shared
+// (redacted) transcripts keep the plain row.
+function ToolCallItemSwitch(props: ToolCallItemProps) {
+  if (props.item.toolCall.name === KBRAIN_SUBAGENT_TOOL_NAME && !props.redactToolContent) {
+    return (
+      <SubagentToolCall
+        toolCallId={props.item.toolCall.id}
+        fallback={<ToolCallItem {...props} />}
+      />
+    );
+  }
+  return <ToolCallItem {...props} />;
+}
+
 export const MemoToolCallItem = memo(
-  ToolCallItem,
+  ToolCallItemSwitch,
   (previousProps, nextProps) =>
     previousProps.isRunning === nextProps.isRunning &&
     previousProps.readOnly === nextProps.readOnly &&
