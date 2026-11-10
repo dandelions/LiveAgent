@@ -295,6 +295,13 @@ func (r *Relay) SettingsUpdate(ctx context.Context, request *gatewayv2.SettingsU
 		}
 	}
 	if mcp != nil {
+		current, err := r.client.settingsRequest(ctx, "GET", "/v1/mcp", nil)
+		if err != nil {
+			return nil, err
+		}
+		if mcp, err = mergeMCPSettingsWithCurrent(mcp, current); err != nil {
+			return nil, err
+		}
 		if _, err := r.client.settingsRequest(ctx, "PUT", "/v1/mcp", mcp); err != nil {
 			return nil, err
 		}
@@ -405,9 +412,16 @@ func (r *Relay) MemoryManage(ctx context.Context, request *gatewayv2.MemoryManag
 		raw json.RawMessage
 		err error
 	)
-	if command == "chat_history_search" {
+	switch command {
+	case "chat_history_search":
 		raw, err = r.client.HistorySearch(ctx, args)
-	} else {
+	case historyArchiveSupportedCommand:
+		raw, err = r.historyArchiveSupported(ctx)
+	case historyArchivedListCommand:
+		raw, err = r.historyArchivedList(ctx, args)
+	case historyArchiveSetCommand:
+		raw, err = r.historyArchiveSet(ctx, args)
+	default:
 		raw, err = r.client.MemoryManage(ctx, command, args)
 	}
 	if err != nil {

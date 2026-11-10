@@ -14,13 +14,27 @@ export type SidebarConversation = {
   isPinned?: boolean;
   pinnedAt?: number | null;
   isShared?: boolean;
+  /** Archived conversations are only listed in the archived view. */
+  isArchived?: boolean;
   selectedModelJson?: string;
   /** Backend session ID of the conversation this one was branched from. */
   forkedFromSessionId?: string;
+  /** A turn another process (the kn terminal UI) is running in this session. */
+  externalRun?: SidebarExternalRun;
   // Local-only draft/persisting row; survives authoritative reconciles until
   // the backend confirms (an upsert event clears it) or it is removed locally.
   isPending?: boolean;
 };
+
+export type SidebarExternalRun = {
+  /** kn, kn run, or another backend. */
+  client: string;
+  startedAt: number;
+};
+
+export function sameExternalRun(left?: SidebarExternalRun, right?: SidebarExternalRun): boolean {
+  return left === right || (left?.client === right?.client && left?.startedAt === right?.startedAt);
+}
 
 export type SidebarWorkdirSummary = {
   path: string;
@@ -47,9 +61,10 @@ export type SidebarErrorCode =
   | "moveFailed"
   | "moveBlockedRunning"
   | "deleteFailed"
+  | "archiveFailed"
   | "deleteBlockedRunning";
 
-export type SidebarMutationKind = "rename" | "pin" | "move" | "delete";
+export type SidebarMutationKind = "rename" | "pin" | "move" | "delete" | "archive";
 
 export type SidebarRunningItem = {
   conversationId: string;

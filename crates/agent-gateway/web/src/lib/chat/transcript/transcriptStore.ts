@@ -14,6 +14,7 @@ import { type ChatEntry, normalizeLiveUploadedFiles, readHistoryMessageRef } fro
 import type { ChatEvent } from "@/lib/gatewayTypes";
 import {
   absorbTrajectoryChatEvent,
+  noteLiveUsageReport,
   resetLiveTrajectoryForRebase,
 } from "@/lib/trajectory/liveTrajectory";
 
@@ -224,6 +225,8 @@ export function createTranscriptStore(options?: {
   // log. Fired at most once per applied sync so the app layer can trigger a
   // resubscribe (which re-arms the signal).
   onDivergence?: () => void;
+  // Text shown for a failed run: lets the app localize known error codes.
+  describeRunFailure?: (errorCode: string | undefined, message: string) => string;
 }): TranscriptStore {
   let historyEntries: ChatEntry[] = [];
   let turns: Turn[] = [];
@@ -886,7 +889,8 @@ export function createTranscriptStore(options?: {
       const previousEntryIds = new Set(turn.entries.map((entry) => entry.id));
       let withError = applyEventToTurn(turn, {
         type: "error",
-        message: payload.message,
+        message:
+          options?.describeRunFailure?.(payload.error_code, payload.message) ?? payload.message,
       } as ChatEvent);
       if (inferredLoss) {
         const inferredErrorEntry = withError.entries.find(
@@ -1019,6 +1023,9 @@ export function createTranscriptStore(options?: {
         return;
       }
       lastSeq = seq;
+    }
+    if (event.type === "token" && event.usageLive === true) {
+      noteLiveUsageReport(event.conversation_id);
     }
     const runId = readEventRunId(event);
     switch (event.type) {

@@ -100,15 +100,23 @@ export type KBrainQuestionAnswers = {
   question_answers?: KBrainQuestionAnswer[];
 };
 
+/**
+ * MCP form elicitations of a tool call (Stack-Cairn/K-brain#174): K-brain's records with
+ * sensitive values already removed. Parsed by the shared mcpElicitation module.
+ */
+export type KBrainToolElicitations = { elicitations?: unknown[] };
+
 export type KBrainToolCall = KBrainToolRunInfo &
-  KBrainQuestionAnswers & {
+  KBrainQuestionAnswers &
+  KBrainToolElicitations & {
     id: string;
     name: string;
     arguments: unknown;
   };
 
 export type KBrainToolResult = KBrainToolRunInfo &
-  KBrainQuestionAnswers & {
+  KBrainQuestionAnswers &
+  KBrainToolElicitations & {
     content?: KBrainContentBlock[];
     id: string;
     name?: string;
@@ -195,6 +203,12 @@ export type KBrainSession = {
   /** Source session ID of a branch; older K-brain builds omit it. */
   forked_from?: string;
   fork_seq?: number;
+  /**
+   * Set while another process sharing the data root (the kn terminal UI, kn run)
+   * runs a turn in this session (capability `session_external_runs`). The backend
+   * refuses runs and history edits for the session until it is cleared.
+   */
+  external_run?: KBrainExternalRun;
   messages?: KBrainMessage[];
   active_messages?: KBrainMessage[];
   tasks?: KBrainSubagent[];
@@ -205,6 +219,12 @@ export type KBrainSession = {
   total_message_count?: number;
   sync_epoch?: string;
   sync_revision?: string;
+};
+
+export type KBrainExternalRun = {
+  client: string;
+  pid?: number;
+  started_at: string;
 };
 
 export type KBrainSessionPage = {
@@ -342,6 +362,8 @@ export type KBrainUpdateSessionRequest = {
   model?: KBrainModelRef;
   /** Moves the session to another workspace (absolute path to an existing directory). */
   cwd?: string;
+  /** Hides the session from the default list (capability `session_archive`). */
+  archived?: boolean;
 };
 
 export type KBrainRunOptions = {
@@ -359,6 +381,17 @@ export type KBrainRunOptions = {
   sandbox?: import("@liveagent/ui/lib/chat/permissionModes").KBrainRunSandbox;
   /** Desktop-executed tools offered to the model for this run (e.g. Browser). */
   client_tools?: KBrainClientToolDefinition[];
+  /**
+   * Relay MCP form elicitations to this client (`elicitation.*` events). Sent only when
+   * K-brain advertises capability mcp_elicitation: older backends reject unknown options.
+   */
+  mcp_elicitation?: boolean;
+  /**
+   * MCP servers K-brain may offer in this run. Omitted means K-brain's saved
+   * selection (or every enabled server); an empty list means the same, so "no
+   * server" is sent as an id that matches none (KBRAIN_NO_MCP_SERVERS).
+   */
+  mcp_server_ids?: string[];
 };
 
 /** `capabilities.run_sandbox` in /v1/health; every field may be absent on older backends. */

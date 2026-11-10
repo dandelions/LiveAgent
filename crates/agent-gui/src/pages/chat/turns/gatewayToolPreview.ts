@@ -5,6 +5,7 @@ import {
   ASK_USER_QUESTION_PENDING_ARG,
   ASK_USER_QUESTION_TOOL_NAME,
   readAskUserQuestionDeadlineAt,
+  TOOL_QUESTION_ARG,
 } from "@liveagent/ui/lib/chat/askUserQuestion";
 import {
   EXIT_PLAN_MODE_APPROVED_ARG,
@@ -37,8 +38,11 @@ import {
 import { summarizeToolCall } from "../../../lib/chat/messages/uiMessages";
 import {
   ensureAskUserQuestionDeadlineAt,
+  getAskUserQuestionDeadlineAt,
+  getPendingAskUserQuestionItems,
   hasPendingAskUserQuestion,
 } from "../../../lib/tools/askUserQuestionTools";
+import { mcpElicitationArgsOverlay } from "../../../lib/tools/mcpElicitations";
 import { getPermissionAutoResolved } from "../../../lib/tools/permissionAutoResolved";
 import { isPlanApprovalToolCall, isPlanDecisionPending } from "../../../lib/tools/planModeTools";
 import { getPendingToolApproval } from "../../../lib/tools/toolApproval";
@@ -163,7 +167,12 @@ export function withoutApprovalSyntheticArgs(
 export function buildGatewayToolCallPreviewArguments(
   toolCall: Pick<ToolCall, "id" | "name" | "arguments">,
 ) {
-  const sourceArgs = withoutApprovalSyntheticArgs(toolCall.arguments);
+  // MCP elicitation forms of the call, from the desktop's pending store only (the same
+  // keys in the model's arguments were just dropped).
+  const sourceArgs = {
+    ...withoutApprovalSyntheticArgs(toolCall.arguments),
+    ...(toolCall.id ? mcpElicitationArgsOverlay(toolCall.id) : {}),
+  };
   // 待审批标记:任意工具在 beforeToolCall 处挂起等待批准时,盖到同步给 WebUI 的
   // 参数上,让远端渲染审批卡片并显示与桌面同源的倒计时。审批消解后重发的快照
   // 不再带此标记,卡片随之隐藏。__ 前缀合成参数不入展示、不影响本地执行。
@@ -241,12 +250,24 @@ export function buildGatewayToolCallPreviewArguments(
       [EXIT_PLAN_MODE_APPROVED_ARG]: isPlanApprovalToolCall(toolCall.id),
     };
   }
+  // A question the running tool asks itself (SSHManager confirming a host key): the
+  // questions, deadline and pending marker come from the desktop's store only.
+  const toolQuestions = toolCall.id ? getPendingAskUserQuestionItems(toolCall.id) : null;
+  const questionOverlay: Record<string, unknown> | null = toolQuestions
+    ? {
+        [TOOL_QUESTION_ARG]: { questions: toolQuestions },
+        [ASK_USER_QUESTION_DEADLINE_ARG]: getAskUserQuestionDeadlineAt(toolCall.id),
+        [ASK_USER_QUESTION_PENDING_ARG]: true,
+      }
+    : null;
+  const overlay =
+    approvalOverlay || questionOverlay ? { ...approvalOverlay, ...questionOverlay } : null;
   const fieldsToPreview = FILE_TOOL_TEXT_FIELDS[toolCall.name];
   if (!fieldsToPreview) {
-    return approvalOverlay ? { ...sourceArgs, ...approvalOverlay } : sourceArgs;
+    return overlay ? { ...sourceArgs, ...overlay } : sourceArgs;
   }
 
-  const args: Record<string, unknown> = { ...sourceArgs, ...(approvalOverlay ?? {}) };
+  const args: Record<string, unknown> = { ...sourceArgs, ...(overlay ?? {}) };
   const fields: Record<string, PreviewFieldMetrics> = {};
   let progress = 0;
 

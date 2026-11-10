@@ -51,6 +51,7 @@ type Session struct {
 	MessageCount      int32     `json:"message_count"`
 	Pinned            bool      `json:"pinned"`
 	Shared            bool      `json:"shared"`
+	Archived          bool      `json:"archived,omitempty"`
 	Messages          []Message `json:"messages,omitempty"`
 	TotalMessageCount int32     `json:"total_message_count,omitempty"`
 }
@@ -154,6 +155,9 @@ type ToolCall struct {
 	// QuestionAnswers are the answers recorded on a question or AskUserQuestion
 	// call (Stack-Cairn/K-brain#168), as in question.resolved. Display only.
 	QuestionAnswers []QuestionAnswer `json:"question_answers,omitempty"`
+	// Elicitations are the MCP forms the call asked the user to fill in
+	// (Stack-Cairn/K-brain#174), sensitive values removed. Display only.
+	Elicitations []json.RawMessage `json:"elicitations,omitempty"`
 }
 
 // QuestionAnswer is one answer to question.requested, as K-brain records it.
@@ -187,7 +191,10 @@ type RunOptions struct {
 	WorkspaceRoots  []WorkspaceRoot `json:"workspace_roots,omitempty"`
 	Tools           *ToolSelection  `json:"tools,omitempty"`
 	PlanModeEnabled bool            `json:"plan_mode_enabled,omitempty"`
-	MCPServerIDs    []string        `json:"mcp_server_ids,omitempty"`
+	// MCPElicitation is set by withMCPElicitation from capability mcp_elicitation;
+	// callers leave it false.
+	MCPElicitation bool     `json:"mcp_elicitation,omitempty"`
+	MCPServerIDs   []string `json:"mcp_server_ids,omitempty"`
 	// Sandbox confines the run's commands with the backend's OS sandbox
 	// (capability run_sandbox). Runs asking for it are refused, never started
 	// unconfined, when the backend cannot enforce it.
@@ -322,6 +329,29 @@ func (c *Client) ListSessions(ctx context.Context, page, pageSize int, cwd strin
 	return out, nil
 }
 
+// ListArchivedSessions lists only archived sessions (capability session_archive).
+func (c *Client) ListArchivedSessions(ctx context.Context, page, pageSize int) (SessionPage, error) {
+	query := url.Values{}
+	query.Set("page", strconv.Itoa(max(page, 1)))
+	if pageSize < 1 {
+		pageSize = 50
+	}
+	query.Set("page_size", strconv.Itoa(pageSize))
+	query.Set("archived", "only")
+	var out SessionPage
+	resp, err := c.request(ctx, http.MethodGet, "/v1/sessions?"+query.Encode(), nil, &out)
+	if err != nil {
+		return out, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return out, fmt.Errorf("kbrain list archived sessions: %s", resp.Status)
+	}
+	if out.TotalCount == 0 {
+		out.TotalCount = int32(len(out.Sessions))
+	}
+	return out, nil
+}
+
 func (c *Client) SearchHistory(ctx context.Context, query string, limit int) (HistorySearchResponse, error) {
 	var out HistorySearchResponse
 	resp, err := c.request(ctx, http.MethodPost, "/v1/history/search", map[string]any{"query": strings.TrimSpace(query), "limit": limit}, &out)
@@ -442,6 +472,7 @@ func (c *Client) StartRun(ctx context.Context, sessionID string, in PromptReques
 		return out, 0, err
 	}
 	in = c.withReviewScope(ctx, in)
+	in = c.withMCPElicitation(ctx, in)
 	resp, err := c.request(ctx, http.MethodPost, "/v1/sessions/"+sessionID+"/runs", in, &out)
 	if err != nil {
 		return out, 0, err

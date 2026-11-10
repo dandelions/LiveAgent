@@ -19,13 +19,13 @@ import {
   ASK_USER_QUESTION_TOOL_NAME,
   type AskUserQuestionAnswer,
   parseAskUserQuestionResultDetails,
+  readToolQuestionItems,
   sanitizeAskUserQuestionItems,
 } from "@liveagent/ui/lib/chat/askUserQuestion";
 import {
   deriveFileChangeStats,
   FILE_TOOL_TEXT_FIELDS,
   previewText,
-  summarizeToolCall,
   type ToolResultMessage,
   type ToolTraceItem,
   toolResultMessageToText,
@@ -41,6 +41,13 @@ import {
   parseExitPlanModeResultDetails,
   sanitizePlanMarkdown,
 } from "@liveagent/ui/lib/chat/planMode";
+import { hasSshManagerResultView } from "@liveagent/ui/lib/chat/sshManagerDisplay";
+import {
+  describeSubagentControlCall,
+  isSubagentControlRowToolName,
+  KBRAIN_SUBAGENT_FOLLOWUP_TOOL_NAME,
+  subagentControlAction,
+} from "@liveagent/ui/lib/chat/subagentControlTools";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronRight } from "../../IconSet";
@@ -51,7 +58,7 @@ import {
   getFileOperationDisplay,
   getShellSessionDisplayDetails,
   getSubagentInlineSummary,
-  getToolActivityCategory,
+  getToolActivityTitleKey,
   getToolDisplayName,
   getToolDisplayTitle,
   getToolMeta,
@@ -59,7 +66,9 @@ import {
   isSubagentCardToolCall,
   KBRAIN_SUBAGENT_TOOL_NAME,
 } from "./assistantBubbleUtils";
-import { SubagentToolCall } from "./SubagentToolCard";
+import { getConciseToolTarget } from "./conciseToolTarget";
+import { SubagentControlToolCall, SubagentToolCall } from "./SubagentToolCard";
+import { ToolElicitations } from "./ToolElicitations";
 import { ToolPermissionMarker } from "./ToolPermissionMarker";
 import { ShellToolDisplay, ToolArgsDisplay, ToolResultDisplay } from "./ToolResultDisplay";
 
@@ -120,6 +129,7 @@ function ToolCallItem({
   redactToolContent = false,
   compactChip = false,
   onOpenFileLink,
+  subagentLabel,
 }: {
   item: ToolTraceItem;
   isRunning?: boolean;
@@ -127,6 +137,8 @@ function ToolCallItem({
   redactToolContent?: boolean;
   compactChip?: boolean;
   onOpenFileLink?: (link: ChatFileLink) => void;
+  /** The subagent a status / steer / cancel / follow-up call is about, when known. */
+  subagentLabel?: string;
 }) {
   const { t } = useLocale();
   const result = item.toolResult;
@@ -216,23 +228,34 @@ function ToolCallItem({
     typeof item.toolCall.arguments?.command === "string"
       ? item.toolCall.arguments.command.trim()
       : "";
-  const firstLine = inlineCommand ? inlineCommand.split("\n")[0] : "";
-  // 折叠行的行内命令:视觉截断交给 CSS(truncate 按实际可用宽度出省略号),
-  // 不再按固定字符数硬切(#444)。DOM 文本与原生 title 各留一个远超可视宽度
-  // 的上限,防止超长单行命令把常驻摘要行与悬浮提示撑到不可用。
-  const firstLinePreview = capInlineCommandPreview(firstLine);
-  const inlineCommandTitle = inlineCommand ? capInlineCommandPreview(inlineCommand) : "";
-  const toolArgsSummary =
-    isRedactedToolContent || isBash || isShellSessionControl || inlineCommand || isPlanCard
-      ? ""
-      : isAskUser
-        ? (askQuestions[0]?.prompt ?? "")
-        : isSubagentCard
-          ? getSubagentInlineSummary(item)
-          : summarizeToolCall(item.toolCall, {
-              includeName: false,
-              includeManagerAction: false,
-            });
+  // 行内目标取简短形式（命令首行去掉前导 cd、文件名、搜索模式、URL 主机+路径，
+  // 约 48 列），窄窗口里 CSS truncate 仍按实际宽度出省略号（#444）。完整请求放进
+  // 原生 title（留一个远超可视宽度的上限），简短形式丢了信息时展开区再展示参数。
+  const conciseTarget =
+    isRedactedToolContent ||
+    isShellSessionControl ||
+    isPlanCard ||
+    isAskUser ||
+    isSubagentCard ||
+    (isBash && !inlineCommand)
+      ? null
+      : getConciseToolTarget(item);
+  // status / steer / cancel / follow-up: "<verb> subagent <name>", then what came back.
+  const subagentControl =
+    isRedactedToolContent || !subagentControlAction(item.toolCall.name)
+      ? null
+      : describeSubagentControlCall(
+          item.toolCall,
+          result && { text: toolResultMessageToText(result), isError: Boolean(result.isError) },
+          { running: displayIsRunning, label: subagentLabel },
+          t,
+        );
+  const inlineTarget = isAskUser
+    ? (askQuestions[0]?.prompt ?? "")
+    : isSubagentCard
+      ? getSubagentInlineSummary(item)
+      : (subagentControl?.target ?? conciseTarget?.text ?? "");
+  const inlineTargetTitle = capInlineCommandPreview(conciseTarget?.full ?? inlineTarget);
   // 流式 Edit 参数每个 delta 都会换新 arguments 引用并重派生统计；exact 行级
   // diff（Myers，上限 200K 字符）只在参数定稿后才算，流式期走行数估算，避免
   // 每帧全量 diff 卡主线程。isRunning 不能作定稿信号：两端都在 toolcall_start
@@ -258,17 +281,18 @@ function ToolCallItem({
   const fileOperation = useMemo(() => getFileOperationDisplay(item), [item]);
   const meta = getToolMeta(item.toolCall.name);
   const ToolIcon = meta.Icon;
-  const activityCategory = getToolActivityCategory(item.toolCall.name);
   const activityPhase =
     result?.isError || shellSessionFailed
       ? "failed"
       : isRunning || !result
         ? "running"
         : "completed";
-  const localizedActivityTitle =
-    activityCategory === "other"
-      ? null
-      : t(`chat.tool.activity.${activityCategory}.${activityPhase}`);
+  const activityTitleKey = getToolActivityTitleKey(item.toolCall, activityPhase);
+  const localizedActivityTitle = subagentControl
+    ? subagentControl.title
+    : activityTitleKey
+      ? t(activityTitleKey)
+      : null;
   const localizedFileOperationTitle = fileOperation
     ? t(`chat.tool.file.${fileOperation.kind}.${activityPhase}`)
     : null;
@@ -290,7 +314,7 @@ function ToolCallItem({
   const simpleFileOperation =
     !isRedactedToolContent && fileOperation && !result?.isError ? fileOperation : null;
 
-  const statusLabel = isApprovalPending
+  const genericStatusLabel = isApprovalPending
     ? t("chat.toolApproval.waitingStatus")
     : isRunning
       ? isAskUser
@@ -314,8 +338,12 @@ function ToolCallItem({
                   : t("chat.tool.success")
                 : t("chat.tool.waiting");
 
+  const statusLabel = subagentControl?.outcome?.text ?? genericStatusLabel;
+
   const statusTextClass =
-    result?.isError || shellSessionFailed ? "text-[hsl(var(--chat-error))]" : "text-foreground/45";
+    result?.isError || shellSessionFailed || subagentControl?.outcome?.failed
+      ? "text-[hsl(var(--chat-error))]"
+      : "text-foreground/45";
 
   const liveOutputSettledOk = Boolean(result) && !result?.isError && !shellSessionFailed;
   useEffect(() => {
@@ -348,13 +376,13 @@ function ToolCallItem({
     !isPlanCard &&
     (shouldShowArgs || Boolean(result) || (isAskUser && askQuestions.length > 0));
   const effectiveOpen = canExpand && open;
-  const summaryTitleName =
-    isBash && effectiveOpen ? t(`chat.tool.shell.${activityPhase}Title`) : title.name;
-  const compactChipText = simpleFileOperation
-    ? ""
-    : firstLinePreview
-      ? firstLinePreview
-      : toolArgsSummary || title.action;
+  const summaryTitleName = title.name;
+  const compactChipText = simpleFileOperation ? "" : inlineTarget || title.action;
+  // Inside a batch the row body skips the request arguments; when the concise
+  // target dropped part of the request (a long command, a search path), show
+  // them so nothing is left only in a tooltip.
+  const showArgsInBody =
+    !isShellSessionTool && shouldShowArgs && (!compactChip || Boolean(conciseTarget?.lossy));
   const summaryClassName = cn(
     "flex select-none items-center gap-1.5 text-left",
     compactChip
@@ -421,10 +449,7 @@ function ToolCallItem({
           )}
         >
           {compactChipText ? (
-            <span
-              className="min-w-0 flex-1 truncate"
-              title={inlineCommandTitle || toolArgsSummary || undefined}
-            >
+            <span className="min-w-0 flex-1 truncate" title={inlineTargetTitle || undefined}>
               {compactChipText}
             </span>
           ) : null}
@@ -441,7 +466,7 @@ function ToolCallItem({
       )}
 
       <ToolPermissionMarker marker={permissionAutoResolved} />
-      {displayIsRunning || result?.isError || shellSessionFailed ? (
+      {displayIsRunning || result?.isError || shellSessionFailed || subagentControl?.outcome ? (
         <span className={cn("shrink-0 text-tiny", statusTextClass)}>{statusLabel}</span>
       ) : null}
     </>
@@ -457,7 +482,7 @@ function ToolCallItem({
             (styled per the block container) matches the summary text */}
         <div
           className="min-w-0 truncate font-mono text-xs leading-5 text-foreground/48"
-          title={inlineCommandTitle || toolArgsSummary || undefined}
+          title={inlineTargetTitle || undefined}
         >
           <span className="font-sans text-sm font-[450] text-foreground/62 group-hover/tool:text-foreground/75">
             {summaryTitleName}
@@ -469,11 +494,7 @@ function ToolCallItem({
             ) : null}
           </span>
 
-          {firstLinePreview ? (
-            <span className="ml-1.5">{firstLinePreview}</span>
-          ) : toolArgsSummary ? (
-            <span className="ml-1.5">{toolArgsSummary}</span>
-          ) : null}
+          {inlineTarget ? <span className="ml-1.5">{inlineTarget}</span> : null}
         </div>
 
         {fileChangeStats ? (
@@ -516,6 +537,8 @@ function ToolCallItem({
           const resultText = toolResultMessageToText(result);
           if (!/\S/.test(resultText)) return null;
           if (builtinResultKind && builtinResultKind !== "read_image") return null;
+          // Exec output and SFTP transfers already render in full above.
+          if (hasSshManagerResultView(item.toolCall.name, resultText, result.isError)) return null;
 
           if (readOnly) {
             return (
@@ -570,7 +593,7 @@ function ToolCallItem({
         >
           {isShellSessionTool ? <ShellToolDisplay item={item} result={result} /> : null}
 
-          {!isShellSessionTool && shouldShowArgs && !compactChip ? (
+          {showArgsInBody ? (
             <ToolSection
               label={isBash || inlineCommand ? t("chat.tool.command") : t("chat.tool.args")}
             >
@@ -614,6 +637,39 @@ function ToolCallItem({
     </LazyCollapse>
   );
   const containerClassName = "group/tool min-w-0 max-w-full";
+  // MCP elicitation forms sit below the row, outside the collapse: a waiting form must stay
+  // visible whether or not the call is expanded.
+  // A question the running tool asks itself (SSHManager confirming a host key) sits there
+  // too, while it is pending.
+  const toolQuestions =
+    !isAskUser && !isRedactedToolContent && !result && askPending
+      ? readToolQuestionItems(item.toolCall.arguments)
+      : [];
+  const elicitations = isRedactedToolContent ? null : (
+    <>
+      {toolQuestions.length > 0 ? (
+        <div className="py-1.5">
+          <AskUserQuestionCard
+            questions={toolQuestions}
+            allowCustom={false}
+            interactive={!readOnly}
+            deadlineAt={
+              readOnly
+                ? undefined
+                : readAskUserQuestionDeadline(item.toolCall.id, item.toolCall.arguments)
+            }
+            onSubmit={submitAskAnswers}
+          />
+        </div>
+      ) : null}
+      <ToolElicitations
+        toolCallId={item.toolCall.id}
+        args={item.toolCall.arguments}
+        details={result?.details}
+        canAnswer={!readOnly && !result}
+      />
+    </>
+  );
 
   // 计划卡直出(任务卡风格):不进折叠壳、无摘要行,整卡直接展示——
   // 卡片自带「实施计划」头部与状态,正文不限高(与消息正文同滚动上下文)。
@@ -637,6 +693,7 @@ function ToolCallItem({
     return (
       <div className={containerClassName}>
         <div className={summaryClassName}>{summaryContent}</div>
+        {elicitations}
       </div>
     );
   }
@@ -654,6 +711,7 @@ function ToolCallItem({
       >
         {summaryContent}
       </button>
+      {elicitations}
       {body}
     </div>
   );
@@ -694,14 +752,31 @@ export function areToolTraceItemsEqual(previous: ToolTraceItem, next: ToolTraceI
 
 type ToolCallItemProps = Parameters<typeof ToolCallItem>[0];
 
-// A K-brain `subagent` call is a subagent card when the host can link it; shared
-// (redacted) transcripts keep the plain row.
+// A K-brain `subagent` call (and a follow-up of one) is a subagent card when the host
+// can link it; status / steer / cancel calls are rows named after their subagent.
+// Shared (redacted) transcripts keep the plain row.
 function ToolCallItemSwitch(props: ToolCallItemProps) {
-  if (props.item.toolCall.name === KBRAIN_SUBAGENT_TOOL_NAME && !props.redactToolContent) {
+  const { name, id } = props.item.toolCall;
+  if (props.redactToolContent) return <ToolCallItem {...props} />;
+  if (name === KBRAIN_SUBAGENT_TOOL_NAME || name === KBRAIN_SUBAGENT_FOLLOWUP_TOOL_NAME) {
+    const result = props.item.toolResult;
+    const followup =
+      name === KBRAIN_SUBAGENT_FOLLOWUP_TOOL_NAME
+        ? { running: Boolean(props.isRunning) && !result, failed: Boolean(result?.isError) }
+        : undefined;
     return (
       <SubagentToolCall
-        toolCallId={props.item.toolCall.id}
+        toolCallId={id}
         fallback={<ToolCallItem {...props} />}
+        {...(followup ? { followup } : {})}
+      />
+    );
+  }
+  if (isSubagentControlRowToolName(name)) {
+    return (
+      <SubagentControlToolCall
+        toolCallId={id}
+        render={(label) => <ToolCallItem {...props} subagentLabel={label} />}
       />
     );
   }

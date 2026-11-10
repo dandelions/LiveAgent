@@ -385,6 +385,7 @@ func historyMessagesJSON(messages []Message, firstOffset int32) (string, error) 
 			details := resultDetails(message.Name, historyText(message), args, isError, call.QuestionAnswers)
 			if known {
 				details = withRunInfo(message.Name, details, call.ExitCode, call.TimedOut, call.DurationMs)
+				details = withElicitationDetails(details, decodeElicitations(call.Elicitations))
 			}
 			if details != nil {
 				entry["details"] = details
@@ -430,7 +431,8 @@ func historyMessagesJSON(messages []Message, firstOffset int32) (string, error) 
 			entry["stopReason"] = stop
 			if message.Usage != nil {
 				u := message.Usage
-				entry["usage"] = map[string]any{"input": u.InputTokens, "output": u.OutputTokens, "cacheRead": u.CachedTokens, "cacheWrite": u.CacheWriteTokens, "totalTokens": int64(u.InputTokens) + int64(u.OutputTokens)}
+				// K-brain's input includes cache reads and writes; LiveAgent's excludes them.
+				entry["usage"] = map[string]any{"input": max(0, u.InputTokens-u.CachedTokens-u.CacheWriteTokens), "output": u.OutputTokens, "cacheRead": u.CachedTokens, "cacheWrite": u.CacheWriteTokens, "totalTokens": int64(u.InputTokens) + int64(u.OutputTokens)}
 			}
 		}
 		out = append(out, entry)

@@ -284,6 +284,28 @@ export class GatewayWebSocketRpcClient extends GatewayWebSocketTransport {
     );
   }
 
+  /**
+   * Answers an MCP elicitation form: item_id is the toolCallId, request_json is
+   * {elicitationId, action, content?}. A refused answer carries field_errors in item_json.
+   */
+  async chatQueueMcpElicitation(
+    conversationId: string,
+    toolCallId: string,
+    requestJson: string,
+  ): Promise<{ accepted: boolean; message?: string; errorCode?: string; itemJson?: string }> {
+    const raw = await this.requestWithRecovery<RawChatQueueResponse>("chat_queue.mcp_elicitation", {
+      conversation_id: conversationId,
+      item_id: toolCallId,
+      request_json: requestJson,
+    });
+    return {
+      accepted: raw.accepted === true,
+      message: raw.message,
+      errorCode: raw.error_code,
+      itemJson: raw.item_json,
+    };
+  }
+
   /** 提交对桌面端挂起工具审批的决定：item_id 为 toolCallId，request_json 为 {"decision":...}。 */
   async chatQueueToolApproval(
     conversationId: string,
@@ -1055,6 +1077,26 @@ export class GatewayWebSocketRpcClient extends GatewayWebSocketTransport {
       page: normalizeHistoryListPage(page),
       page_size: normalizeHistoryListPageSize(pageSize),
     });
+  }
+
+  async historyArchiveSupported(): Promise<boolean> {
+    const response = await this.request<{ supported?: boolean }>("history.archive_supported", {});
+    return response?.supported === true;
+  }
+
+  async listArchivedHistory(page: number, pageSize: number): Promise<HistoryList> {
+    const response = await this.request<Partial<HistoryList>>("history.archived_list", {
+      page: normalizeHistoryListPage(page),
+      page_size: normalizeHistoryListPageSize(pageSize),
+    });
+    return {
+      conversations: Array.isArray(response?.conversations) ? response.conversations : [],
+      total_count: typeof response?.total_count === "number" ? response.total_count : 0,
+    };
+  }
+
+  async setHistoryArchived(conversationId: string, archived: boolean): Promise<void> {
+    await this.request("history.archive_set", { conversation_id: conversationId, archived });
   }
 
   async getHistory(conversationId: string, options?: HistoryGetOptions): Promise<HistoryDetail> {

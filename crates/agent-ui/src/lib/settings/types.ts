@@ -44,6 +44,18 @@ export type McpServerConfig = {
   timeoutMs: number;
   messageUrl?: string;
   auth?: McpAuthConfig;
+  /**
+   * K-brain enforces this per-server tool policy: keys are full tool names
+   * (`mcp__<server>__<tool>`) or `"*"` for every tool of the server.
+   */
+  policy?: Record<string, ToolPolicy>;
+  /** K-brain offers this server's tools only to sessions under these roots. */
+  workspaceRoots?: string[];
+  /**
+   * Server fields K-brain returned that LiveAgent does not edit. They are sent
+   * back unchanged on save so newer K-brain settings survive a LiveAgent edit.
+   */
+  backendFields?: Record<string, unknown>;
 };
 
 export type McpSettings = {
@@ -54,30 +66,22 @@ export type McpSettings = {
 export type SkillsSettings = {
   enabled: boolean;
   selected: string[];
+  /**
+   * Whole-pack switches keyed by skill pack name (K-brain capability
+   * `skill_packs`): true turns every skill of the pack on, false turns all of
+   * them off. A pack not listed follows `selected`. Absent on older backends.
+   */
+  packs?: Record<string, boolean>;
 };
 
-export type MemoryOrganizerScope = "all" | "global" | "projects" | "current-project";
-
-export type MemoryOrganizerMode = "conservative" | "standard" | "aggressive";
-
-export type MemoryOrganizerFrequency = "none" | "daily" | "weekly";
-
-export type MemoryOrganizerSchedule = {
-  frequency: MemoryOrganizerFrequency;
-  timeLocal: string;
-  weekday?: number;
-  timezone: string;
-};
-
+/**
+ * The organizer schedule lives in K-brain (`/v1/settings` memoryOrganizer); the
+ * organizerEnabled/Schedule/Scope/Mode/LastRunAt/NextRunAt fields older builds kept
+ * here never ran anything and are dropped on load.
+ */
 export type MemorySettings = {
   organizerModel?: SelectedModel;
   summaryModel?: SelectedModel;
-  organizerEnabled: boolean;
-  organizerSchedule: MemoryOrganizerSchedule;
-  organizerScope: MemoryOrganizerScope;
-  organizerMode: MemoryOrganizerMode;
-  organizerLastRunAt?: number;
-  organizerNextRunAt?: number;
 };
 
 export type ChatSidebarSettings = {

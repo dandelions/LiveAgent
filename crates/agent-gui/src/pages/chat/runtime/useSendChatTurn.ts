@@ -60,6 +60,7 @@ import { skillMentionInjection } from "../../../lib/chat/skills/mentionInjection
 import { createStreamDebugLogger } from "../../../lib/debug/agentDebug";
 import { isTauriHost, liveAgentRuntimeCapabilities } from "../../../lib/host";
 import { showGoalProgress } from "../../../lib/kbrain/goalNotice";
+import { workspaceMcpServerIds } from "../../../lib/kbrain/mcp";
 import { kBrainSidebarSync } from "../../../lib/kbrain/sidebarSync";
 import { createModelFromConfig, createProviderRuntimeConfig } from "../../../lib/providers/llm";
 import {
@@ -140,6 +141,7 @@ import {
 import { buildPreparedContext as buildPreparedConversationContext } from "./conversationContextBuilders";
 import { startConversationTitleJob } from "./conversationTitleJob";
 import {
+  ChatModelSelectionError,
   type EffectiveChatModelSelection,
   resolveEffectiveChatModelSelection,
 } from "./modelSelection";
@@ -432,6 +434,13 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       flushEvents: flushGatewayBridgeEventsForRequest,
       resolveErrorConversationId: () =>
         gatewayBridgeRequest?.conversationId ?? currentConversationIdRef.current,
+      // The first reported error is why a remote turn was refused; the bridge
+      // listener sends it back with the failed request.
+      onError: (message) => {
+        if (gatewayBridgeRequest && !gatewayBridgeRequest.rejection) {
+          gatewayBridgeRequest.rejection = { errorCode: "desktop_runtime_rejected", message };
+        }
+      },
     });
     const updateGatewayBridgeToolStatus = (status: string | null, isCompaction = false) => {
       gatewayBridgeEvents.queueToolStatus(status, isCompaction);
@@ -495,6 +504,9 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     } catch (error) {
       const message = asErrorMessage(error, "当前模型配置不可用，请重新选择后重试。");
       setConversationErrorState(message);
+      if (gatewayBridgeRequest && error instanceof ChatModelSelectionError) {
+        gatewayBridgeRequest.rejection ??= { errorCode: error.code, message };
+      }
       gatewayBridgeEvents.emitError(message);
       return false;
     }
@@ -1506,6 +1518,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             },
             agentTemplates: settings.agents,
             getMcpSettings: getEffectiveMcpSettings,
+            mcpServerIds: workspaceMcpServerIds(workspaceResources),
             getToolPolicies,
             getCuaAllowSelfTargeting: () => settings.system.cuaAllowSelfTargeting === true,
             commandSafetyMode: effectiveCommandSafetyMode,

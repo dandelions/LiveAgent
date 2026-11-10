@@ -6,7 +6,7 @@ use tauri::Emitter;
 use crate::commands::chat_history::{self};
 use crate::commands::settings::{
     apply_ssh_patch_with_conn, open_db, redact_gateway_settings_sync_payload,
-    reset_runtime_ssh_known_host, SSH_PATCH_FIELD,
+    reset_ssh_known_host_everywhere, SSH_PATCH_FIELD,
 };
 use crate::services::gateway_bridge;
 use crate::services::workspace_watch::WatchSource;
@@ -727,11 +727,17 @@ impl GatewayController {
                                 return self.send_error_response(request_id, 400, error).await;
                             }
                         };
-                        // The memory switch and the AI approval reviewer go to K-brain and
-                        // never into LiveAgent's own settings; an update carrying only
-                        // them ends here.
+                        // The memory switch, the memory organizer schedule and the AI
+                        // approval reviewer go to K-brain and never into LiveAgent's own
+                        // settings; an update carrying only them ends here.
                         let memory_switch = match kbrain_memory::take_switch_update(&mut snapshot) {
                             Ok(switch) => switch,
+                            Err(error) => {
+                                return self.send_error_response(request_id, 400, error).await;
+                            }
+                        };
+                        let organizer = match kbrain_memory::take_organizer_update(&mut snapshot) {
+                            Ok(organizer) => organizer,
                             Err(error) => {
                                 return self.send_error_response(request_id, 400, error).await;
                             }
@@ -743,7 +749,7 @@ impl GatewayController {
                                     return self.send_error_response(request_id, 400, error).await;
                                 }
                             };
-                        if memory_switch.is_some() || ai_approval.is_some() {
+                        if memory_switch.is_some() || organizer.is_some() || ai_approval.is_some() {
                             let Some(connection) = kbrain_memory::running_kbrain(&self.app_handle)
                             else {
                                 return self
@@ -757,6 +763,9 @@ impl GatewayController {
                             let written = tauri::async_runtime::spawn_blocking(move || {
                                 if let Some(enabled) = memory_switch {
                                     kbrain_memory::write_switch(&connection, enabled)?;
+                                }
+                                if let Some(organizer) = &organizer {
+                                    kbrain_memory::write_organizer(&connection, organizer)?;
                                 }
                                 if let Some(approval) = &ai_approval {
                                     kbrain_ai_approval::write_approval(&connection, approval)?;
@@ -1001,9 +1010,14 @@ impl GatewayController {
                             .await;
                     }
                 };
-                match reset_runtime_ssh_known_host(&host, port) {
-                    Ok(deleted) => {
-                        let deleted = u32::try_from(deleted).unwrap_or(u32::MAX);
+                let reset = tauri::async_runtime::spawn_blocking(move || {
+                    reset_ssh_known_host_everywhere(&host, port)
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("reset SSH known host join failed: {e}")));
+                match reset {
+                    Ok(response) => {
+                        let deleted = u32::try_from(response.deleted).unwrap_or(u32::MAX);
                         self.send_agent_envelope(proto::AgentEnvelope {
                             request_id,
                             timestamp: now_unix_seconds(),
@@ -1360,12 +1374,26 @@ impl GatewayController {
             Some(proto::gateway_envelope::Payload::MemoryManage(request)) => {
                 let controller = Arc::clone(self);
                 tauri::async_runtime::spawn(async move {
-                    let result = match gateway_bridge::handle_memory_manage(
-                        controller.app_handle.clone(),
-                        request,
-                    )
-                    .await
-                    {
+                    let outcome =
+                        match super::kbrain_history::history_archive_action(&request.command) {
+                            Some(action) => {
+                                controller
+                                    .handle_history_archive_command(
+                                        request_id.clone(),
+                                        action,
+                                        &request,
+                                    )
+                                    .await
+                            }
+                            None => {
+                                gateway_bridge::handle_memory_manage(
+                                    controller.app_handle.clone(),
+                                    request,
+                                )
+                                .await
+                            }
+                        };
+                    let result = match outcome {
                         Ok(response) => {
                             controller
                                 .send_agent_envelope(proto::AgentEnvelope {

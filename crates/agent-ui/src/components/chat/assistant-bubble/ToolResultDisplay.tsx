@@ -36,6 +36,7 @@ import {
   type WriteResultDetails,
 } from "@liveagent/ui/lib/chat/assistantBubbleAdapter";
 import { formatLiveShellOutput } from "@liveagent/ui/lib/chat/liveShellOutput";
+import { withoutMcpElicitationDetails } from "@liveagent/ui/lib/chat/mcpElicitation";
 import {
   formatToolRunInfo,
   readToolRunInfo,
@@ -59,6 +60,7 @@ import {
   shouldShowSubagentCleanupStatus,
   shouldShowSubagentWorktreeLocation,
 } from "./assistantBubbleUtils";
+import { getSshManagerResultView } from "./SshManagerResult";
 import { getToolResultImages, ToolResultImagePreview } from "./ToolImages";
 
 // 距底部不超过这么多像素视为“跟随最新输出”；用户上翻查看时不抢滚动位置。
@@ -589,6 +591,9 @@ export function ToolResultDisplay({
     item.toolCall.name === "ProcessStop";
 
   if (isShellSessionTool) return null;
+
+  const sshView = getSshManagerResultView(item.toolCall.name, text, result.isError);
+  if (sshView) return sshView;
 
   if (kind === "read_text") {
     const details = result.details as ReadTextResultDetails;
@@ -1259,7 +1264,8 @@ export function ToolResultDisplay({
   // Error results (and blocked calls) carry an empty details object — showing
   // a literal "{}" would bury the actual error text, which renders below.
   // Run info (exit code, duration) shows as one line, never as raw JSON.
-  const otherDetails = withoutToolRunInfo(result.details);
+  // Elicitation records render as their own cards below the tool row.
+  const otherDetails = withoutMcpElicitationDetails(withoutToolRunInfo(result.details));
   const hasOtherDetails =
     otherDetails !== null &&
     typeof otherDetails === "object" &&

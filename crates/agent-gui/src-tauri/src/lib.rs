@@ -168,6 +168,7 @@ macro_rules! app_invoke_handler {
             commands::settings::settings_save_ssh,
             commands::settings::settings_apply_ssh_patch,
             commands::settings::settings_reset_ssh_known_host,
+            commands::settings::settings_kbrain_ssh_state,
             commands::settings::settings_save_remote,
             commands::settings::settings_save_memory,
             commands::settings::settings_save_model_failover,
@@ -389,6 +390,8 @@ macro_rules! app_invoke_handler {
             commands::gateway::provider_usage_test,
             services::proxy::proxy_get_server_info,
             services::kbrain_backend::kbrain_backend_connection,
+            services::kbrain_backend::kbrain_backend_restart,
+            services::host_bridge::registration::host_bridge_status,
         ]
     };
 }
@@ -728,6 +731,46 @@ fn install_fullscreen_exit_observer(
     Ok(())
 }
 
+/// Starts the loopback host bridge and keeps it registered with K-brain. A
+/// failure only disables the bridge tools; the app keeps running.
+fn start_host_bridge(
+    app: &tauri::App,
+    terminal_registry: &Arc<runtime::terminal::TerminalSessionRegistry>,
+    gateway_controller: &Arc<services::gateway::GatewayController>,
+) {
+    use services::host_bridge;
+    let backend = Arc::new(host_bridge::DesktopHostBridgeBackend::new(
+        app.handle().clone(),
+        Arc::clone(terminal_registry),
+    ));
+    let endpoint = match host_bridge::start(backend) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            eprintln!("failed to start host bridge: {error}");
+            return;
+        }
+    };
+    let registrar = match host_bridge::HostBridgeRegistrar::new(
+        endpoint,
+        host_bridge::emit_status_listener(app.handle().clone()),
+    ) {
+        Ok(registrar) => Arc::new(registrar),
+        Err(error) => {
+            eprintln!("failed to start host bridge registration: {error}");
+            return;
+        }
+    };
+    let kbrain = app.state::<Arc<services::kbrain_backend::KBrainBackendState>>();
+    host_bridge::spawn_follower(&registrar, kbrain.inner(), gateway_controller);
+    app.manage(registrar);
+}
+
+fn unregister_host_bridge(app: &tauri::AppHandle) {
+    if let Some(registrar) = app.try_state::<Arc<services::host_bridge::HostBridgeRegistrar>>() {
+        registrar.unregister_for_exit();
+    }
+}
+
 fn request_app_exit(
     app: &tauri::AppHandle,
     allow_exit: &AtomicBool,
@@ -994,6 +1037,12 @@ pub fn run() {
                 }
                 terminal_registry.attach_app_handle(app.handle().clone());
                 sftp_registry.attach_app_handle(app.handle().clone());
+                // Push Settings > SSH to K-brain's SSHManager on every (re)connect.
+                if let Some(kbrain) =
+                    app.try_state::<Arc<services::kbrain_backend::KBrainBackendState>>()
+                {
+                    services::kbrain_ssh_sync::install(Arc::clone(kbrain.inner()));
+                }
                 // 配置自动同步的后台任务：只消费脏信号并做防抖上传，
                 // 未开启自动同步时它会在每次唤醒后静默跳过。
                 services::webdav_auto_sync::start(app.handle().clone());
@@ -1022,6 +1071,7 @@ pub fn run() {
                 Arc::clone(&automation_scheduler).start();
                 services::planning::start(app.handle().clone());
                 app.manage(Arc::clone(&gateway_controller));
+                start_host_bridge(app, &terminal_registry, &gateway_controller);
                 if let Err(error) = gateway_controller.start() {
                     eprintln!("failed to start remote gateway controller: {error}");
                 }
@@ -1095,6 +1145,8 @@ pub fn run() {
                 }
             }
             {
+                // Withdraw the host bridge while K-brain is still reachable.
+                unregister_host_bridge(_app);
                 // Stop our backend before other cleanup can block or the OS exits.
                 if let Some(backend) =
                     _app.try_state::<Arc<services::kbrain_backend::KBrainBackendState>>()
@@ -1114,6 +1166,7 @@ pub fn run() {
         }
         tauri::RunEvent::Exit => {
             // Native macOS termination can bypass ExitRequested; Drop is not guaranteed.
+            unregister_host_bridge(_app);
             if let Some(backend) =
                 _app.try_state::<Arc<services::kbrain_backend::KBrainBackendState>>()
             {

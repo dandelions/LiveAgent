@@ -6,12 +6,15 @@ import {
   editKBrainHistory,
   getKBrainHistoryShare,
   getKBrainHistoryWindow,
+  listKBrainArchivedHistory,
   listKBrainHistory,
   renameKBrainHistory,
+  setKBrainHistoryArchived,
   setKBrainHistoryCwd,
   setKBrainHistoryModel,
   setKBrainHistoryPinned,
   setKBrainHistoryShare,
+  supportsKBrainSessionArchive,
 } from "../../kbrain/history";
 import { getKBrainSessionId } from "../../kbrain/mapping";
 import { getConfiguredKBrainConnection } from "../../kbrain/runtimeConnection";
@@ -35,6 +38,8 @@ import { parseHistorySegments, type SerializedHistorySegment } from "./chatHisto
 // earlier, edit-resend replace) — one contract, one constant.
 export const CHAT_HISTORY_WINDOW_MESSAGES = 360;
 
+import type { SidebarExternalRun } from "@liveagent/ui/lib/sidebar/types";
+
 export type ChatHistorySummary = {
   id: string;
   title: string;
@@ -49,9 +54,13 @@ export type ChatHistorySummary = {
   isPinned?: boolean;
   pinnedAt?: number | null;
   isShared?: boolean;
+  /** Archived conversations are only listed in the archived view. */
+  isArchived?: boolean;
   isPending?: boolean;
   /** Backend session ID of the conversation this one was branched from. */
   forkedFromSessionId?: string;
+  /** A turn another process (the kn terminal UI) is running in this session. */
+  externalRun?: SidebarExternalRun;
 };
 
 export type ChatHistoryShareStatus = {
@@ -573,6 +582,24 @@ export async function setChatHistoryPinned(id: string, isPinned: boolean) {
   return withConversationWriteLock(id, () =>
     invoke<ChatHistorySummary>("chat_history_set_pinned", { id, isPinned }),
   );
+}
+
+/** Archiving needs K-brain with `session_archive`; local history has no archive. */
+export function supportsChatHistoryArchive(): Promise<boolean> {
+  return isKBrainHistory() ? supportsKBrainSessionArchive() : Promise.resolve(false);
+}
+
+export async function setChatHistoryArchived(id: string, archived: boolean): Promise<void> {
+  if (!isKBrainHistory()) throw new Error("Archiving conversations requires K-brain");
+  await setKBrainHistoryArchived(id, archived);
+}
+
+export async function listArchivedChatHistory(
+  page: number,
+  pageSize: number,
+): Promise<ChatHistoryListPage> {
+  if (!isKBrainHistory()) return { items: [], totalCount: 0 };
+  return listKBrainArchivedHistory(page, pageSize);
 }
 
 export async function setChatHistoryModel(id: string, selectedModelJson: string) {
