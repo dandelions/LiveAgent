@@ -727,9 +727,9 @@ impl GatewayController {
                                 return self.send_error_response(request_id, 400, error).await;
                             }
                         };
-                        // The memory switch, the memory organizer schedule and the AI
-                        // approval reviewer go to K-brain and never into LiveAgent's own
-                        // settings; an update carrying only them ends here.
+                        // The memory switch, the memory organizer schedule, the AI approval
+                        // reviewer and the web search service go to K-brain and never into
+                        // LiveAgent's own settings; an update carrying only them ends here.
                         let memory_switch = match kbrain_memory::take_switch_update(&mut snapshot) {
                             Ok(switch) => switch,
                             Err(error) => {
@@ -749,7 +749,18 @@ impl GatewayController {
                                     return self.send_error_response(request_id, 400, error).await;
                                 }
                             };
-                        if memory_switch.is_some() || organizer.is_some() || ai_approval.is_some() {
+                        let web_search =
+                            match kbrain_web_search::take_web_search_update(&mut snapshot) {
+                                Ok(web_search) => web_search,
+                                Err(error) => {
+                                    return self.send_error_response(request_id, 400, error).await;
+                                }
+                            };
+                        if memory_switch.is_some()
+                            || organizer.is_some()
+                            || ai_approval.is_some()
+                            || web_search.is_some()
+                        {
                             let Some(connection) = kbrain_memory::running_kbrain(&self.app_handle)
                             else {
                                 return self
@@ -769,6 +780,9 @@ impl GatewayController {
                                 }
                                 if let Some(approval) = &ai_approval {
                                     kbrain_ai_approval::write_approval(&connection, approval)?;
+                                }
+                                if let Some(web_search) = &web_search {
+                                    kbrain_web_search::write_web_search(&connection, web_search)?;
                                 }
                                 Ok(())
                             })
@@ -1309,6 +1323,35 @@ impl GatewayController {
                     };
                     if let Err(error) = result {
                         eprintln!("handle permission rules failed: {error}");
+                    }
+                });
+                Ok(())
+            }
+            Some(proto::gateway_envelope::Payload::UsageStats(request)) => {
+                // 设置 → 用量统计：只读；K-brain 聚合一年的用量可能要一会儿，放到阻塞线程。
+                let this = Arc::clone(self);
+                tauri::async_runtime::spawn(async move {
+                    let app = this.app_handle.clone();
+                    let outcome = tauri::async_runtime::spawn_blocking(move || {
+                        super::kbrain_usage_stats::handle_usage_stats(&app, request)
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(format!("usage stats task failed: {error}")));
+                    let result = match outcome {
+                        Ok(response) => {
+                            this.send_agent_envelope(proto::AgentEnvelope {
+                                request_id: request_id.clone(),
+                                timestamp: now_unix_seconds(),
+                                payload: Some(proto::agent_envelope::Payload::UsageStatsResp(
+                                    response,
+                                )),
+                            })
+                            .await
+                        }
+                        Err(error) => this.send_error_response(request_id, 400, error).await,
+                    };
+                    if let Err(error) = result {
+                        eprintln!("handle usage stats failed: {error}");
                     }
                 });
                 Ok(())

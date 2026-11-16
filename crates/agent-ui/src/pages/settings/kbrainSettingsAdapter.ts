@@ -1,10 +1,14 @@
 import type { KBrainHealth } from "@liveagent/ui/lib/kbrain/health";
+import type { KBrainWebSearchSettings } from "@liveagent/ui/lib/providers/webSearchFallback";
+import type { UsageStatsAnswer, UsageStatsQuery } from "@liveagent/ui/lib/usage/usageStats";
 export type KBrainSettingsProvider = {
   id: string;
   name: string;
   api: string;
   baseUrl: string;
   apiKeyConfigured: boolean;
+  /** Read-only (capability web_search_fallback): the provider's API searches natively. */
+  nativeWebSearchSupported?: boolean;
   activeModels: string[];
   models: KBrainSettingsModel[];
 };
@@ -44,6 +48,12 @@ export type KBrainSettingsDocument = {
   computer?: KBrainComputerConfig;
   memory?: KBrainMemoryConfig;
   memoryOrganizer?: KBrainMemoryOrganizerConfig;
+  /**
+   * The web search fallback service; absent on backends without
+   * `capabilities.web_search_fallback`. Never carries the API key. Read it with
+   * readWebSearchSettings, which checks the shape.
+   */
+  webSearch?: KBrainWebSearchSettings;
   mode: "kbrain";
   defaultModel: string;
   defaultProvider: string;
@@ -121,6 +131,12 @@ export type KBrainSettingsAdapter = {
   listPermissionRules?: (query: { workspace?: string }) => Promise<PermissionRuleList>;
   addPermissionRule?: (input: PermissionRuleInput) => Promise<PermissionRule>;
   deletePermissionRule?: (ref: PermissionRuleRef) => Promise<void>;
+  /**
+   * Read-only cross-session token usage (`GET /v1/usage/stats`). Answers
+   * `{ available: false }` when K-brain lacks `capabilities.usage_stats`. Hosts that
+   * cannot reach it leave this out and Settings hides the page.
+   */
+  getUsageStats?: (query: UsageStatsQuery) => Promise<UsageStatsAnswer>;
 };
 
 export type SettingsHostAdapter = {

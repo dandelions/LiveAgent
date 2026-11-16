@@ -43,6 +43,8 @@ export type KBrainSettingsDocument = {
   defaultProvider?: string;
   providers: KBrainSettingsProvider[];
   models?: KBrainSettingsModel[];
+  /** Web search fallback service (capability web_search_fallback); never carries the key. */
+  webSearch?: unknown;
 };
 
 export type KBrainProviderUpdate = Omit<CustomProvider, "apiKey"> & {
@@ -81,6 +83,8 @@ export type KBrainMessage = {
   created_at?: string;
   /** "background" on a user-role notice K-brain delivered on its own (a wait result, a process exit). */
   origin?: string;
+  /** Persisted user authorship, exposed by newer backends for history display. */
+  authored?: boolean;
 };
 
 /** 调用如何运行（仅展示用，均可缺省）：命令类工具的退出码、是否超时，工具自身耗时。 */

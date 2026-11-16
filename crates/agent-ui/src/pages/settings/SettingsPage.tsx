@@ -7,9 +7,11 @@ import {
   Brain,
   Cable,
   CalendarDays,
+  ChartColumn,
   Clock3,
   Cloud,
   Cpu,
+  Globe,
   Key,
   Mic,
   Settings2,
@@ -34,6 +36,8 @@ import { SshSection } from "./SshSection";
 import { SttSection } from "./SttSection";
 import { SystemSettingsForm } from "./SystemSettingsForm";
 import { SystemToolsSection } from "./SystemToolsSection";
+import { UsageStatsSection } from "./UsageStatsSection";
+import { WebSearchSection } from "./WebSearchSection";
 
 const EMPTY_SERVICES = {};
 const STT_SELECTED_PROVIDER_CACHE = new WeakMap<
@@ -122,6 +126,24 @@ export function SettingsPage(props: SettingsPageProps) {
         icon: <BookOpen className={extension.iconClassName} />,
         render: () => <AgentsSection settings={settings} setSettings={setSettings} />,
       },
+      // Only hosts that can reach K-brain's usage API get the page.
+      ...(props.settingsHost?.kbrain?.getUsageStats
+        ? [
+            {
+              id: "usage",
+              groupKey: "settings.groupGeneral",
+              groupOrder: 10,
+              order: 40,
+              labelKey: "settings.navUsage",
+              icon: <ChartColumn className={extension.iconClassName} />,
+              showSaveIndicator: false,
+              render: () =>
+                props.settingsHost?.kbrain ? (
+                  <UsageStatsSection kbrain={props.settingsHost.kbrain} />
+                ) : null,
+            } satisfies SettingsSectionDefinition<void>,
+          ]
+        : []),
       ...(["skills", "mcp"] as const).map((id, index) => ({
         id,
         groupKey: "settings.groupResources",
@@ -179,6 +201,23 @@ export function SettingsPage(props: SettingsPageProps) {
           </div>
         ),
       },
+      // The search service K-brain falls back to when a model API cannot search natively.
+      ...(props.settingsHost?.kbrain
+        ? [
+            {
+              id: "webSearch",
+              groupKey: "settings.groupIntelligence",
+              groupOrder: 25,
+              order: 22,
+              labelKey: "settings.navWebSearch",
+              icon: <Globe className={extension.iconClassName} />,
+              render: () =>
+                props.settingsHost?.kbrain ? (
+                  <WebSearchSection kbrain={props.settingsHost.kbrain} />
+                ) : null,
+            } satisfies SettingsSectionDefinition<void>,
+          ]
+        : []),
       // Only hosts that can reach the K-brain rules API get the page.
       ...(props.settingsHost?.kbrain?.listPermissionRules
         ? [
