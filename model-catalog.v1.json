@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "snapshotDate": "2026-11-17",
-  "generatedAt": "2026-11-17T21:20:24.718Z",
+  "snapshotDate": "2026-11-19",
+  "generatedAt": "2026-11-19T07:55:35.672Z",
   "generator": {
-    "commit": "02224e57ab329a7398e85f593995938746173b1d",
+    "commit": "7f5e3f61035923fcf4cb1ac57f6f24d50f5c0bc3",
     "sources": [
       "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json",
       "https://models.dev/api.json"
@@ -806,6 +806,27 @@
       },
       {
         "id": "gemini-4-hydrogen",
+        "contextWindow": 1048576,
+        "maxOutputToken": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video",
+          "pdf"
+        ],
+        "thinking": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "off": false
+        }
+      },
+      {
+        "id": "gemini-4-neon",
         "contextWindow": 1048576,
         "maxOutputToken": 65536,
         "inputModalities": [
@@ -3612,5 +3633,5 @@
     "alibaba": 40,
     "tencent": 4
   },
-  "sha256": "67275c8f7f0112929bde94be7b394353ab88479051ae73c3bf2193f56f61f208"
+  "sha256": "ba776532fae56070f5f9c6a623aa8482fd414d74f5432a6e18a39eb96b164b1e"
 }
