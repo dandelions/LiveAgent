@@ -69,10 +69,15 @@ export function KBrainBackendRow({ loadHealth }: { loadHealth: () => Promise<KBr
 
   return (
     <SettingsRow
+      data-settings-anchor="about-kbrain"
       title={t("settings.aboutKbrain")}
       description={t("settings.aboutKbrainDesc")}
       control={
-        <div className="max-w-full text-right sm:max-w-sm">
+        <div
+          className="max-w-full text-right sm:max-w-sm"
+          data-testid="kbrain-backend-status"
+          data-state={state.status}
+        >
           <div
             className={`break-words text-sm font-medium ${
               state.status === "error" ? "text-destructive" : "text-foreground"

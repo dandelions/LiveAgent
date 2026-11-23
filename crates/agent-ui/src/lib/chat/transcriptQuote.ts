@@ -21,40 +21,30 @@ export const TRANSCRIPT_QUOTE_EXCLUDED_SELECTOR = [
   ".xterm",
   "[data-quote-exclude]",
   "[data-transcript-quote-button]",
+  "[data-transcript-selection-actions]",
+  "[data-composer-comment-editor]",
 ].join(",");
 
-/** Upper bound on quoted text; longer selections are truncated with an ellipsis. */
-export const TRANSCRIPT_QUOTE_MAX_CHARS = 8000;
+/** Code blocks inside a quote source: selections wholly inside one are
+ *  commented on as code (fenced, indentation kept) rather than prose. */
+const TRANSCRIPT_CODE_BLOCK_SELECTOR = "pre, [data-streamdown='code-block']";
 
 export type TranscriptQuoteSource = "user" | "assistant";
 
 export type TranscriptQuoteSelection = {
   text: string;
   source: TranscriptQuoteSource;
+  /** Set when the selection lies inside a single code block. */
+  code?: { language?: string };
   rect: { left: number; top: number; right: number; bottom: number; width: number; height: number };
 };
 
-/** Normalize selected text: unify line endings, drop trailing spaces per
- *  line, trim surrounding blank lines and collapse runs of blank lines. */
+/** Normalize line endings and ignore blank lines around the selection. */
 export function normalizeQuoteText(raw: string) {
-  const lines = raw
-    .replace(/\r\n?/g, "\n")
-    .replace(/ /g, " ")
-    .split("\n")
-    .map((line) => line.replace(/\s+$/u, ""));
+  const lines = raw.replace(/\r\n?/g, "\n").replace(/ /g, " ").split("\n");
   while (lines.length > 0 && !lines[0]?.trim()) lines.shift();
   while (lines.length > 0 && !lines[lines.length - 1]?.trim()) lines.pop();
-  const collapsed: string[] = [];
-  for (const line of lines) {
-    if (!line.trim() && !collapsed[collapsed.length - 1]?.trim()) continue;
-    collapsed.push(line);
-  }
-  let text = collapsed.join("\n");
-  const chars = [...text];
-  if (chars.length > TRANSCRIPT_QUOTE_MAX_CHARS) {
-    text = `${chars.slice(0, TRANSCRIPT_QUOTE_MAX_CHARS).join("").replace(/\s+$/u, "")}…`;
-  }
-  return text;
+  return lines.join("\n");
 }
 
 /** Format text as a Markdown blockquote ("> " per line, bare ">" for blanks). */
@@ -69,7 +59,7 @@ export function formatMarkdownBlockquote(raw: string) {
 
 /** Text to append to a composer whose current serialized content is
  *  `existing`: the blockquote, separated from prior content by a blank line,
- *  followed by a blank line so the caret lands where the reply goes. */
+ *  followed by a blank line to separate any following instruction. */
 export function buildComposerQuoteInsertion(existing: string, raw: string) {
   const quote = formatMarkdownBlockquote(raw);
   if (!quote) return "";
@@ -114,12 +104,14 @@ export function resolveTranscriptQuoteSelection(
   const source: TranscriptQuoteSource = sourceValue === "user" ? "user" : "assistant";
   const text = normalizeQuoteText(selection.toString());
   if (!text) return null;
+  const code = resolveSelectionCodeBlock(startElement, endElement, startSource);
   // Layout-less DOMs (tests, detached nodes) have no Range geometry.
   const box =
     typeof range.getBoundingClientRect === "function" ? range.getBoundingClientRect() : null;
   return {
     text,
     source,
+    ...(code ? { code } : {}),
     rect: {
       left: box?.left ?? 0,
       top: box?.top ?? 0,
@@ -129,6 +121,36 @@ export function resolveTranscriptQuoteSelection(
       height: box?.height ?? 0,
     },
   };
+}
+
+function codeBlockLanguage(block: Element, source: Element) {
+  const codeElement = block.matches("code") ? block : block.querySelector("code");
+  // Rendered markdown puts the language on a wrapper (data-language) and on
+  // the <pre> class; plain markup puts it on <code class="language-x">.
+  const wrapper = block.closest("[data-language]");
+  const explicit =
+    block.getAttribute("data-language") ??
+    codeElement?.getAttribute("data-language") ??
+    (wrapper && source.contains(wrapper) ? wrapper.getAttribute("data-language") : null) ??
+    "";
+  if (explicit.trim()) return explicit.trim();
+  for (const element of [codeElement, block]) {
+    const match = element?.className.match(/(?:^|\s)language-([^\s]+)/);
+    if (match?.[1]) return match[1];
+  }
+  return "";
+}
+
+function resolveSelectionCodeBlock(
+  startElement: Element,
+  endElement: Element,
+  source: Element,
+): { language?: string } | null {
+  const block = startElement.closest(TRANSCRIPT_CODE_BLOCK_SELECTOR);
+  if (!block || block !== endElement.closest(TRANSCRIPT_CODE_BLOCK_SELECTOR)) return null;
+  if (!source.contains(block)) return null;
+  const language = codeBlockLanguage(block, source);
+  return language ? { language } : {};
 }
 
 /** Fixed-position placement for the floating quote button: centered above

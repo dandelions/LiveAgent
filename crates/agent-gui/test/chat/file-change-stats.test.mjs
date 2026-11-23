@@ -174,7 +174,7 @@ test("FileChangeBadge renders green added and red removed counts", () => {
 
   const addedOnly = badge.FileChangeBadge({ added: 2 });
   const [addedSpan, removedSpan] = childrenOf(addedOnly);
-  assert.ok(addedSpan.props.className.includes("--chat-success"));
+  assert.ok(addedSpan.props.className.includes("text-success"));
   assert.equal(removedSpan, null);
   const [addedSign, addedNumber] = childrenOf(addedSpan);
   assert.equal(addedSign, "+");
@@ -183,9 +183,53 @@ test("FileChangeBadge renders green added and red removed counts", () => {
 
   const both = badge.FileChangeBadge({ added: 2, removed: 1 });
   const [green, red] = childrenOf(both);
-  assert.ok(green.props.className.includes("--chat-success"));
-  assert.ok(red.props.className.includes("--chat-error"));
+  assert.ok(green.props.className.includes("text-success"));
+  assert.ok(red.props.className.includes("text-destructive"));
   const [removedSign, removedNumber] = childrenOf(red);
   assert.equal(removedSign, "-");
   assert.equal(removedNumber.props.value, 1);
+});
+
+test("deriveFileChangeStats matches the diff viewer's line counts", async () => {
+  // The stats no longer load the viewer engine (it drags in the syntax
+  // highlighter), so pin them to the counts that engine shows.
+  const { generateDiffFile } = await import(
+    new URL("../../../agent-ui/node_modules/@git-diff-view/file/dist/esm/index.mjs", import.meta.url)
+  );
+  let seed = 7;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed / 2147483648;
+  };
+  const pick = () => ["a", "b", "c", "", "  d", "é😀"][Math.floor(random() * 6)];
+  const cases = [
+    ["a\nb", "a\nb\nc"],
+    ["a\nb\n", "a\nb\nc\n"],
+    ["a\nb\nc", "a\nc"],
+    ["", "x\n"],
+    ["x\n", ""],
+    ["one", "two"],
+    ["\n\n\n", "\n"],
+  ];
+  for (let index = 0; index < 200; index += 1) {
+    const lines = Array.from({ length: 1 + Math.floor(random() * 30) }, pick);
+    const next = lines.flatMap((line) => {
+      const roll = random();
+      if (roll < 0.15) return [];
+      if (roll < 0.3) return [line, pick()];
+      if (roll < 0.4) return [pick()];
+      return [line];
+    });
+    cases.push([lines.join("\n") + (random() < 0.5 ? "\n" : ""), next.join("\n")]);
+  }
+  for (const [oldText, newText] of cases) {
+    if (!oldText && !newText) continue;
+    const file = generateDiffFile("old", oldText, "new", newText, "txt", "txt");
+    file.initRaw();
+    assert.deepEqual(
+      fileChangeStats.deriveFileChangeStats(editCall({ old_string: oldText, new_string: newText })),
+      { added: file.additionLength, removed: file.deletionLength },
+      JSON.stringify([oldText, newText]),
+    );
+  }
 });

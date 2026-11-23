@@ -3,6 +3,7 @@ import { invoke } from "@liveagent/app/shims/tauriCore";
 import { listen } from "@liveagent/app/shims/tauriEvent";
 import { AppErrorBoundary } from "@liveagent/ui/components/AppErrorBoundary";
 import { ProcessDisclosureProvider } from "@liveagent/ui/components/chat/processDisclosure";
+import { DiagnosticsExportHost } from "@liveagent/ui/components/diagnostics/DiagnosticsExportHost";
 import { Pin } from "@liveagent/ui/components/IconSet";
 import { useConfirmDialog } from "@liveagent/ui/components/ui/confirm-dialog";
 import { Toaster } from "@liveagent/ui/components/ui/toaster";
@@ -16,6 +17,7 @@ import {
 } from "@liveagent/ui/lib/models/catalogLive";
 import { loadThinkingLiveSupplement } from "@liveagent/ui/lib/models/thinkingLive";
 import { useCatalogLiveVersion } from "@liveagent/ui/lib/models/useThinkingLive";
+import { subscribeOnboardingRequests } from "@liveagent/ui/lib/onboarding/onboardingState";
 import {
   configureResourceHostCapabilities,
   kbrainResourceHostCapabilities,
@@ -448,9 +450,14 @@ export default function App() {
     async function hydrateSettings() {
       // 在发起加载前取版本：加载途中到达的新目录不会被误记为已处理。
       catalogVersionAtSettingsLoadRef.current = getCatalogLiveVersion();
+      // The chat page is its own chunk. Leaving the boot screen before it arrived would put the
+      // chat surface into its Suspense fallback, and React then holds a shown fallback for at
+      // least 300 ms even when the chunk lands right after. A failed load still surfaces through
+      // the lazy component and its error boundary.
+      let chatPageLoaded: Promise<unknown> = Promise.resolve();
       try {
         const persistedSettingsPromise = loadPersistedSettingsWithDefaults();
-        void loadChatPage();
+        chatPageLoaded = loadChatPage().catch(() => undefined);
         const { settings: loaded, defaultWorkdir } = await persistedSettingsPromise;
         loaded.skills = (await kbrainSkillsAdapter.list()).settings;
         void syncWorkspaceSkillsOverridesOnce(loaded).catch((error) => {
@@ -483,6 +490,7 @@ export default function App() {
           });
         }
       } finally {
+        await chatPageLoaded;
         if (!cancelled) {
           setSettingsReady(true);
         }
@@ -778,6 +786,14 @@ export default function App() {
   closeSettingsRef.current = closeSettings;
   const settingsOpenRef = useRef(settingsOpen);
   settingsOpenRef.current = settingsOpen;
+  // "Getting started" from Settings > About: the guide opens over the chat.
+  useEffect(
+    () =>
+      subscribeOnboardingRequests(() => {
+        if (settingsOpenRef.current) closeSettingsRef.current();
+      }),
+    [],
+  );
   const openSettingsRef = useRef(openSettings);
   openSettingsRef.current = openSettings;
   const setThemeRef = useRef(setTheme);
@@ -1005,6 +1021,7 @@ export default function App() {
           >
             <ProcessDisclosureProvider
               expandByDefault={settings.customSettings.chatTranscript.expandProcessByDefault}
+              detailedProgress={settings.customSettings.chatTranscript.showDetailedProgress}
             >
               <ChatPage
                 settings={settings}
@@ -1089,6 +1106,7 @@ export default function App() {
           </button>
         )}
         <ReleaseAnnouncementDialog controller={releaseAnnouncement} />
+        <DiagnosticsExportHost settings={settings} />
         {restartConfirmDialog}
       </AppChrome>
     </LocaleContext.Provider>

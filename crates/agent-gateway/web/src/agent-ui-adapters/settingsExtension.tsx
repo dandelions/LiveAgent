@@ -1,4 +1,5 @@
-import { Keyboard, MonitorSmartphone } from "@liveagent/ui/components/IconSet";
+import { CircleHelp, Keyboard, MonitorSmartphone } from "@liveagent/ui/components/IconSet";
+import { SettingsCard, SettingsSection } from "@liveagent/ui/components/settings/SettingsLayout";
 import type { SettingsSectionDefinition, UiExtensionSlots } from "@liveagent/ui/contracts/registry";
 import {
   type KBrainWebSearchSettings,
@@ -10,8 +11,9 @@ import {
   configureResourceHostCapabilities,
   kbrainResourceHostCapabilities,
 } from "@liveagent/ui/lib/resourceHost";
+import type { SettingsSearchExtension } from "@liveagent/ui/lib/settings/settingsSearchIndex";
 import type { GatewaySettingsSyncUpdatePayload } from "@liveagent/ui/lib/settings/sync";
-import type { ShortcutCommandId } from "@liveagent/ui/lib/shortcuts/shortcutCommands";
+import { DiagnosticsExportRow } from "@liveagent/ui/pages/settings/HelpSettingsRows";
 import type {
   KBrainMemoryConfig,
   KBrainMemoryOrganizerConfig,
@@ -25,19 +27,19 @@ import { loadToken } from "../lib/storage";
 import { DevicesSection } from "../pages/settings/DevicesSection";
 import type { SettingsPageProps } from "../pages/settings/types";
 import { gatewaySkillsAdapter } from "./kbrainSkills";
-
-// The WebUI transcript has no find bar; the browser keeps its own Cmd/Ctrl+F.
-const WEB_UNSUPPORTED_SHORTCUT_COMMANDS: readonly ShortcutCommandId[] = ["findInConversation"];
+import { WEB_UNSUPPORTED_SHORTCUT_COMMANDS, webSettingsSearch } from "./settingsSearch";
 
 export function createSettingsExtension(props: SettingsPageProps): {
   surface: "web";
   iconClassName: string;
   slots: UiExtensionSlots;
   sections: SettingsSectionDefinition<void>[];
+  search: SettingsSearchExtension;
 } {
   return {
     surface: "web",
     iconClassName: "size-4",
+    search: webSettingsSearch,
     slots: {},
     sections: [
       {
@@ -61,6 +63,22 @@ export function createSettingsExtension(props: SettingsPageProps): {
         icon: <MonitorSmartphone className="size-4" />,
         showSaveIndicator: false,
         render: () => <DevicesSection onDirectoryChanged={props.onAgentDirectoryChanged} />,
+      },
+      {
+        id: "help",
+        groupKey: "settings.groupConnectivity",
+        groupOrder: 40,
+        order: 90,
+        labelKey: "settings.aboutHelp",
+        icon: <CircleHelp className="size-4" />,
+        showSaveIndicator: false,
+        render: () => (
+          <SettingsSection>
+            <SettingsCard>
+              <DiagnosticsExportRow data-settings-anchor="web-diagnostics" />
+            </SettingsCard>
+          </SettingsSection>
+        ),
       },
     ],
   };

@@ -427,6 +427,9 @@ export const EN_US_SETTINGS_TRANSLATIONS = {
   "settings.runNotifications": "Background conversation notifications",
   "settings.runNotificationsDesc":
     "When LiveAgent is in the background, send a system notification (click to open the conversation) and show a Dock badge when a conversation finishes or needs your approval or answer. Replies that finish in other conversations get an unread dot in the sidebar. Saved on this device only.",
+  "settings.runCompletionSound": "Sound when a conversation finishes",
+  "settings.runCompletionSoundDesc":
+    "Play a short chime when a run finishes while LiveAgent is in the background. Works with or without system notifications. Saved on this device only.",
   "settings.notificationTest": "Test system notification",
   "settings.notificationTestHint":
     "Request permission and send a test notification. Enable banners in macOS System Settings; Focus may hide banners.",
@@ -437,6 +440,9 @@ export const EN_US_SETTINGS_TRANSLATIONS = {
   "settings.expandProcessByDefault": "Expand agent activity by default",
   "settings.expandProcessByDefaultDesc":
     'Show the work trace, thinking, and tool calls (such as "Ran commands") expanded in conversations, and keep them open after the turn finishes. Saved on this device only.',
+  "settings.showDetailedProgress": "Show detailed progress",
+  "settings.showDetailedProgressDesc":
+    "While a reply is running, name every backend stage with its timings and open reasoning and tool output as they stream. When off, a single status line is shown and the details stay one click away.",
   "settings.defaultTimeZoneAuto": "Automatic (system: {zone})",
   "settings.timeZoneSearch": "Search time zones or cities",
   "settings.timeZoneEmpty": "No matching time zones",
@@ -1733,6 +1739,15 @@ export const EN_US_SETTINGS_TRANSLATIONS = {
   "shortcuts.command.searchConversations": "Search conversations",
   "shortcuts.command.previousConversation": "Previous conversation",
   "shortcuts.command.nextConversation": "Next conversation",
+  "shortcuts.command.navigateBack": "Go back",
+  "shortcuts.command.navigateForward": "Go forward",
+  "shortcuts.command.toggleTerminal": "Toggle terminal",
+  "shortcuts.command.closeActiveContext": "Close current view",
+  "shortcuts.command.cycleTheme": "Switch theme (system, light, dark)",
+  "shortcuts.command.cycleThinkingLevel": "Cycle thinking level",
+  "shortcuts.command.zoomIn": "Zoom in",
+  "shortcuts.command.zoomOut": "Zoom out",
+  "shortcuts.command.zoomReset": "Reset zoom",
   "shortcuts.command.findInConversation": "Find in conversation",
   "shortcuts.command.focusComposer": "Focus message input",
   "shortcuts.command.openModelPicker": "Open model picker",

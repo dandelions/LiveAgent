@@ -358,3 +358,129 @@ test("find bar counts, navigates off-screen rows, highlights and closes", async 
     env.cleanup();
   }
 });
+
+test("find keeps literal HTML and Markdown inside fenced and inline code", async () => {
+  const env = await createEnv();
+  try {
+    const model = env.loadModule("@liveagent/ui/lib/transcript-find/transcriptFind.ts");
+    const source = [
+      "~~~html",
+      "<section>**literal**</section>",
+      "~~~",
+      "",
+      "Use `<section>`.",
+    ].join("\n");
+    const entries = [{ rowKey: "a", text: model.stripMarkdownForFind(source) }];
+    assert.equal(model.buildTranscriptFindMatches(entries, "section").length, 3);
+    assert.equal(model.buildTranscriptFindMatches(entries, "**literal**").length, 1);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test("find counts and highlights the original dotted-I word at the right offsets", async () => {
+  const env = await createEnv();
+  try {
+    const model = env.loadModule("@liveagent/ui/lib/transcript-find/transcriptFind.ts");
+    const dom = env.loadModule("@liveagent/ui/lib/transcript-find/transcriptFindDom.ts");
+    const el = document.createElement("p");
+    el.textContent = "See İstanbul now";
+    assert.equal(
+      model.buildTranscriptFindMatches([{ rowKey: "u", text: el.textContent }], "İstanbul").length,
+      1,
+    );
+    assert.deepEqual(
+      dom.findTextRangesInElement(el, "İstanbul").map((r) => r.toString()),
+      ["İstanbul"],
+    );
+    assert.deepEqual(
+      dom.findTextRangesInElement(el, "now").map((r) => r.toString()),
+      ["now"],
+    );
+  } finally {
+    env.cleanup();
+  }
+});
+
+test("find text stays the same when stripped results are reused or evicted", async () => {
+  const env = await createEnv();
+  try {
+    const { stripMarkdownForFind: strip } = env.loadModule(
+      "@liveagent/ui/lib/transcript-find/transcriptFind.ts",
+    );
+    assert.equal(strip("**bold** and `code`"), "bold and code");
+    assert.equal(strip("**bold** and `code`"), "bold and code");
+    // More distinct texts than the cache keeps, then the first one again.
+    for (let i = 0; i < 5000; i += 1) assert.equal(strip(`item **${i}**`), `item ${i}`);
+    assert.equal(strip("item **0**"), "item 0");
+    // A text too large to keep is still stripped.
+    const large = `**big** ${"x".repeat(3 * 1024 * 1024)}`;
+    assert.equal(strip(large).slice(0, 5), "big x");
+    assert.equal(strip(large).length, large.length - 4);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test("find counts follow edits while finished rows reuse their stripped and folded text", async () => {
+  const env = await createEnv();
+  try {
+    const model = env.loadModule("@liveagent/ui/lib/transcript-find/transcriptFind.ts");
+    const { buildTranscriptFindEntries } = env.loadModule(
+      "src/pages/chat/transcript/transcriptFindEntries.ts",
+    );
+    const textRow = (key, text) => ({
+      kind: "assistant-unit",
+      key,
+      unit: { kind: "block", block: { kind: "text", key, text } },
+    });
+    const count = (entries, query) => model.buildTranscriptFindMatches(entries, query);
+
+    // A long history (well past any text-keyed cache) plus a streaming row.
+    const history = Array.from({ length: 3000 }, (_, index) =>
+      textRow(`h${index}`, `**Reply ${index}** mentions cache ${"filler ".repeat(300)}`),
+    );
+    const live = (text) => textRow("live", text);
+
+    let entries = buildTranscriptFindEntries([...history, live("No match yet")]);
+    assert.equal(count(entries, "cache").length, 3000);
+    const historyEntry = entries[0];
+
+    // Streamed deltas: the finished rows publish the same entry objects.
+    entries = buildTranscriptFindEntries([...history, live("The **cache** grows")]);
+    assert.equal(entries[0], historyEntry, "an unchanged row keeps its entry");
+    assert.equal(entries.at(-1).text, "The cache grows");
+    assert.equal(count(entries, "cache").length, 3001);
+    entries = buildTranscriptFindEntries([...history, live("The cache grows, cache again")]);
+    assert.equal(count(entries, "CACHE").length, 3002);
+    assert.deepEqual(
+      count(entries, "cache").filter((match) => match.rowKey === "live"),
+      [
+        { rowKey: "live", occurrence: 0 },
+        { rowKey: "live", occurrence: 1 },
+      ],
+    );
+
+    // An edited message (a new row with new text under the same key) is
+    // stripped and counted again; the old text no longer matches.
+    const edited = [...history];
+    edited[5] = textRow("h5", "rewritten without the word");
+    entries = buildTranscriptFindEntries(edited);
+    assert.equal(count(entries, "cache").length, 2999);
+    assert.equal(count(entries, "rewritten").length, 1);
+    assert.deepEqual(count(entries, "reply 5 mentions"), []);
+
+    // The same block object with changed text never serves a stale result.
+    const block = { kind: "text", key: "x", text: "alpha" };
+    assert.equal(model.stripMarkdownForFindOf(block, "**alpha**"), "alpha");
+    assert.equal(model.stripMarkdownForFindOf(block, "**beta**"), "beta");
+    // An entry object whose text changed is folded again.
+    const entry = { rowKey: "e", text: "One" };
+    assert.equal(model.buildTranscriptFindMatches([entry], "one").length, 1);
+    entry.text = "Two";
+    assert.equal(model.buildTranscriptFindMatches([entry], "one").length, 0);
+    assert.equal(model.buildTranscriptFindMatches([entry], "two").length, 1);
+  } finally {
+    env.cleanup();
+  }
+});

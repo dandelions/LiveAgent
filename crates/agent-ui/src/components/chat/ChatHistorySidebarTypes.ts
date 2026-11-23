@@ -5,7 +5,10 @@ import type {
   SidebarBatchDeleteResult,
 } from "@liveagent/ui/lib/sidebar/batchDelete";
 import type { ReactNode } from "react";
-import type { CommandPaletteActionsProvider } from "../../lib/chat/commandPalette";
+import type {
+  CommandPaletteActionsProvider,
+  CommandPaletteFileSourceProvider,
+} from "../../lib/chat/commandPalette";
 import type { SidebarShortcutId, SidebarShortcuts } from "../../lib/settings/sidebarShortcuts";
 import type { ConversationOpenOptions } from "../../lib/sidebar/openController";
 import type { SidebarStoreArchive, WorkspaceHistoryState } from "../../lib/sidebar/store";
@@ -74,6 +77,8 @@ export type ChatHistorySidebarProps = {
    * sidebar installs the shortcut and opens the search dialog in palette mode.
    */
   getCommandPaletteActions?: CommandPaletteActionsProvider;
+  /** Workspace the palette's `@` file scope searches; null without an open project. */
+  getCommandPaletteFiles?: CommandPaletteFileSourceProvider;
   activeView?: ApplicationViewId;
   showProjects?: boolean;
   // Pre-sorted by the container (pinned/running/activity); rendered as-is.
@@ -105,6 +110,8 @@ export type ChatHistorySidebarProps = {
   onBrowseProjectInFileTree?: (project: WorkspaceProject) => void;
   onConfigureProject?: (project: WorkspaceProject) => void;
   onBrowseProjectInSystemFileManager?: (project: WorkspaceProject) => void;
+  /** Desktop only: opens the workspace root in a detected code editor. */
+  onOpenProjectInEditor?: (project: WorkspaceProject, editorId: string) => void;
   onSetProjectPinned?: (project: WorkspaceProject, isPinned: boolean) => void;
   onRemoveProject?: (project: WorkspaceProject, options?: WorkspaceProjectRemoveOptions) => void;
   onArchiveProject?: (project: WorkspaceProject) => void;
@@ -195,6 +202,7 @@ export type ChatHistorySidebarWorkspaceSource = Pick<
   | "onNewConversationForProject"
   | "onBrowseProjectInFileTree"
   | "onBrowseProjectInSystemFileManager"
+  | "onOpenProjectInEditor"
   | "onConfigureProject"
   | "onSetProjectPinned"
   | "onRemoveProject"
@@ -217,6 +225,7 @@ type OptionalWorkspaceSourceKey =
   | "onMoveProjectToGroup"
   | "onToggleWorkspaceGroupCollapsed"
   | "onBrowseProjectInSystemFileManager"
+  | "onOpenProjectInEditor"
   | "archivedProjectPathKeys";
 
 export type ChatHistorySidebarContainerSource = Required<
@@ -233,6 +242,7 @@ export type ChatHistorySidebarContainerSource = Required<
     | "fontScale"
     | "conversationSearchRequestKey"
     | "getCommandPaletteActions"
+    | "getCommandPaletteFiles"
     | "onNewConversation"
     | "onSelectConversation"
     | "canShareConversations"
@@ -304,6 +314,7 @@ export function buildChatHistorySidebarBaseProps(
     | "fontScale"
     | "conversationSearchRequestKey"
     | "getCommandPaletteActions"
+    | "getCommandPaletteFiles"
     | "activeView"
   >,
   state: ChatHistorySidebarBaseState,
@@ -328,6 +339,7 @@ export function buildChatHistorySidebarBaseProps(
     fontScale: source.fontScale,
     conversationSearchRequestKey: source.conversationSearchRequestKey,
     getCommandPaletteActions: source.getCommandPaletteActions,
+    getCommandPaletteFiles: source.getCommandPaletteFiles,
     activeView: source.activeView,
   };
 }
@@ -382,6 +394,7 @@ export function buildChatHistorySidebarWorkspaceProps(
     onNewConversationForProject: source.onNewConversationForProject,
     onBrowseProjectInFileTree: source.onBrowseProjectInFileTree,
     onBrowseProjectInSystemFileManager: source.onBrowseProjectInSystemFileManager,
+    onOpenProjectInEditor: source.onOpenProjectInEditor,
     onConfigureProject: source.onConfigureProject,
     onSetProjectPinned: source.onSetProjectPinned,
     onRemoveProject: source.onRemoveProject,

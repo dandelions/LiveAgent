@@ -17,6 +17,8 @@ pub mod workspace_commands;
 
 pub use app_commands::app;
 pub use app_commands::data_dir;
+pub use app_commands::diagnostics;
+pub use app_commands::editors;
 pub use app_commands::fonts;
 pub use app_commands::notifications;
 pub use app_commands::proxy_detect;

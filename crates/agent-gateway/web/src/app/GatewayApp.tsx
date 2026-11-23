@@ -21,6 +21,10 @@ import {
 } from "@liveagent/ui/lib/chat/searchJumpTarget";
 import { buildToolApprovalRequestJson } from "@liveagent/ui/lib/chat/toolApprovalArgs";
 import { useMentionApps } from "@liveagent/ui/lib/chat/useMentionApps";
+import {
+  type ActiveFloorStore,
+  createActiveFloorStore,
+} from "@liveagent/ui/lib/chat-floor-nav/activeFloorStore";
 import { useScrollFollow } from "@liveagent/ui/lib/chat-scroll/useScrollFollow";
 import {
   CATALOG_LIVE_DEFAULT_URL,
@@ -317,7 +321,7 @@ function useGatewayAppController() {
   // 楼层导航：当前楼层由转写区上报，跳转经 navRef 直达虚拟列表；粘底跟随
   // 激活时程序化滚动会被立即拽回底部——跳转前先按「跳入历史」语义解除跟随。
   const transcriptNavRef = useRef<GatewayTranscriptNavHandle | null>(null);
-  const [activeFloorKey, setActiveFloorKey] = useState<string | null>(null);
+  const [activeFloorStore] = useState(createActiveFloorStore);
   const handleFloorJump = useCallback(
     (rowKey: string) => {
       transcriptFollow.breakFollow();
@@ -626,7 +630,7 @@ function useGatewayAppController() {
   const resolveActiveAgentID = useCallback(async () => {
     const currentApi = apiRef.current;
     if (!currentApi) {
-      throw new Error("Gateway 尚未连接。");
+      throw new Error(translate("gatewayWeb.gatewayNotConnected", localeRef.current));
     }
     let agentID = currentApi.getActiveAgent().trim();
     if (!agentID) {
@@ -634,7 +638,7 @@ function useGatewayAppController() {
       agentID = currentApi.getActiveAgent().trim();
     }
     if (!agentID) {
-      throw new Error("没有可用的 Agent。");
+      throw new Error(translate("gatewayWeb.noAgent", localeRef.current));
     }
     return agentID;
   }, []);
@@ -694,6 +698,7 @@ function useGatewayAppController() {
     handleFileDragOver: handlePendingFileDragOver,
     handleFileDragLeave,
     handleFileDrop: handlePendingFileDrop,
+    replacePendingUpload,
   } = usePendingUploads({
     token,
     resolveAgentID: resolveActiveAgentID,
@@ -2301,7 +2306,7 @@ function useGatewayAppController() {
   const viewModel = {
     imageStudioToken: token,
     registerSettingsLeaveGuard,
-    activeFloorKey,
+    activeFloorStore,
     activeSelectedModel,
     activeView,
     activeWorkspaceProject,
@@ -2491,7 +2496,6 @@ function useGatewayAppController() {
     selectedValue,
     selectionForConversation,
     sendChat,
-    setActiveFloorKey,
     setCachedComposerDraft,
     setPendingUploadsForConversation,
     setProjectPickerOpen,
@@ -2557,6 +2561,7 @@ function useGatewayAppController() {
     tunnelDisabledMessage,
     tunnelEnabled,
     updatePendingUploadsForConversation,
+    replacePendingUpload,
     verifyTerminalSessionAlive,
     userAvatarLabel,
     userMenuLabel,
@@ -2588,7 +2593,7 @@ function useGatewayAppController() {
 
 export type GatewayAppViewModel = Extract<
   ReturnType<typeof useGatewayAppController>,
-  { activeFloorKey: string | null }
+  { activeFloorStore: ActiveFloorStore }
 >;
 
 type GatewayAppProps = { imageStudioIdentity?: TrustedGatewayImageIdentity };
@@ -2602,7 +2607,7 @@ export default function GatewayApp(props: GatewayAppProps) {
 }
 function GatewayAppContent({ imageStudioIdentity }: GatewayAppProps) {
   const result = useGatewayAppController();
-  if (!result || !("activeFloorKey" in result)) {
+  if (!result || !("activeFloorStore" in result)) {
     return result;
   }
   return <GatewayAppView viewModel={result} imageStudioIdentity={imageStudioIdentity} />;

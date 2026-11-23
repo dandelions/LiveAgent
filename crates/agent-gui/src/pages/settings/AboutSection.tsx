@@ -20,6 +20,10 @@ import {
 import { toast } from "@liveagent/ui/components/ui/toast-manager";
 import { useLocale } from "@liveagent/ui/i18n/index";
 import { hostAwareErrorMessage } from "@liveagent/ui/lib/shared/hostErrors";
+import {
+  DiagnosticsExportRow,
+  OnboardingReopenRow,
+} from "@liveagent/ui/pages/settings/HelpSettingsRows";
 import { AgentActivationSwitch } from "@liveagent/ui/pages/settings/shared";
 import { useEffect, useId } from "react";
 import { getKBrainHealth } from "../../agent-ui-adapters/kbrainSettings";
@@ -224,6 +228,7 @@ export function AboutSection(props: AboutSectionProps) {
           <KBrainBackendRow loadHealth={getKBrainHealth} />
 
           <SettingsRow
+            data-settings-anchor="about-update"
             title={t("settings.aboutSoftwareUpdate")}
             description={t("settings.aboutSoftwareUpdateDesc")}
             control={
@@ -339,6 +344,7 @@ export function AboutSection(props: AboutSectionProps) {
 
           {import.meta.env.DEV ? (
             <SettingsRow
+              data-settings-anchor="about-debug"
               title={t("settings.aboutDebugMode")}
               description={t("settings.aboutDebugModeDesc")}
               control={
@@ -360,6 +366,7 @@ export function AboutSection(props: AboutSectionProps) {
           ) : null}
 
           <SettingsRow
+            data-settings-anchor="about-prerelease"
             title={t("settings.aboutPrereleaseTitle")}
             description={t("settings.aboutPrereleaseDesc")}
             control={
@@ -376,6 +383,12 @@ export function AboutSection(props: AboutSectionProps) {
               />
             }
           />
+        </SettingsCard>
+      </SettingsSection>
+      <SettingsSection title={t("settings.aboutHelp")}>
+        <SettingsCard>
+          <OnboardingReopenRow data-settings-anchor="about-onboarding" />
+          <DiagnosticsExportRow data-settings-anchor="about-diagnostics" />
         </SettingsCard>
       </SettingsSection>
     </div>

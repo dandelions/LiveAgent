@@ -2,6 +2,7 @@ import { ChangedFilesActionsProvider } from "@liveagent/ui/components/chat/Chang
 import { FileDropOverlay } from "@liveagent/ui/components/chat/FileDropOverlay";
 import type { MentionComposerHandle } from "@liveagent/ui/components/chat/MentionComposer";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import type { ComposerCommentInput } from "@liveagent/ui/lib/chat/composerComments";
 import type { ScrollFollowHandle } from "@liveagent/ui/lib/chat-scroll/useScrollFollow";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { ChatComposerBar } from "@liveagent/ui/pages/chat/ChatComposerBar";
@@ -9,6 +10,7 @@ import {
   type ForwardedRef,
   forwardRef,
   memo,
+  type ReactNode,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -28,6 +30,7 @@ import { KBrainGoalBarHost } from "../composer/KBrainGoalBarHost";
 import type { ConversationPaneHostHandle } from "../conversations/useConversationPaneHostBridge";
 import { useConversationSurfaceSnapshot } from "../conversations/useConversationSurfaceSnapshot";
 import { buildQueuedChatTurnPreview } from "../queue/chatTurnQueue";
+import { KBrainSandboxedUiTranscriptHost } from "../sandboxed/KBrainSandboxedUi";
 import {
   KBrainSubagentPaneHost,
   KBrainSubagentRunningChip,
@@ -36,6 +39,14 @@ import {
 const CheckpointRewindProvider = isKBrainBackendEnabled()
   ? KBrainCheckpointRewindProvider
   : DesktopCheckpointRewindProvider;
+
+// Sandboxed views (MCP Apps, HTML previews) only exist on a K-brain backend.
+function PlainTranscriptHost(props: { children: ReactNode }) {
+  return <>{props.children}</>;
+}
+const SandboxedTranscriptHost = isKBrainBackendEnabled()
+  ? KBrainSandboxedUiTranscriptHost
+  : PlainTranscriptHost;
 
 import { ChatTranscript } from "../transcript/ChatTranscript";
 import {
@@ -205,6 +216,10 @@ const RegisteredConversationPaneHostContent = forwardRef<
   const handleQuoteSelection = useCallback((text: string) => {
     composerRef.current?.insertQuote(text);
   }, []);
+  const handleCommentSelection = useCallback(
+    (comment: ComposerCommentInput) => composerRef.current?.upsertComment(comment) != null,
+    [],
+  );
 
   useImperativeHandle(
     forwardedRef,
@@ -270,18 +285,24 @@ const RegisteredConversationPaneHostContent = forwardRef<
                 disabled={checkpointRewind.disabled}
                 onRewound={checkpointRewind.onRewound}
               >
-                <ChatTranscript
-                  {...transcript}
+                <SandboxedTranscriptHost
                   conversationId={snapshot.conversationId}
-                  followRef={scrollFollowRef}
-                  historyItems={historyItems}
-                  hasMoreHistory={runtime?.state.transcript.hasMoreBefore ?? false}
-                  isSending={isSending}
-                  isCompactionRunning={isCompactionRunning}
-                  bottomReservePx={composerOverlayHeight}
-                  composerCenterOffsetPx={composerCenterOffset}
-                  onQuoteSelection={handleQuoteSelection}
-                />
+                  workdir={transcript.workspaceRoot}
+                >
+                  <ChatTranscript
+                    {...transcript}
+                    conversationId={snapshot.conversationId}
+                    followRef={scrollFollowRef}
+                    historyItems={historyItems}
+                    hasMoreHistory={runtime?.state.transcript.hasMoreBefore ?? false}
+                    isSending={isSending}
+                    isCompactionRunning={isCompactionRunning}
+                    bottomReservePx={composerOverlayHeight}
+                    composerCenterOffsetPx={composerCenterOffset}
+                    onQuoteSelection={handleQuoteSelection}
+                    onCommentSelection={handleCommentSelection}
+                  />
+                </SandboxedTranscriptHost>
               </CheckpointRewindProvider>
             </ChangedFilesActionsProvider>
           ),
@@ -369,11 +390,14 @@ const RegisteredConversationPaneHostContent = forwardRef<
   return (
     <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
       {surface}
-      <KBrainSubagentPaneHost
-        conversationId={conversationId}
-        workdir={transcript.workspaceRoot}
-        onOpenFileLink={transcript.onOpenFileLink}
-      />
+      {/* Child tool calls render their MCP App views too, with the parent's host. */}
+      <SandboxedTranscriptHost conversationId={conversationId} workdir={transcript.workspaceRoot}>
+        <KBrainSubagentPaneHost
+          conversationId={conversationId}
+          workdir={transcript.workspaceRoot}
+          onOpenFileLink={transcript.onOpenFileLink}
+        />
+      </SandboxedTranscriptHost>
     </div>
   );
 });

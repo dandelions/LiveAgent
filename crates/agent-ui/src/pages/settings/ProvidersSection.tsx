@@ -51,6 +51,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@liveagent/ui/components/ui/dialog";
+import { IconButton } from "@liveagent/ui/components/ui/icon-button";
 import { NumberInput } from "@liveagent/ui/components/ui/number-input";
 import {
   Select,
@@ -67,7 +68,6 @@ import { useLocale } from "@liveagent/ui/i18n/index";
 import { buildModelOptions } from "@liveagent/ui/lib/models/modelOptions";
 import { parseModelValue, toModelValue } from "@liveagent/ui/lib/models/modelValue";
 import { useCatalogLiveVersion } from "@liveagent/ui/lib/models/useThinkingLive";
-import { createUuid } from "@liveagent/ui/lib/shared/id";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { ModelPicker, type ModelPickerOption } from "@liveagent/ui/pages/settings/modelPicker";
 import { ConfirmDeletePopover } from "@liveagent/ui/pages/settings/shared";
@@ -83,6 +83,7 @@ import {
   UsagePlanLine,
   usageRelativeTimeText,
 } from "./ProviderPresentation";
+import { appendCustomProvider, ProviderServiceList } from "./ProviderServiceList";
 import { RetryErrorSection } from "./RetryErrorSection";
 
 function FailoverNumberField(props: {
@@ -328,7 +329,7 @@ function FailoverSettingsCard(props: SettingsSectionProps & { providerType: Prov
                 />
               ) : null}
               {unavailableProviderCount > 0 ? (
-                <p className="text-tiny leading-relaxed text-amber-700/90 dark:text-amber-300/90">
+                <p className="text-tiny leading-relaxed text-warning/90">
                   {t("settings.failoverQueueUnavailableCandidates").replace(
                     "{count}",
                     String(unavailableProviderCount),
@@ -336,7 +337,7 @@ function FailoverSettingsCard(props: SettingsSectionProps & { providerType: Prov
                 </p>
               ) : null}
               {unavailableQueuedProviderCount > 0 ? (
-                <p className="text-tiny leading-relaxed text-amber-700/90 dark:text-amber-300/90">
+                <p className="text-tiny leading-relaxed text-warning/90">
                   {t("settings.failoverQueueUnavailableExisting").replace(
                     "{count}",
                     String(unavailableQueuedProviderCount),
@@ -645,6 +646,7 @@ function ProviderActionGroup(props: {
       aria-label={t("settings.providerActionGroup")}
     >
       <Button
+        data-settings-anchor="add-provider"
         type="button"
         variant="ghost"
         size="sm"
@@ -665,6 +667,7 @@ function ProviderActionGroup(props: {
         triggerClassName={PROVIDER_ACTION_CLASS}
       />
       <Button
+        data-settings-anchor="provider-preferences"
         type="button"
         variant="ghost"
         size="sm"
@@ -862,26 +865,19 @@ function ProviderCardRow(props: {
             <RefreshCw data-refresh-icon className={cn("size-3.5", refreshing && "animate-spin")} />
           </RefreshButton>
         ) : null}
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          className="text-muted-foreground hover:text-foreground"
-          onClick={onEdit}
-          title={t("settings.edit")}
-        >
+        <IconButton size="icon-xs" onClick={onEdit} label={t("settings.edit")}>
           <SquarePen className="size-3.5" />
-        </Button>
+        </IconButton>
         <ConfirmDeletePopover name={provider.name} onConfirm={onDelete}>
           {(open) => (
-            <Button
-              variant="ghost"
+            <IconButton
+              tone="destructive"
               size="icon-xs"
-              className="text-muted-foreground hover:text-destructive"
               onClick={open}
-              title={t("settings.delete")}
+              label={t("settings.delete")}
             >
               <Trash2 className="size-3.5" />
-            </Button>
+            </IconButton>
           )}
         </ConfirmDeletePopover>
       </div>
@@ -1086,11 +1082,7 @@ export function ProvidersSection(
         return updateCustomProviders(prev, updated);
       }
 
-      const newProvider: CustomProvider = {
-        id: createUuid(),
-        ...data,
-      };
-      return updateCustomProviders(prev, [...prev.customProviders, newProvider]);
+      return appendCustomProvider(prev, data);
     });
   }
 
@@ -1142,7 +1134,7 @@ export function ProvidersSection(
             {onDismissRejectedLegacyProviders ? (
               <button
                 type="button"
-                className="absolute top-1.5 right-1.5 rounded p-1 opacity-70 has-hover:hover:bg-amber-500/10 has-hover:hover:opacity-100"
+                className="absolute top-1.5 right-1.5 rounded p-1 opacity-70 has-hover:hover:bg-warning/10 has-hover:hover:opacity-100"
                 aria-label={t("settings.legacyProviderImportDismiss")}
                 title={t("settings.legacyProviderImportDismiss")}
                 onClick={() => void dismissLegacyImportNotice()}
@@ -1158,8 +1150,12 @@ export function ProvidersSection(
             </span>
             <span className="opacity-80">
               {rejectedLegacyProviders
-                .map((provider) => `${provider.name}（${provider.id.slice(0, 8)}）`)
-                .join("、")}
+                .map((provider) =>
+                  t("settings.legacyProviderEntry")
+                    .replace("{name}", provider.name)
+                    .replace("{id}", provider.id.slice(0, 8)),
+                )
+                .join(t("format.listSeparator"))}
             </span>
             <span className="opacity-80">{t("settings.legacyProviderImportFailedHint")}</span>
             {onRetryRejectedLegacyProviders ? (
@@ -1233,21 +1229,13 @@ export function ProvidersSection(
               </p>
             </DialogHeader>
             <DialogBody className="space-y-2">
-              {PROVIDER_TABS.map((type) => (
-                <Button
-                  key={type}
-                  variant="ghost"
-                  className="h-12 w-full justify-start gap-3 bg-settings-tile px-4 hover:bg-settings-tile-hover"
-                  onClick={() => {
-                    setActiveTab(type);
-                    setServicePickerOpen(false);
-                    setModalOpen(true);
-                  }}
-                >
-                  <ProviderBrandIcon type={type} />
-                  {getProviderLabel(type)} {t("settings.compatible")}
-                </Button>
-              ))}
+              <ProviderServiceList
+                onSelect={(type) => {
+                  setActiveTab(type);
+                  setServicePickerOpen(false);
+                  setModalOpen(true);
+                }}
+              />
             </DialogBody>
           </DialogContent>
         </Dialog>

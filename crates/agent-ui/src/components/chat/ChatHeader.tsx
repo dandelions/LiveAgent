@@ -2,12 +2,15 @@ import { isDesktopChatHeaderInset } from "@liveagent/adapters/chatHeaderChrome";
 import type { AppSettings } from "@liveagent/app/lib/settings";
 import { PanelLeft, Settings } from "@liveagent/ui/components/IconSet";
 import { Button } from "@liveagent/ui/components/ui/button";
+import { IconButton } from "@liveagent/ui/components/ui/icon-button";
 import { ShortcutTooltip } from "@liveagent/ui/components/ui/shortcut-tooltip";
 import { useSidebarToggleShortcut } from "@liveagent/ui/components/ui/sidebar";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import type { NavigationHistoryControls } from "@liveagent/ui/lib/navigation/navigationHistory";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { memo, type ReactNode } from "react";
 import { ThemeToggleButton } from "../ThemeToggleButton";
+import { NavigationHistoryButtons } from "./NavigationHistoryButtons";
 
 export type ChatHeaderProps = {
   settings: AppSettings;
@@ -16,6 +19,8 @@ export type ChatHeaderProps = {
   onToggleTheme: () => void;
   onOpenSidebar: () => void;
   navigationActions?: ReactNode;
+  /** Back / forward buttons after the sidebar controls. */
+  history?: NavigationHistoryControls;
   leadingActions?: ReactNode;
   preThemeActions?: ReactNode;
   trailingActions?: ReactNode;
@@ -31,6 +36,7 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
     onToggleTheme,
     onOpenSidebar,
     navigationActions,
+    history,
     leadingActions,
     preThemeActions,
     trailingActions,
@@ -81,6 +87,7 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
             </Button>
           </ShortcutTooltip>
         ) : null}
+        {history ? <NavigationHistoryButtons history={history} /> : null}
       </div>
       <div
         data-conversation-header=""
@@ -98,15 +105,13 @@ export const ChatHeader = memo(function ChatHeader(props: ChatHeaderProps) {
         <ThemeToggleButton theme={settings.theme} onToggle={onToggleTheme} />
         {!sidebarOpen && !desktopTitleBarInset ? (
           <ShortcutTooltip label={t("tooltip.settings")} side="bottom">
-            <Button
-              variant="ghost"
-              size="icon-sm"
+            <IconButton
+              label={t("tooltip.settings")}
+              nativeTitle={false}
               onClick={() => onOpenSettings()}
-              aria-label={t("tooltip.settings")}
-              className="rounded-lg text-muted-foreground hover:text-foreground"
             >
               <Settings className="size-4" />
-            </Button>
+            </IconButton>
           </ShortcutTooltip>
         ) : null}
         {trailingActions}

@@ -52,6 +52,9 @@ type browserConn struct {
 	historyRecoveryMu sync.Mutex
 	historyRecovery   map[string]historyRecoveryLatch
 	historySyncAck    func(agentID, generation string, appliedSeq uint64)
+
+	textSaveMu sync.Mutex
+	textSave   *browserTextSave
 }
 
 // BrowserHandler 返回 /ws/v2 的 HTTP 处理器。
@@ -145,6 +148,9 @@ func (c *browserConn) serve() {
 		switch payload := frame.GetPayload().(type) {
 		case *gatewayv2.WebClientFrame_Pong:
 			continue
+		case *gatewayv2.WebClientFrame_AgentRequestChunk:
+			// Collection is ordered by the authenticated socket's read loop.
+			c.handleAgentRequestChunk(frame)
 		case *gatewayv2.WebClientFrame_Hello:
 			_ = c.sendLocalError(frame.GetRequestId(), "already authenticated")
 			continue
@@ -187,6 +193,10 @@ func (c *browserConn) readFrame() (*gatewayv2.WebClientFrame, bool) {
 		if err := proto.Unmarshal(data, &frame); err != nil {
 			return nil, false
 		}
+		if frame.GetAgentRequestChunk() != nil && len(data) > maxTextSaveFrameBytes {
+			c.rejectTextSave(frame.GetRequestId(), "text save chunk exceeds 1 MiB frame limit")
+			continue
+		}
 		return &frame, true
 	}
 }
@@ -213,23 +223,35 @@ func (c *browserConn) handshake() bool {
 	c.core.SetAuthorized()
 	// 握手前的读超时刻意未刷新；成功后立即续期。
 	c.core.TouchInboundActivity()
-	c.core.StartWriteLoop()
-	c.core.StartHeartbeat(c.buildHeartbeatPing)
 
-	// hello 应答走数据队列（FrameResponse）：与快照回放同队 FIFO，保证客户端先收 hello
-	// 再收回放帧（跨队列只有优先级、无顺序保证）。
-	if err := c.send(wscore.FrameResponse, "hello", &gatewayv2.WebServerFrame{
+	// 先订阅，再同步写出 hello 应答，最后才启动写泵与心跳：
+	// - 订阅必须早于应答到达客户端，否则客户端收到应答后立刻触发的广播会落在订阅之前而丢失；
+	// - 应答必须先于其它任何帧写出。入队做不到：应答走数据队列，心跳与恢复状态走控制
+	//   队列，写泵在两条都就绪的队列之间随机取帧——K-brain 历史同步的状态帧正好在首次
+	//   握手前后广播，会抢在认证应答之前到达。写泵尚未启动时，订阅产生的帧只会排队。
+	c.startEventForwarders()
+	reply, err := proto.Marshal(&gatewayv2.WebServerFrame{
 		RequestId: frame.GetRequestId(),
 		Payload: &gatewayv2.WebServerFrame_Hello{
 			Hello: c.srv.serverHello(true, "", "", browserReadLimit),
 		},
-	}); err != nil {
+	})
+	if err == nil {
+		err = c.core.WriteSync(wscore.Frame{
+			Class:       wscore.FrameResponse,
+			RequestID:   frame.GetRequestId(),
+			Kind:        "hello",
+			MessageType: websocket.BinaryMessage,
+			Data:        reply,
+		})
+	}
+	if err != nil {
+		// Close 关掉 done，已启动的转发器随之退出并清理订阅。
 		c.core.Close()
 		return false
 	}
-	// Subscribe only after the hello response is queued. Recovery/status uses
-	// the control lane and must never overtake authentication.
-	c.startEventForwarders()
+	c.core.StartWriteLoop()
+	c.core.StartHeartbeat(c.buildHeartbeatPing)
 	c.replaySnapshots()
 	return true
 }

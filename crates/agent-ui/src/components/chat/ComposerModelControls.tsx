@@ -1,7 +1,6 @@
 import { loadWebSearchFallbackState } from "@liveagent/adapters/webSearchFallback";
 import {
   type ChatRuntimeControls,
-  DEFAULT_CHAT_RUNTIME_CONTROLS,
   type ExecutionMode,
   isAgentDevMode,
   isAgentExecutionMode,
@@ -33,6 +32,7 @@ import {
 import { menuSurfaceClassName } from "@liveagent/ui/components/ui/menu-surface";
 import { Popover, PopoverContent, PopoverTrigger } from "@liveagent/ui/components/ui/popover";
 import { ScrollArea } from "@liveagent/ui/components/ui/scroll-area";
+import { SectionHeader } from "@liveagent/ui/components/ui/section-header";
 import { Switch } from "@liveagent/ui/components/ui/switch";
 import { useLocale } from "@liveagent/ui/i18n/index";
 import {
@@ -40,6 +40,7 @@ import {
   COMPOSER_CONTROL_LABEL_CLASS,
   COMPOSER_CONTROL_TRIGGER_CLASS,
 } from "@liveagent/ui/lib/chat/composerControlStyles";
+import { resolveThinkingLevels, thinkingLevelPatch } from "@liveagent/ui/lib/chat/thinkingLevels";
 import type { SharedModelOption } from "@liveagent/ui/lib/models/modelOptions";
 import {
   groupModelOptionsByProvider,
@@ -225,20 +226,13 @@ export const ComposerModelControls = memo(function ComposerModelControls(
   const triggerLabel = selectedOption?.label ?? currentModelLabel;
   const isAgent = isAgentExecutionMode(executionMode);
   const isDev = isAgentDevMode(executionMode);
-  const thinkingSupported = reasoningOptions.length > 0 || thinkingAlwaysOn;
-  const selectedReasoning = reasoningOptions.includes(chatRuntimeControls.reasoning)
-    ? chatRuntimeControls.reasoning
-    : reasoningOptions.includes(DEFAULT_CHAT_RUNTIME_CONTROLS.reasoning)
-      ? DEFAULT_CHAT_RUNTIME_CONTROLS.reasoning
-      : (reasoningOptions[reasoningOptions.length - 1] ?? DEFAULT_CHAT_RUNTIME_CONTROLS.reasoning);
-  const thinkingOn = thinkingSupported && (thinkingAlwaysOn || chatRuntimeControls.thinkingEnabled);
-  const showEffortBar = thinkingSupported && reasoningOptions.length > 1;
-  const effortChoices: ReasoningLevel[] = showEffortBar
-    ? thinkingAlwaysOn
-      ? reasoningOptions.filter((level) => level !== "off")
-      : ["off", ...reasoningOptions.filter((level) => level !== "off")]
-    : [];
-  const selectedEffort: ReasoningLevel = thinkingOn ? selectedReasoning : "off";
+  const {
+    supported: thinkingSupported,
+    thinkingOn,
+    choices: effortChoices,
+    selected: selectedEffort,
+  } = resolveThinkingLevels({ reasoningOptions, thinkingAlwaysOn, controls: chatRuntimeControls });
+  const showEffortBar = effortChoices.length > 0;
   const showView = (next: "root" | "model" | "reasoning") => {
     setView(next);
     setModelSearch("");
@@ -444,7 +438,7 @@ export const ComposerModelControls = memo(function ComposerModelControls(
                   <span className="shrink-0">{t("chat.runtime.webSearch")}</span>
                   {webSearch.via === "fallback" && (
                     <span
-                      className="min-w-0 truncate text-[11px] text-muted-foreground"
+                      className="min-w-0 truncate text-2xs text-muted-foreground"
                       data-testid="composer-web-search-via"
                     >
                       {webSearch.fallbackProvider
@@ -480,7 +474,7 @@ export const ComposerModelControls = memo(function ComposerModelControls(
                   }}
                   className={cn(
                     "-mx-1 mb-1 block w-[calc(100%+0.5rem)] rounded-md px-1 py-0.5 text-left",
-                    "text-[11px] leading-4 text-muted-foreground",
+                    "text-2xs leading-4 text-muted-foreground",
                     "hover:bg-settings-active/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
                   )}
                 >
@@ -498,7 +492,7 @@ export const ComposerModelControls = memo(function ComposerModelControls(
                 onClick={() => showView("root")}
                 className={cn(
                   "flex h-7 w-full items-center gap-1.5 rounded-lg px-2",
-                  "text-left text-[11px] text-muted-foreground",
+                  "text-left text-2xs text-muted-foreground",
                   "hover:bg-settings-active/60 hover:text-foreground",
                   "focus-visible:ring-2 focus-visible:ring-ring",
                 )}
@@ -621,7 +615,7 @@ export const ComposerModelControls = memo(function ComposerModelControls(
                       );
                     return filteredGroups.map((group) => (
                       <div key={group.id} className="group/provider space-y-0.5 pb-1.5 last:pb-0">
-                        <div className="sticky top-0 z-10 flex h-6 items-center justify-between gap-2 bg-popover px-2.5 text-tiny font-medium uppercase tracking-wide text-muted-foreground">
+                        <SectionHeader className="sticky top-0 z-10 flex h-6 items-center justify-between gap-2 bg-popover px-2.5">
                           <button
                             type="button"
                             data-model-group=""
@@ -663,7 +657,7 @@ export const ComposerModelControls = memo(function ComposerModelControls(
                           >
                             <SquarePen className="size-3" />
                           </Button>
-                        </div>
+                        </SectionHeader>
                         <div
                           id={`${executionModeRadioName}-models-${group.id}`}
                           data-model-group-list=""
@@ -769,15 +763,7 @@ export const ComposerModelControls = memo(function ComposerModelControls(
                           value={level}
                           checked={selectedEffort === level}
                           className="sr-only"
-                          onChange={() => {
-                            if (level === "off")
-                              onChatRuntimeControlsChange({ thinkingEnabled: false });
-                            else
-                              onChatRuntimeControlsChange({
-                                thinkingEnabled: true,
-                                reasoning: level,
-                              });
-                          }}
+                          onChange={() => onChatRuntimeControlsChange(thinkingLevelPatch(level))}
                         />
                         {t(REASONING_I18N_KEYS[level])}
                         {selectedEffort === level && <Check className="size-3.5" />}

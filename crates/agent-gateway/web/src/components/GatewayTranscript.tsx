@@ -10,6 +10,10 @@ import { EditableUserMessageBubble } from "@liveagent/ui/components/chat/Editabl
 import { ProcessDisclosureProvider } from "@liveagent/ui/components/chat/processDisclosure";
 import { RetryDetailsBlock } from "@liveagent/ui/components/chat/RetryDetailsBlock";
 import {
+  type TranscriptCommentHandler,
+  TranscriptCommentProvider,
+} from "@liveagent/ui/components/chat/TranscriptCommentContext";
+import {
   TranscriptAssistantMessageActions,
   TranscriptUserMessageActions,
 } from "@liveagent/ui/components/chat/TranscriptMessageActions";
@@ -126,8 +130,11 @@ type GatewayTranscriptProps = {
   redactToolContent?: boolean;
   /** Start the agent process disclosures expanded (settings, #1154). */
   expandProcessByDefault?: boolean;
+  showDetailedProgress?: boolean;
   /** Selected message text → composer blockquote. Omit to disable the quote button. */
   onQuoteSelection?: (text: string) => void;
+  /** Selected message text or an edit-diff line → pending composer comment. */
+  onCommentSelection?: TranscriptCommentHandler;
 };
 
 // Stream-born rows keep Streamdown's streaming render mode forever — even
@@ -1016,7 +1023,7 @@ const GatewayTranscriptListRegion = memo(function GatewayTranscriptListRegion(pr
           >
             <div
               className={cn(
-                "w-gateway-bubble-w rounded-22px border border-solid shadow-gateway-bubble backdrop-blur-18px px-18px py-16px",
+                "w-gateway-bubble-w rounded-3xl border border-solid shadow-gateway-bubble backdrop-blur-18px px-18px py-16px",
                 "border-destructive/30 bg-destructive/5",
               )}
             >
@@ -1069,7 +1076,9 @@ export function GatewayTranscript({
   readOnly = false,
   redactToolContent = false,
   expandProcessByDefault = false,
+  showDetailedProgress = false,
   onQuoteSelection,
+  onCommentSelection,
 }: GatewayTranscriptProps) {
   const transcriptListRef = useRef<HTMLDivElement | null>(null);
   const [transcriptScrollViewport, setTranscriptScrollViewport] = useState<HTMLDivElement | null>(
@@ -1118,7 +1127,7 @@ export function GatewayTranscript({
     );
   }
 
-  return (
+  const transcriptView = (
     <div className={GATEWAY_TRANSCRIPT_SHELL_CLASS}>
       <div
         ref={transcriptListRef}
@@ -1129,6 +1138,7 @@ export function GatewayTranscript({
             never collide across conversations in the itemSizeCache. */}
         <ProcessDisclosureProvider
           expandByDefault={expandProcessByDefault}
+          detailedProgress={showDetailedProgress}
           isViewportFollowing={isViewportFollowing}
         >
           <GatewayTranscriptListRegion
@@ -1166,7 +1176,7 @@ export function GatewayTranscript({
         {shouldShowInlineError ? (
           <div
             className={cn(
-              "rounded-14px border border-solid border-destructive/16 bg-destructive/8 px-12px py-10px",
+              "rounded-xl border border-solid border-destructive/16 bg-destructive/8 px-12px py-10px",
               "text-sm text-destructive",
             )}
           >
@@ -1180,9 +1190,16 @@ export function GatewayTranscript({
           rootRef={transcriptListRef}
           scopeKey={conversationId}
           onQuote={onQuoteSelection}
+          onComment={onCommentSelection}
         />
       ) : null}
       <ChatFileLinkContextMenuHost />
     </div>
+  );
+
+  return (
+    <TranscriptCommentProvider onComment={readOnly ? null : onCommentSelection}>
+      {transcriptView}
+    </TranscriptCommentProvider>
   );
 }

@@ -1,5 +1,6 @@
 import { ChatEmptyState } from "@liveagent/ui/components/chat/ChatEmptyState";
 import { ChatFileLinkContextMenuHost } from "@liveagent/ui/components/chat/ChatFileLinkContextMenu";
+import { TranscriptCommentProvider } from "@liveagent/ui/components/chat/TranscriptCommentContext";
 import { TranscriptFindBar } from "@liveagent/ui/components/chat/TranscriptFindBar";
 import { TranscriptQuoteSelection } from "@liveagent/ui/components/chat/TranscriptQuoteSelection";
 import { ChevronDown, Copy } from "@liveagent/ui/components/IconSet";
@@ -11,6 +12,7 @@ import {
   resolveSearchJumpRowKey,
   subscribeSearchJumpTarget,
 } from "@liveagent/ui/lib/chat/searchJumpTarget";
+import { createActiveFloorStore } from "@liveagent/ui/lib/chat-floor-nav/activeFloorStore";
 import { buildFloorEntries } from "@liveagent/ui/lib/chat-floor-nav/floorModel";
 import { BOTTOM_REATTACH_ZONE_PX } from "@liveagent/ui/lib/chat-scroll/scrollFollowCore";
 import { useScrollFollow } from "@liveagent/ui/lib/chat-scroll/useScrollFollow";
@@ -76,6 +78,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
     onOpenSettings,
     onSuggestionSelect,
     onQuoteSelection,
+    onCommentSelection,
   } = props;
   const { t } = useLocale();
   const showNoModelsState = !hasModels;
@@ -130,7 +133,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
   // 刚上报的值清掉且被子组件的去重永久抑制。行 key 含 segmentId，跨会话
   // 不会误匹配，等待子组件上报即可。
   const floors = useMemo(() => buildFloorEntries(historyItems), [historyItems]);
-  const [activeFloorKey, setActiveFloorKey] = useState<string | null>(null);
+  const [activeFloorStore] = useState(createActiveFloorStore);
   const transcriptNavRef = useRef<TranscriptNavHandle | null>(null);
   const saveReadingPositionRef = useRef<(() => void) | null>(null);
   const handleFloorJump = useCallback(
@@ -280,7 +283,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
   const resizeTranscriptLabel = t("chat.transcript.resizeWidth");
   const resetTranscriptWidthLabel = t("chat.transcript.resizeWidthReset");
 
-  return (
+  const transcriptView = (
     // biome-ignore lint/a11y/noStaticElementInteractions: The transcript surface exposes a pointer context menu; transcript content and menu items retain their own keyboard semantics.
     <div
       ref={transcriptRootRef}
@@ -349,7 +352,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
                 gitClient={gitClient}
                 navRef={transcriptNavRef}
                 saveReadingPositionRef={saveReadingPositionRef}
-                onAnchorUserRowChange={setActiveFloorKey}
+                onAnchorUserRowChange={activeFloorStore.set}
                 onResendFromEdit={onResendFromEdit}
                 onBranchConversation={onBranchConversation}
                 onFirstLayoutSettled={
@@ -375,7 +378,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
         <FloorNavRail
           conversationId={conversationId}
           floors={floors}
-          activeRowKey={activeFloorKey}
+          activeRowKeyStore={activeFloorStore}
           bottomOffset={`${Math.ceil(transcriptBottomReservePx) + 8}px`}
           scrollViewport={scrollViewport}
           onJump={handleFloorJump}
@@ -428,11 +431,18 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
           scopeKey={conversationId}
           enabled={!isTranscriptBusy}
           onQuote={onQuoteSelection}
+          onComment={onCommentSelection}
         />
       ) : null}
       <TranscriptFindBar find={find} />
       <ChatFileLinkContextMenuHost canOpenWithDefaultApp={isTauriHost()} />
       {isTranscriptBusy ? <HistorySwitchLoadingOverlay /> : null}
     </div>
+  );
+
+  return (
+    <TranscriptCommentProvider onComment={onCommentSelection}>
+      {transcriptView}
+    </TranscriptCommentProvider>
   );
 });

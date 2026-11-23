@@ -110,12 +110,29 @@ export type KBrainQuestionAnswers = {
  */
 export type KBrainToolElicitations = { elicitations?: unknown[] };
 
+/**
+ * MCP App view of a tool result (capability mcp_apps); fetching `url` needs the token.
+ * With `mcp_apps_structured_content` it also names the server's tool and carries the raw
+ * CallToolResult: inline `result` in live events (≤256 KiB), `result_url` (≤1 MiB) in live
+ * events and history.
+ */
+type KBrainUiResource = {
+  server_id: string;
+  uri: string;
+  url: string;
+  tool_name?: string;
+  result?: Record<string, unknown>;
+  result_url?: string;
+};
+
 export type KBrainToolCall = KBrainToolRunInfo &
   KBrainQuestionAnswers &
   KBrainToolElicitations & {
     id: string;
     name: string;
     arguments: unknown;
+    /** History only (`mcp_apps_structured_content`): the call's MCP App view. */
+    ui_resource?: KBrainUiResource;
   };
 
 export type KBrainToolResult = KBrainToolRunInfo &
@@ -127,6 +144,7 @@ export type KBrainToolResult = KBrainToolRunInfo &
     output: string;
     failed?: boolean;
     cancelled?: boolean;
+    ui_resource?: KBrainUiResource;
   };
 
 export type KBrainQuestionOption = {
@@ -395,6 +413,11 @@ export type KBrainRunOptions = {
    * K-brain advertises capability mcp_elicitation: older backends reject unknown options.
    */
   mcp_elicitation?: boolean;
+  /**
+   * Save "html preview" fences and Write-to-.html results as previews (`preview.created`).
+   * Sent only when K-brain advertises capability html_previews.
+   */
+  html_previews?: boolean;
   /**
    * MCP servers K-brain may offer in this run. Omitted means K-brain's saved
    * selection (or every enabled server); an empty list means the same, so "no

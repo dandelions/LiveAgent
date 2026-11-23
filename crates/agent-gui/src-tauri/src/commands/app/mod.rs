@@ -1,5 +1,7 @@
 pub mod app;
 pub mod data_dir;
+pub mod diagnostics;
+pub mod editors;
 pub mod fonts;
 pub mod notifications;
 pub mod proxy_detect;

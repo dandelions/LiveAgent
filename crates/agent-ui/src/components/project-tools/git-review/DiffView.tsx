@@ -45,6 +45,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { isElementInUse, useNearViewport } from "../../../lib/shared/useNearViewport";
 import { cn } from "../../../lib/shared/utils";
 import { formatShortcutLabel } from "../../../lib/shortcuts/shortcutKeys";
 import type { MentionComposerDraftSegment } from "../../chat/MentionComposerModel";
@@ -425,33 +426,33 @@ const DiffChunkView = memo(function DiffChunkView(props: {
   const { item, isDark, commenting } = props;
   const { t } = useLocale();
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const bodyRef = useRef<HTMLElement | null>(null);
+  const [measuredHeight, setMeasuredHeight] = useState<number | null>(null);
   // Lazy parse/highlight: a chunk only builds its DiffFile once it scrolls
   // near the viewport, so a multi-file commit diff no longer freezes the main
-  // thread synchronously on selection.
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    if (visible) return undefined;
-    const element = containerRef.current;
-    if (!element) return undefined;
-    if (typeof IntersectionObserver === "undefined") {
-      setVisible(true);
-      return undefined;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setVisible(true);
-        }
-      },
-      { rootMargin: "320px 0px" },
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [visible]);
+  // thread synchronously on selection. Once it is far away again its rows
+  // leave the DOM (the parsed DiffFile stays) and a spacer of the measured
+  // height holds its place, so scrolling through a long review no longer
+  // accumulates every diff ever shown. A chunk the user is working in (focus,
+  // a selection, an open comment editor) stays mounted.
+  const visible = useNearViewport(containerRef, {
+    enterMarginPx: 320,
+    leaveMarginPx: 1600,
+    beforeLeave: () => {
+      const element = containerRef.current;
+      if (!element) return true;
+      if (isElementInUse(element)) return false;
+      if (element.querySelector(`[${DIFF_LINE_COMMENT_ATTR}="editor"]`)) return false;
+      const body = bodyRef.current;
+      if (body) setMeasuredHeight(body.getBoundingClientRect().height);
+      return true;
+    },
+  });
+  const [parsed, setParsed] = useState(false);
+  if (visible && !parsed) setParsed(true);
 
   const diffFile = useMemo(() => {
-    if (!visible || item.large) return null;
+    if (!parsed || item.large) return null;
     try {
       const names = getPatchFileNames(item.chunk, item.label);
       const instance = new DiffFile(
@@ -470,7 +471,7 @@ const DiffChunkView = memo(function DiffChunkView(props: {
     } catch {
       return null;
     }
-  }, [isDark, item, visible]);
+  }, [isDark, item, parsed]);
 
   const rawPreview = useMemo(() => {
     if (!item.large) return item.chunk;
@@ -564,32 +565,47 @@ const DiffChunkView = memo(function DiffChunkView(props: {
       >
         <span className="min-w-0 flex-1 truncate">{item.label}</span>
         {item.large ? (
-          <span className="shrink-0 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-tiny text-amber-700 dark:text-amber-300">
+          <span className="shrink-0 rounded-full bg-warning/10 px-1.5 py-0.5 text-tiny text-warning">
             {t("projectTools.gitReview.largeDiff")}
           </span>
         ) : null}
       </div>
       {!visible ? (
-        <div aria-hidden="true" style={{ height: placeholderHeight }} />
-      ) : diffFile ? (
-        <DiffView
-          diffFile={diffFile}
-          diffViewMode={DiffModeEnum.Unified}
-          diffViewTheme={isDark ? "dark" : "light"}
-          diffViewHighlight
-          diffViewWrap={false}
-          diffViewFontSize={12}
-          {...(commentingEnabled
-            ? {
-                diffViewAddWidget: true,
-                extendData,
-                renderWidgetLine,
-                renderExtendLine,
-              }
-            : {})}
+        <div
+          aria-hidden="true"
+          data-diff-chunk-placeholder=""
+          style={{ height: measuredHeight ?? placeholderHeight }}
         />
+      ) : diffFile ? (
+        <div
+          ref={(node) => {
+            bodyRef.current = node;
+          }}
+        >
+          <DiffView
+            diffFile={diffFile}
+            diffViewMode={DiffModeEnum.Unified}
+            diffViewTheme={isDark ? "dark" : "light"}
+            diffViewHighlight
+            diffViewWrap={false}
+            diffViewFontSize={12}
+            {...(commentingEnabled
+              ? {
+                  diffViewAddWidget: true,
+                  extendData,
+                  renderWidgetLine,
+                  renderExtendLine,
+                }
+              : {})}
+          />
+        </div>
       ) : (
-        <pre className="git-review-diff-selectable-content max-h-104 select-text overflow-auto p-3 text-xs leading-relaxed text-muted-foreground">
+        <pre
+          ref={(node) => {
+            bodyRef.current = node;
+          }}
+          className="git-review-diff-selectable-content max-h-104 select-text overflow-auto p-3 text-xs leading-relaxed text-muted-foreground"
+        >
           {rawPreview}
         </pre>
       )}
@@ -644,7 +660,7 @@ function DiffStatView(props: { stat: string }) {
                       </span>
                       {file.additions > 0 ? (
                         <span
-                          className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 font-semibold text-emerald-700 dark:text-emerald-300"
+                          className="rounded-full bg-success/10 px-1.5 py-0.5 font-semibold text-success"
                           title={t("projectTools.gitReview.statInsertions")}
                         >
                           +{file.additions}
@@ -652,7 +668,7 @@ function DiffStatView(props: { stat: string }) {
                       ) : null}
                       {file.deletions > 0 ? (
                         <span
-                          className="rounded-full bg-rose-500/10 px-1.5 py-0.5 font-semibold text-rose-700 dark:text-rose-300"
+                          className="rounded-full bg-destructive/10 px-1.5 py-0.5 font-semibold text-destructive"
                           title={t("projectTools.gitReview.statDeletions")}
                         >
                           -{file.deletions}
@@ -666,13 +682,13 @@ function DiffStatView(props: { stat: string }) {
                 <div className="mt-1 flex h-1.5 overflow-hidden rounded-full bg-muted">
                   {file.additions > 0 ? (
                     <span
-                      className="h-full bg-emerald-500/75"
+                      className="h-full bg-success/75"
                       style={{ width: `${file.additionPercent}%` }}
                     />
                   ) : null}
                   {file.deletions > 0 ? (
                     <span
-                      className="h-full bg-rose-500/75"
+                      className="h-full bg-destructive/75"
                       style={{ width: `${file.deletionPercent}%` }}
                     />
                   ) : null}
@@ -710,7 +726,7 @@ export function DiffContent(props: {
   onInsertComposerSegments?: (segments: MentionComposerDraftSegment[]) => boolean;
 }) {
   const { diff, title, error, loading = false, showStat = true, onInsertComposerSegments } = props;
-  const { locale, t } = useLocale();
+  const { t } = useLocale();
   const isDark = useIsDark();
   const rootRef = useRef<HTMLElement | null>(null);
   const scrollViewportRef = useRef<HTMLElement | null>(null);
@@ -1164,7 +1180,7 @@ export function DiffContent(props: {
   // hard-coded width/height): useLayoutEffect runs before paint, so an
   // out-of-bounds menu never flashes at the raw pointer position.
 
-  const copySelectedTextLabel = locale === "en-US" ? "Copy selected text" : "复制选中文本";
+  const copySelectedTextLabel = t("diffView.copySelectedText");
 
   return (
     <fieldset
@@ -1176,8 +1192,8 @@ export function DiffContent(props: {
         "git-review-diff-selectable m-0 flex min-h-0 min-w-0 flex-1 select-none flex-col",
         "overflow-hidden border-0 p-0",
         "[&_.git-review-diff-selectable-content]:select-text [&_.git-review-diff-selectable-content_*]:select-text [&_.git-review-diff-selectable-content_.select-none]:select-none [&_.git-review-diff-selectable-content_.select-none_*]:select-none [[data-project-tools-resizing=true]_&]:relative [[data-project-tools-resizing=true]_&]:isolate [[data-project-tools-resizing=true]_&]:[contain:layout_paint_style] [[data-project-tools-resizing=true]_&]:before:block",
-        "[[data-project-tools-resizing=true]_&]:before:min-h-0 [[data-project-tools-resizing=true]_&]:before:flex-1 [[data-project-tools-resizing=true]_&]:before:m-3 [[data-project-tools-resizing=true]_&]:before:rounded-8px [[data-project-tools-resizing=true]_&]:before:border [[data-project-tools-resizing=true]_&]:before:border-border/72 [[data-project-tools-resizing=true]_&]:before:bg-[linear-gradient(90deg,hsl(var(--muted)/0.62)_0_4.25rem,hsl(var(--border)/0.74)_4.25rem_calc(4.25rem+var(--spacing-1px)),transparent_calc(4.25rem+var(--spacing-1px))),linear-gradient(to_bottom,transparent_0_3.5rem,var(--ui-color-hsl-142-72-42-0p09)_3.5rem_5.25rem,transparent_5.25rem_7rem,color-mix(in_oklab,var(--destructive)_8%,transparent)_7rem_8.75rem,transparent_8.75rem_10.5rem,var(--ui-color-hsl-38-92-50-0p08)_10.5rem_12.25rem,transparent_12.25rem),repeating-linear-gradient(to_bottom,transparent_0_var(--spacing-27px),hsl(var(--border)/0.42)_var(--spacing-27px)_var(--spacing-28px)),hsl(var(--background))] [[data-project-tools-resizing=true]_&]:before:shadow-[inset_0_var(--spacing-1px)_0_hsl(var(--foreground)/0.04),0_var(--spacing-1px)_var(--spacing-2px)_hsl(var(--foreground)/0.04)]",
-        "[[data-project-tools-resizing=true]_&]:before:content-[''] [[data-project-tools-resizing=true]_&]:after:pointer-events-none [[data-project-tools-resizing=true]_&]:after:absolute [[data-project-tools-resizing=true]_&]:after:inset-[1.25rem_1.5rem_1.25rem_5.8rem] [[data-project-tools-resizing=true]_&]:after:z-1 [[data-project-tools-resizing=true]_&]:after:rounded-4px [[data-project-tools-resizing=true]_&]:after:bg-[repeating-linear-gradient(to_bottom,hsl(var(--muted-foreground)/0.16)_0_var(--spacing-7px),transparent_var(--spacing-7px)_var(--spacing-84px)),repeating-linear-gradient(to_bottom,transparent_0_var(--spacing-28px),hsl(var(--muted-foreground)/0.11)_var(--spacing-28px)_var(--spacing-35px),transparent_var(--spacing-35px)_var(--spacing-84px)),repeating-linear-gradient(to_bottom,transparent_0_var(--spacing-56px),hsl(var(--muted-foreground)/0.13)_var(--spacing-56px)_var(--spacing-63px),transparent_var(--spacing-63px)_var(--spacing-84px))] [[data-project-tools-resizing=true]_&]:after:bg-[length:56%_var(--spacing-84px),82%_var(--spacing-84px),42%_var(--spacing-84px)]",
+        "[[data-project-tools-resizing=true]_&]:before:min-h-0 [[data-project-tools-resizing=true]_&]:before:flex-1 [[data-project-tools-resizing=true]_&]:before:m-3 [[data-project-tools-resizing=true]_&]:before:rounded-md [[data-project-tools-resizing=true]_&]:before:border [[data-project-tools-resizing=true]_&]:before:border-border/72 [[data-project-tools-resizing=true]_&]:before:bg-[linear-gradient(90deg,hsl(var(--muted)/0.62)_0_4.25rem,hsl(var(--border)/0.74)_4.25rem_calc(4.25rem+var(--spacing-1px)),transparent_calc(4.25rem+var(--spacing-1px))),linear-gradient(to_bottom,transparent_0_3.5rem,var(--ui-color-hsl-142-72-42-0p09)_3.5rem_5.25rem,transparent_5.25rem_7rem,color-mix(in_oklab,var(--destructive)_8%,transparent)_7rem_8.75rem,transparent_8.75rem_10.5rem,var(--ui-color-hsl-38-92-50-0p08)_10.5rem_12.25rem,transparent_12.25rem),repeating-linear-gradient(to_bottom,transparent_0_var(--spacing-27px),hsl(var(--border)/0.42)_var(--spacing-27px)_var(--spacing-28px)),hsl(var(--background))] [[data-project-tools-resizing=true]_&]:before:shadow-[inset_0_var(--spacing-1px)_0_hsl(var(--foreground)/0.04),0_var(--spacing-1px)_var(--spacing-2px)_hsl(var(--foreground)/0.04)]",
+        "[[data-project-tools-resizing=true]_&]:before:content-[''] [[data-project-tools-resizing=true]_&]:after:pointer-events-none [[data-project-tools-resizing=true]_&]:after:absolute [[data-project-tools-resizing=true]_&]:after:inset-[1.25rem_1.5rem_1.25rem_5.8rem] [[data-project-tools-resizing=true]_&]:after:z-1 [[data-project-tools-resizing=true]_&]:after:rounded-xs [[data-project-tools-resizing=true]_&]:after:bg-[repeating-linear-gradient(to_bottom,hsl(var(--muted-foreground)/0.16)_0_var(--spacing-7px),transparent_var(--spacing-7px)_var(--spacing-84px)),repeating-linear-gradient(to_bottom,transparent_0_var(--spacing-28px),hsl(var(--muted-foreground)/0.11)_var(--spacing-28px)_var(--spacing-35px),transparent_var(--spacing-35px)_var(--spacing-84px)),repeating-linear-gradient(to_bottom,transparent_0_var(--spacing-56px),hsl(var(--muted-foreground)/0.13)_var(--spacing-56px)_var(--spacing-63px),transparent_var(--spacing-63px)_var(--spacing-84px))] [[data-project-tools-resizing=true]_&]:after:bg-[length:56%_var(--spacing-84px),82%_var(--spacing-84px),42%_var(--spacing-84px)]",
         "[[data-project-tools-resizing=true]_&]:after:bg-repeat-y [[data-project-tools-resizing=true]_&]:after:content-[''] [[data-project-tools-resizing=true]_&]:[&>*]:hidden",
       )}
       onContextMenu={handleContextMenu}
@@ -1276,7 +1292,7 @@ export function DiffContent(props: {
         </div>
       ) : null}
       {diff?.truncated ? (
-        <div className="shrink-0 border-t border-border/70 px-3 py-2 text-xs text-amber-600 dark:text-amber-300">
+        <div className="shrink-0 border-t border-border/70 px-3 py-2 text-xs text-warning">
           {t("projectTools.gitReview.diffOutputTruncated")}
         </div>
       ) : null}
@@ -1285,7 +1301,7 @@ export function DiffContent(props: {
           <div
             ref={diffHorizontalScrollbarTrackRef}
             role="scrollbar"
-            aria-label={locale === "en-US" ? "Horizontal diff scrollbar" : "diff 横向滚动条"}
+            aria-label={t("diffView.horizontalScrollbar")}
             aria-controls={diffScrollViewportId}
             aria-orientation="horizontal"
             aria-valuemin={0}

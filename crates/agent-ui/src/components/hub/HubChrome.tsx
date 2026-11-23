@@ -11,7 +11,7 @@ export function HubBackdrop(props: { tone?: "amber" | "violet" | "neutral" }) {
         : "bg-surface-glow-5 dark:bg-surface-glow-6";
   return (
     <>
-      <div className="pointer-events-none absolute inset-0 bg-[hsl(var(--hub-canvas))]" />
+      <div className="pointer-events-none absolute inset-0 bg-hub-canvas" />
       <div
         className={cn(
           "pointer-events-none absolute -left-32 -top-24 size-420px rounded-full opacity-90 blur-3xl",
@@ -40,10 +40,13 @@ export function HubHeader(props: {
   actions?: ReactNode;
   prominent?: boolean;
   embedded?: boolean;
+  /** Settings search target when the hub is embedded in settings. */
+  settingsAnchor?: string;
 }) {
   const { icon, title, subtitle, actions, prominent = false, embedded = false } = props;
   return (
     <div
+      data-settings-anchor={props.settingsAnchor}
       className={cn(
         "hub-header relative z-10",
         embedded ? "pb-5" : "px-5 sm:px-6 lg:px-8 xl:px-10",

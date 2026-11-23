@@ -52,5 +52,7 @@ export function normalizeChatTranscriptSettings(input: unknown): ChatTranscriptS
       DEFAULT_CHAT_TRANSCRIPT_WIDTH,
     ),
     expandProcessByDefault: obj.expandProcessByDefault === true,
+    showDetailedProgress: obj.showDetailedProgress === true,
+    htmlPreviews: obj.htmlPreviews !== false,
   };
 }

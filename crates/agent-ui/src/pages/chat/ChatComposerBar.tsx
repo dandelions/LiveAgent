@@ -20,6 +20,7 @@ import type {
 } from "@liveagent/ui/components/chat/clarify/clarifyTypes";
 import { useClarifySession } from "@liveagent/ui/components/chat/clarify/useClarifySession";
 import { getUploadedFileTypeIcon } from "@liveagent/ui/components/chat/fileTypeIcons";
+import { useComposerImageAnnotation } from "@liveagent/ui/components/chat/image-annotation/useComposerImageAnnotation";
 import {
   MentionComposer,
   type MentionComposerApp,
@@ -106,6 +107,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { useEscapeToStopRun } from "../../lib/chat/escapeStopRun";
+import type { ReplacePendingUpload } from "../../lib/chat/uploadedFiles";
 import {
   getUploadedImagePreviewCacheKey,
   loadUploadedImagePreview,
@@ -170,6 +172,9 @@ function PendingComposerAttachment(props: {
   closePreviewLabel: string;
   imagePreviewLoader?: UploadedImagePreviewLoader;
   onRemove: (relativePath: string) => void;
+  annotated?: boolean;
+  onAnnotate?: (file: PendingUploadedFile, imageSrc: string) => void;
+  onRevertAnnotation?: (file: PendingUploadedFile) => void;
 }) {
   const {
     file,
@@ -180,6 +185,9 @@ function PendingComposerAttachment(props: {
     closePreviewLabel,
     imagePreviewLoader,
     onRemove,
+    annotated,
+    onAnnotate,
+    onRevertAnnotation,
   } = props;
   const { imageSrc, isLoading } = useComposerUploadedImagePreview(
     file,
@@ -202,6 +210,13 @@ function PendingComposerAttachment(props: {
       previewLabel={previewLabel}
       closePreviewLabel={closePreviewLabel}
       onRemove={() => onRemove(file.relativePath)}
+      onAnnotate={
+        onAnnotate && imageSrc && file.kind === "image"
+          ? () => onAnnotate(file, imageSrc)
+          : undefined
+      }
+      annotated={annotated}
+      onRevertAnnotation={onRevertAnnotation ? () => onRevertAnnotation(file) : undefined}
     />
   );
 }
@@ -366,6 +381,11 @@ export type ChatComposerBarProps = {
   loadHistoryPrompts?: () => readonly string[];
   pendingUploadedFiles: PendingUploadedFile[];
   onRemovePendingUpload: (relativePath: string) => void;
+  /**
+   * Replaces a pending attachment (annotated image in, original back on
+   * revert). When absent, image chips offer no "Annotate" action.
+   */
+  onReplacePendingUpload?: ReplacePendingUpload;
   /** 输入框上方的目标栏（/goal）；与指令队列上下排列。 */
   goalBar?: ReactNode;
   queuedTurns: ChatQueueTurnPreview[];
@@ -467,6 +487,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     loadHistoryPrompts,
     pendingUploadedFiles,
     onRemovePendingUpload,
+    onReplacePendingUpload,
     goalBar,
     queuedTurns,
     queuePaused,
@@ -487,6 +508,20 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
     contextDisplayMode,
   } = props;
   const { t } = useLocale();
+  const imageAnnotation = useComposerImageAnnotation({
+    workdir,
+    composerRef,
+    imagePreviewLoader: onLoadUploadedImagePreview,
+    onReplacePendingUpload,
+  });
+  const { forgetAnnotation } = imageAnnotation;
+  const handleRemovePendingUpload = useCallback(
+    (relativePath: string) => {
+      forgetAnnotation(relativePath);
+      onRemovePendingUpload(relativePath);
+    },
+    [forgetAnnotation, onRemovePendingUpload],
+  );
   const [composerIsEmpty, setComposerIsEmpty] = useState(true);
   // 可澄清文本存在性：与 composerIsEmpty 分开跟踪——空态只看编辑器整体
   // （chip 文本也算非空），而澄清需要纯文本段。仅在事件里读草稿：
@@ -1528,6 +1563,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
         {/* biome-ignore lint/a11y/noStaticElementInteractions: Escape 捕获仅在展开态生效，焦点始终在内部 textbox 上，包装层不参与 Tab 序。 */}
         <div
           hidden={approvalBar != null}
+          data-testid="chat-composer"
           data-composer-draft={composerIsEmpty ? undefined : ""}
           ref={glassCardRef}
           data-file-upload-drop-zone=""
@@ -1571,7 +1607,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                 "pointer-events-none absolute inset-0 z-40 flex items-center justify-center",
                 "rounded-3xl border-2 border-dashed bg-background/90 text-sm font-medium backdrop-blur-sm",
                 workspacePathDropState === "accept"
-                  ? "border-sky-500/70 text-sky-600 dark:text-sky-300"
+                  ? "border-info/70 text-info"
                   : "border-destructive/60 text-destructive",
               )}
             >
@@ -1603,14 +1639,14 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
             <div
               className={cn(
                 "pointer-events-none absolute inset-1 z-50 flex items-center justify-center",
-                "rounded-3xl border border-dashed border-amber-500/45 bg-background/90 px-6",
+                "rounded-3xl border border-dashed border-warning/45 bg-background/90 px-6",
                 "text-center shadow-inner backdrop-blur-sm",
               )}
             >
               <span
                 className={cn(
-                  "max-w-full rounded-full bg-amber-500/10 px-3 py-1.5",
-                  "text-xs font-medium text-amber-700 dark:text-amber-300",
+                  "max-w-full rounded-full bg-warning/10 px-3 py-1.5",
+                  "text-xs font-medium text-warning",
                 )}
               >
                 {conversationDropNoticeText}
@@ -1642,7 +1678,18 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                     previewLabel={t("chat.upload.previewImage")}
                     closePreviewLabel={t("chat.upload.closePreview")}
                     imagePreviewLoader={onLoadUploadedImagePreview}
-                    onRemove={onRemovePendingUpload}
+                    onRemove={handleRemovePendingUpload}
+                    annotated={imageAnnotation.isAnnotated(file.relativePath)}
+                    onAnnotate={
+                      imageAnnotation.enabled
+                        ? (target, src) => void imageAnnotation.startAnnotation(target, src)
+                        : undefined
+                    }
+                    onRevertAnnotation={
+                      imageAnnotation.isAnnotated(file.relativePath)
+                        ? (target) => void imageAnnotation.revertAnnotation(target)
+                        : undefined
+                    }
                   />
                 ))}
               </div>
@@ -1737,7 +1784,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                             "hover:bg-muted/60 focus-visible:bg-muted/60 data-[popup-open]:bg-muted/60",
                             "disabled:pointer-events-none disabled:opacity-40",
                             pendingUploadedFiles.length > 0
-                              ? "text-sky-600 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200"
+                              ? "text-info hover:text-info"
                               : "text-muted-foreground hover:text-foreground dark:hover:text-white",
                           )}
                         />
@@ -1753,9 +1800,9 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                           aria-hidden
                           className={cn(
                             "absolute -right-0.5 -top-0.5 flex h-15px min-w-15px items-center justify-center",
-                            "rounded-full bg-sky-500 px-3px",
-                            "text-tiny font-semibold leading-none text-white shadow-ui-chatcomposerbar-41",
-                            "dark:bg-sky-400 dark:text-slate-900 dark:shadow-ui-chatcomposerbar-42",
+                            "rounded-full bg-info px-3px",
+                            "text-tiny font-semibold leading-none text-info-foreground shadow-ui-chatcomposerbar-41",
+                            "dark:shadow-ui-chatcomposerbar-42",
                           )}
                         >
                           {pendingUploadedFiles.length}
@@ -1806,7 +1853,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                           className={cn(
                             "size-3.5 shrink-0 transition-colors",
                             chatRuntimeControls.planModeEnabled
-                              ? "text-sky-600 dark:text-sky-300"
+                              ? "text-info"
                               : "text-muted-foreground",
                           )}
                         />
@@ -1831,9 +1878,9 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                     title={t("chat.runtime.planModeSlashOff")}
                     aria-label={t("chat.runtime.planModeSlashOff")}
                     className={cn(
-                      "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-sky-500/10 px-2.5",
-                      "text-xs font-medium text-sky-700 outline-hidden transition-colors",
-                      "hover:bg-sky-500/15 focus-visible:ring-2 focus-visible:ring-primary/35 disabled:pointer-events-none disabled:opacity-40 dark:text-sky-300",
+                      "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-info/10 px-2.5",
+                      "text-xs font-medium text-info outline-hidden transition-colors",
+                      "hover:bg-info/15 focus-visible:ring-2 focus-visible:ring-primary/35 disabled:pointer-events-none disabled:opacity-40",
                     )}
                   >
                     <Lightbulb className="size-3.5 shrink-0" />
@@ -1877,7 +1924,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                         "transition-colors hover:bg-muted/60 focus-visible:bg-muted/60",
                         "disabled:pointer-events-none disabled:opacity-40",
                         stt.active
-                          ? "bg-red-500/10 text-red-600"
+                          ? "bg-destructive/10 text-destructive"
                           : "text-muted-foreground hover:text-foreground",
                       )}
                     >
@@ -1917,6 +1964,8 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
                     }}
                     size="sm"
                     aria-label={primaryActionTitle}
+                    data-testid="composer-send"
+                    data-sending={isSending ? "true" : "false"}
                     style={
                       canQueueDraftWhileSending
                         ? {
@@ -2042,6 +2091,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: ChatComposer
             只在 "ring" 展示模式下不挂载——"statsBar" 与 "both" 都渲染（§4.7）。 */}
         {statsBar && approvalBar == null && contextDisplayMode !== "ring" ? statsBar : null}
       </div>
+      {imageAnnotation.dialog}
     </div>
   );
 });

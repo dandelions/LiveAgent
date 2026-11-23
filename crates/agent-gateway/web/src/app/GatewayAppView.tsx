@@ -14,6 +14,7 @@ import { TaskProgressBar } from "@liveagent/ui/components/chat/TaskProgressBar";
 import { WorkspaceCloneModal } from "@liveagent/ui/components/chat/WorkspaceCloneModal";
 import { WorkspaceCloneTaskOverlay } from "@liveagent/ui/components/chat/WorkspaceCloneTaskOverlay";
 import { WorkspaceProjectSettingsModal } from "@liveagent/ui/components/chat/WorkspaceProjectSettingsModal";
+import { DiagnosticsExportHost } from "@liveagent/ui/components/diagnostics/DiagnosticsExportHost";
 import { ChevronDown } from "@liveagent/ui/components/IconSet";
 import { ProjectToolsPanelToggle } from "@liveagent/ui/components/project-tools/ProjectToolsPanelToggle";
 import { RightDockPanel } from "@liveagent/ui/components/project-tools/RightDockPanel";
@@ -45,6 +46,7 @@ import {
 } from "@liveagent/ui/lib/chat/checkpointRewind";
 import {
   type CommandPaletteAction,
+  type CommandPaletteFileSourceProvider,
   isMacLikePlatform,
 } from "@liveagent/ui/lib/chat/commandPalette";
 import {
@@ -52,12 +54,30 @@ import {
   SHARED_COMMAND_PALETTE_SETTINGS_SECTIONS,
 } from "@liveagent/ui/lib/chat/commandPaletteActions";
 import type { ComposerCommandHost } from "@liveagent/ui/lib/chat/composerCommands";
+import type { ComposerCommentInput } from "@liveagent/ui/lib/chat/composerComments";
 import { rememberSshHostNames } from "@liveagent/ui/lib/chat/sshManagerDisplay";
+import { nextThinkingLevel } from "@liveagent/ui/lib/chat/thinkingLevels";
 import type { PendingUploadedFile } from "@liveagent/ui/lib/chat/uploadedFiles";
 import { mergePendingUploadedFiles } from "@liveagent/ui/lib/chat/uploadedFiles";
+import {
+  activateRightDockTab,
+  isFocusInRightDock,
+  resolveCloseContextTarget,
+  resolveTerminalToggle,
+} from "@liveagent/ui/lib/chat/workbenchCommands";
+import { requestDiagnosticsExport } from "@liveagent/ui/lib/diagnostics/exportRequests";
 import { parseModelValue } from "@liveagent/ui/lib/models/modelValue";
+import {
+  isWorkbenchNavigationLocationOpenable,
+  parseNavigationLocation,
+  useNavigationHistory,
+  workbenchNavigationLocation,
+} from "@liveagent/ui/lib/navigation/navigationHistory";
 import { kbrainResourceHostCapabilities } from "@liveagent/ui/lib/resourceHost";
-import { normalizeSidebarShortcuts } from "@liveagent/ui/lib/settings/sidebarShortcuts";
+import {
+  normalizeSidebarShortcuts,
+  type SidebarShortcutId,
+} from "@liveagent/ui/lib/settings/sidebarShortcuts";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { useSidebarSelector } from "@liveagent/ui/lib/sidebar/useSidebarSelector";
 import {
@@ -135,6 +155,7 @@ import {
 import { WorkdirPickerModal } from "@/pages/settings/WorkdirPickerModal";
 import { openUrl } from "@/shims/tauriOpener";
 import { settingsHostAdapter } from "../agent-ui-adapters/settingsExtension";
+import { webSettingsSearch } from "../agent-ui-adapters/settingsSearch";
 import { AgentSelector } from "./AgentSelector";
 import { ConversationStatsBarHost } from "./ConversationStatsBarHost";
 import { asErrorMessage } from "./chatEventUtils";
@@ -176,7 +197,7 @@ export function GatewayAppView({
   const chatFrameRef = useRef<HTMLDivElement | null>(null);
   useWindowFileDropGuard();
   const {
-    activeFloorKey,
+    activeFloorStore,
     activeSelectedModel,
     activeView,
     activeWorkspaceProject,
@@ -318,6 +339,7 @@ export function GatewayAppView({
     historyDetailLoadingTitle,
     historyShareToken,
     importFilesForConversation,
+    replacePendingUpload,
     isAgentDevExecutionMode,
     isAgentMode,
     isConversationBusy,
@@ -362,7 +384,6 @@ export function GatewayAppView({
     selectedValue,
     selectionForConversation,
     sendChat,
-    setActiveFloorKey,
     setCachedComposerDraft,
     setPendingUploadsForConversation,
     setProjectPickerOpen,
@@ -464,10 +485,10 @@ export function GatewayAppView({
   const sttSettingsService = useMemo(
     () =>
       createWebSttSettingsService(async (sttSecretUpdate) => {
-        if (!api) throw new Error("桌面 Agent 未连接，无法同步 STT 配置");
+        if (!api) throw new Error(translate("gatewayWeb.sttSyncNeedsAgent", settings.locale));
         await api.updateSettings({ sttSecretUpdate });
       }),
-    [api],
+    [api, settings.locale],
   );
 
   const {
@@ -480,6 +501,10 @@ export function GatewayAppView({
     (text: string) => {
       composerRef.current?.insertQuote(text);
     },
+    [composerRef],
+  );
+  const handleCommentSelection = useCallback(
+    (comment: ComposerCommentInput) => composerRef.current?.upsertComment(comment) != null,
     [composerRef],
   );
   const trajectoryHost = useMemo(
@@ -544,7 +569,7 @@ export function GatewayAppView({
 
   const handleCheckpointRewound = useCallback(
     (info: CheckpointRewoundInfo) => {
-      const notice = formatCheckpointRewoundNotification(info, settings.locale === "zh-CN");
+      const notice = formatCheckpointRewoundNotification(info, settings.locale);
       addNotify(notice.level, notice.message);
     },
     [addNotify, settings.locale],
@@ -594,6 +619,7 @@ export function GatewayAppView({
         case "sshTunnel":
         case "backgroundTasks":
         case "browser":
+        case "plugins":
           return translate(projectToolSurfaceTitleKey(surface.kind), settings.locale);
         case "localTerminal":
           return surface.launchSpec.title?.trim() || surface.launchSpec.shell?.trim() || "Terminal";
@@ -806,6 +832,7 @@ export function GatewayAppView({
     subscribePendingUploads,
     updatePendingUploads: updatePendingUploadsForConversation,
     importFilesForConversation,
+    replacePendingUpload,
     getCachedComposerDraft,
     setCachedComposerDraft,
     notifyError: (message) => addNotify("error", message),
@@ -960,6 +987,8 @@ export function GatewayAppView({
         current.filter((file) => file.relativePath !== relativePath),
       );
     },
+    onReplacePendingUpload: (relativePath, replacement) =>
+      replacePendingUpload(relativePath, replacement),
     queuedTurns: queuedChatTurnsForDisplayedConversation,
     queuePaused,
     onRunQueuedTurnNow: runQueuedTurnNow,
@@ -1014,7 +1043,7 @@ export function GatewayAppView({
           <FloorNavRail
             conversationId={displayedConversationId}
             floors={transcriptFloors}
-            activeRowKey={activeFloorKey}
+            activeRowKeyStore={activeFloorStore}
             bottomOffset="calc(var(--gateway-chat-composer-overlay-height, var(--spacing-176px)) + var(--spacing-12px))"
             scrollViewport={transcriptViewport}
             onJump={handleFloorJump}
@@ -1032,7 +1061,7 @@ export function GatewayAppView({
     viewportFollowing: transcriptFollowing,
     onJumpToBottom: transcriptFollow.jumpToBottom,
     navRef: transcriptNavRef,
-    onAnchorUserRowChange: setActiveFloorKey,
+    onAnchorUserRowChange: activeFloorStore.set,
     onResendFromEdit: handleResendFromEdit,
     onBranchConversation: handleBranchConversation,
     branchPendingMessageId,
@@ -1368,6 +1397,55 @@ export function GatewayAppView({
     [workbenchController.leasedDockSessionIds],
   );
 
+  // "Close current view" (Mod+Alt+W by default): see resolveCloseContextTarget.
+  const closeActiveContextTarget = () =>
+    resolveCloseContextTarget({
+      activeView,
+      paneCount: sessionWorkbench.enabled
+        ? Object.keys(workbenchController.workbench.layoutRef.current.panes).length
+        : 1,
+      rightDockOpen: activeView === "chat" && rightDockOpen,
+      focusInDock: isFocusInRightDock(),
+    });
+  const closeActiveContext = () => {
+    const target = closeActiveContextTarget();
+    if (target === "hub") {
+      setActiveView("chat");
+    } else if (target === "dock") {
+      setRightDockOpen(false);
+    } else if (target === "pane") {
+      const focusedPaneId = workbenchController.workbench.layoutRef.current.focusedPaneId;
+      if (focusedPaneId) workbenchController.requestClosePane(focusedPaneId);
+    }
+  };
+
+  // Back / forward through the conversations and hubs the main area showed.
+  const displayedConversationIdRef = useRef(displayedConversationId);
+  displayedConversationIdRef.current = displayedConversationId;
+  const navigationHistory = useNavigationHistory({
+    location: workbenchNavigationLocation({
+      activeView,
+      conversationId: displayedConversationId,
+      isDraft:
+        isLocalDraftConversationId(displayedConversationId) ||
+        !sidebarConversationsById.has(displayedConversationId),
+    }),
+    isValid: (location) =>
+      isWorkbenchNavigationLocationOpenable(location, {
+        hasConversation: (id) => sidebarConversationsById.has(id),
+        visibleHubs: normalizeSidebarShortcuts(settings.customSettings.sidebarShortcuts),
+      }),
+    navigate: (location) => {
+      const target = parseNavigationLocation(location);
+      if (target?.kind === "view") {
+        handleSidebarOpenResourceHub(target.view.replace(/-hub$/, "") as SidebarShortcutId);
+      } else if (target) {
+        if (target.conversationId === displayedConversationIdRef.current) setActiveView("chat");
+        else handleSidebarSelectConversation(target.conversationId);
+      }
+    },
+  });
+
   // Cmd/Ctrl+K palette: rebuilt per render, read by the sidebar only when it opens.
   const buildCommandPaletteActionsLatestRef = useRef<() => CommandPaletteAction[]>(() => []);
   buildCommandPaletteActionsLatestRef.current = () =>
@@ -1382,6 +1460,8 @@ export function GatewayAppView({
         ...SHARED_COMMAND_PALETTE_SETTINGS_SECTIONS.filter((section) => section.id !== "remote"),
         { id: "shortcuts", labelKey: "settings.navShortcuts" },
       ],
+      onExportDiagnostics: requestDiagnosticsExport,
+      settingsSearch: { host: webSettingsSearch, hiddenSections: ["remote"] },
       sidebar: { open: sidebarOpen, onToggle: () => setSidebarOpen((open) => !open) },
       theme: {
         current: settings.theme,
@@ -1427,11 +1507,67 @@ export function GatewayAppView({
             }
           : undefined,
       onStopRun: composerIsSending ? handlePrimaryComposerStop : undefined,
+      history: navigationHistory,
+      terminal:
+        terminalClient && !terminalDisabledMessage
+          ? {
+              onToggle: () => {
+                const toggle = resolveTerminalToggle({
+                  open: activeView === "chat" && rightDockOpen,
+                  activeTabId: rightDockProjectState.activeTabId,
+                  tabOrder: rightDockProjectState.tabOrder,
+                  sessions: projectTerminalSessions,
+                });
+                if (toggle.kind === "close") {
+                  setRightDockOpen(false);
+                  return;
+                }
+                setActiveView("chat");
+                setRightDockOpen(true);
+                const { sessionId } = toggle;
+                if (sessionId) {
+                  handleRightDockProjectStateChange((current) =>
+                    activateRightDockTab(current, sessionId),
+                  );
+                }
+              },
+            }
+          : undefined,
+      thinking: nextThinkingLevel({
+        reasoningOptions: chatRuntimeReasoningOptions,
+        thinkingAlwaysOn: chatRuntimeThinkingAlwaysOn,
+        controls: chatRuntimeControlsForCurrentProvider,
+      })
+        ? {
+            onCycle: () => {
+              const next = nextThinkingLevel({
+                reasoningOptions: chatRuntimeReasoningOptions,
+                thinkingAlwaysOn: chatRuntimeThinkingAlwaysOn,
+                controls: chatRuntimeControlsForCurrentProvider,
+              });
+              if (next) handleChatRuntimeControlsChange(next.patch);
+            },
+          }
+        : undefined,
+      closeContext: closeActiveContextTarget() ? { onClose: closeActiveContext } : undefined,
     });
   const getCommandPaletteActions = useCallback(
     () => buildCommandPaletteActionsLatestRef.current(),
     [],
   );
+  // Palette `@` scope: files of the project the terminal / file tree use.
+  const commandPaletteFilesLatestRef = useRef<CommandPaletteFileSourceProvider>(() => null);
+  commandPaletteFilesLatestRef.current = () =>
+    terminalProjectPath
+      ? {
+          workdir: terminalProjectPath,
+          open: (path) => {
+            setActiveView("chat");
+            handleOpenWorkspaceFile(path);
+          },
+        }
+      : null;
+  const getCommandPaletteFiles = useCallback(() => commandPaletteFilesLatestRef.current(), []);
 
   // 拖拽幽灵:跟随指针的载荷标题,提交/取消后随 dragState 清空。
   const workbenchDragGhost =
@@ -1500,6 +1636,7 @@ export function GatewayAppView({
                 }))
               }
               onOpenSidebar={() => setSidebarOpen((open) => !open)}
+              history={navigationHistory}
               leadingActions={
                 activeView === "chat" && hasConversationReply && !workbenchHasMultiplePanes ? (
                   <ConversationViewTabs
@@ -1612,6 +1749,7 @@ export function GatewayAppView({
                 onOpenSettings={openSettings}
                 onOpenResourceHub={handleSidebarOpenResourceHub}
                 getCommandPaletteActions={getCommandPaletteActions}
+                getCommandPaletteFiles={getCommandPaletteFiles}
               />
 
               {shareConversation ? (
@@ -1739,7 +1877,7 @@ export function GatewayAppView({
                               <div
                                 className={cn(
                                   "gateway-banner-error mx-20px mt-12px mb-0",
-                                  "rounded-14px border border-destructive/16 bg-destructive/8 px-12px py-10px text-sm text-destructive",
+                                  "rounded-xl border border-destructive/16 bg-destructive/8 px-12px py-10px text-sm text-destructive",
                                   "max-640:mx-10px max-640:mt-8px max-640:mb-0",
                                 )}
                               >
@@ -1750,7 +1888,7 @@ export function GatewayAppView({
                               <div
                                 className={cn(
                                   "gateway-banner-error mx-20px mt-12px mb-0",
-                                  "rounded-14px border border-destructive/16 bg-destructive/8 px-12px py-10px text-sm text-destructive",
+                                  "rounded-xl border border-destructive/16 bg-destructive/8 px-12px py-10px text-sm text-destructive",
                                   "max-640:mx-10px max-640:mt-8px max-640:mb-0",
                                 )}
                               >
@@ -1761,7 +1899,7 @@ export function GatewayAppView({
                               <div
                                 className={cn(
                                   "gateway-banner-error mx-20px mt-12px mb-0",
-                                  "rounded-14px border border-destructive/16 bg-destructive/8 px-12px py-10px text-sm text-destructive",
+                                  "rounded-xl border border-destructive/16 bg-destructive/8 px-12px py-10px text-sm text-destructive",
                                   "max-640:mx-10px max-640:mt-8px max-640:mb-0",
                                 )}
                               >
@@ -1772,7 +1910,7 @@ export function GatewayAppView({
                               <div
                                 className={cn(
                                   "gateway-banner-error mx-20px mt-12px mb-0",
-                                  "rounded-14px border border-destructive/16 bg-destructive/8 px-12px py-10px text-sm text-destructive",
+                                  "rounded-xl border border-destructive/16 bg-destructive/8 px-12px py-10px text-sm text-destructive",
                                   "max-640:mx-10px max-640:mt-8px max-640:mb-0",
                                 )}
                               >
@@ -1838,10 +1976,14 @@ export function GatewayAppView({
                                               settings.customSettings.chatTranscript
                                                 .expandProcessByDefault
                                             }
+                                            showDetailedProgress={
+                                              settings.customSettings.chatTranscript
+                                                .showDetailedProgress
+                                            }
                                             isViewportFollowing={transcriptFollow.isFollowing}
                                             viewportFollowing={transcriptFollowing}
                                             navRef={transcriptNavRef}
-                                            onAnchorUserRowChange={setActiveFloorKey}
+                                            onAnchorUserRowChange={activeFloorStore.set}
                                             error={transcriptError}
                                             toolStatus={transcriptToolStatus}
                                             toolStatusIsCompaction={
@@ -1873,6 +2015,7 @@ export function GatewayAppView({
                                             branchPendingMessageId={branchPendingMessageId}
                                             onSuggestionSelect={handleEmptyStateSuggestion}
                                             onQuoteSelection={handleQuoteSelection}
+                                            onCommentSelection={handleCommentSelection}
                                           />
                                         </CheckpointRewindProvider>
                                       </ChangedFilesActionsProvider>
@@ -1896,7 +2039,7 @@ export function GatewayAppView({
                                       <FloorNavRail
                                         conversationId={displayedConversationId}
                                         floors={transcriptFloors}
-                                        activeRowKey={activeFloorKey}
+                                        activeRowKeyStore={activeFloorStore}
                                         bottomOffset="calc(var(--gateway-chat-composer-overlay-height, var(--spacing-176px)) + var(--spacing-12px))"
                                         scrollViewport={transcriptViewport}
                                         onJump={handleFloorJump}
@@ -2155,6 +2298,9 @@ export function GatewayAppView({
                                         ),
                                     );
                                   }}
+                                  onReplacePendingUpload={(relativePath, replacement) =>
+                                    replacePendingUpload(relativePath, replacement)
+                                  }
                                   queuedTurns={queuedChatTurnsForDisplayedConversation}
                                   queuePaused={queuePaused}
                                   queueControlPending={queueControlPending}
@@ -2396,6 +2542,7 @@ export function GatewayAppView({
               />
             </div>
           ) : null}
+          <DiagnosticsExportHost settings={settings} />
         </div>
       </AppErrorBoundary>
     </LocaleContext.Provider>

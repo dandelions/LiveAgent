@@ -229,6 +229,7 @@ export type AssistantActivityRow = {
 export type TranscriptRow = SummaryRow | UserRow | AssistantUnitRow | AssistantActivityRow;
 
 export type TranscriptRowsSnapshot = {
+  getRowKey: (index: number) => string | number;
   rows: TranscriptRow[];
   // Exactly one stable activity row is force-mounted for the active reply.
   // Its completed and mutable child units reconcile inside that outer row.
@@ -633,6 +634,18 @@ function buildAssistantUnits(input: BuildAssistantUnitsInput): AssistantUnitRow[
   return reconciled;
 }
 
+function sameLiveTailInput(previous: LiveTailInput, next: LiveTailInput) {
+  return (
+    previous.draftAssistantText === next.draftAssistantText &&
+    previous.liveRounds === next.liveRounds &&
+    previous.toolStatus === next.toolStatus &&
+    previous.retryAttempts === next.retryAttempts &&
+    previous.isSettled === next.isSettled &&
+    previous.isSending === next.isSending &&
+    (previous.isCompactionRunning ?? false) === (next.isCompactionRunning ?? false)
+  );
+}
+
 export type TranscriptRowModel = {
   build: (historyItems: RenderTimelineItem[], live: LiveTailInput) => TranscriptRowsSnapshot;
   reset: () => void;
@@ -653,6 +666,13 @@ export function createTranscriptRowModel(): TranscriptRowModel {
     }
   >();
   let historyRowsCache: { items: RenderTimelineItem[]; rows: TranscriptRow[] } | null = null;
+  let keyLookup:
+    | {
+        prefix: TranscriptRow[];
+        tailKey: string | undefined;
+        getRowKey: TranscriptRowsSnapshot["getRowKey"];
+      }
+    | undefined;
   let streamOrigins = new Map<string, string>();
   let turnSeq = 0;
   let activeTurn: {
@@ -666,16 +686,25 @@ export function createTranscriptRowModel(): TranscriptRowModel {
   let pendingSettle: { replyKey: string; keysAtStart: ReadonlySet<string> } | null = null;
   let deferredSettles: { replyKey: string; keysAtStart: ReadonlySet<string> }[] = [];
   let draftRoundCache: { text: string; round: LiveRound } | null = null;
+  // The list and its live row host both build from the same store snapshot in
+  // one render pass; the second call returns the first result.
+  let lastBuild: {
+    historyItems: RenderTimelineItem[];
+    live: LiveTailInput;
+    snapshot: TranscriptRowsSnapshot;
+  } | null = null;
 
   const reset = () => {
     rowCache = new WeakMap();
     historyRowsCache = null;
+    keyLookup = undefined;
     streamOrigins = new Map();
     turnSeq = 0;
     activeTurn = null;
     pendingSettle = null;
     deferredSettles = [];
     draftRoundCache = null;
+    lastBuild = null;
   };
 
   const draftRound = (text: string): LiveRound => {
@@ -729,6 +758,7 @@ export function createTranscriptRowModel(): TranscriptRowModel {
       if (rowCache.has(leader)) {
         rowCache.delete(leader);
         historyRowsCache = null;
+        keyLookup = undefined;
       }
       return true;
     }
@@ -827,6 +857,22 @@ export function createTranscriptRowModel(): TranscriptRowModel {
     historyItems: RenderTimelineItem[],
     live: LiveTailInput,
   ): TranscriptRowsSnapshot => {
+    if (
+      lastBuild &&
+      lastBuild.historyItems === historyItems &&
+      sameLiveTailInput(lastBuild.live, live)
+    ) {
+      return lastBuild.snapshot;
+    }
+    const snapshot = buildSnapshot(historyItems, live);
+    lastBuild = { historyItems, live, snapshot };
+    return snapshot;
+  };
+
+  const buildSnapshot = (
+    historyItems: RenderTimelineItem[],
+    live: LiveTailInput,
+  ): TranscriptRowsSnapshot => {
     const liveTailVisible =
       (live.isSending || live.isCompactionRunning === true) && !live.isSettled;
 
@@ -908,6 +954,7 @@ export function createTranscriptRowModel(): TranscriptRowModel {
     }
 
     let rows = historyRows;
+    let prefix = historyRows;
     let liveStartIndex = -1;
     if ((liveTailVisible || pendingSettle) && activeTurn) {
       // 运行中压缩：前半段回复已经作为历史项落库（assistant → summary），后半段
@@ -977,11 +1024,22 @@ export function createTranscriptRowModel(): TranscriptRowModel {
           ? activeTurn.lastActivityRow
           : buildAssistantActivityRow(activeTurn.replyKey, liveUnits);
       activeTurn.lastActivityRow = liveActivity;
-      rows = [...visibleHistoryRows, liveActivity];
+      prefix = visibleHistoryRows;
+      rows = [...prefix, liveActivity];
       liveStartIndex = rows.length - 1;
     }
 
-    return { rows, liveStartIndex };
+    // The virtualizer keys its measurements by the lookup's identity. Retain
+    // it for streamed text updates, but replace it when the row order changes.
+    const tailKey = liveStartIndex < 0 ? undefined : rows[liveStartIndex]?.key;
+    if (!keyLookup || keyLookup.prefix !== prefix || keyLookup.tailKey !== tailKey) {
+      keyLookup = {
+        prefix,
+        tailKey,
+        getRowKey: (index) => (index === prefix.length ? tailKey : prefix[index]?.key) ?? index,
+      };
+    }
+    return { rows, liveStartIndex, getRowKey: keyLookup.getRowKey };
   };
 
   return { build, reset };

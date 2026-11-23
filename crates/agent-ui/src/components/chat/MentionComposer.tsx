@@ -37,19 +37,19 @@ import {
   runComposerCommand,
 } from "@liveagent/ui/lib/chat/composerCommands";
 import {
+  type ComposerComment,
+  type ComposerCommentInput,
+  createComposerComment,
+  removeComposerComment,
+  upsertComposerComment,
+} from "@liveagent/ui/lib/chat/composerComments";
+import {
   insertPlainTextWithUndo,
   normalizeLogicalLineEndings,
 } from "@liveagent/ui/lib/chat/composerText";
 import type { ConversationReferenceInsertResult } from "@liveagent/ui/lib/chat/conversationReferenceDrag";
 import { composerBlockSeparator } from "@liveagent/ui/lib/chat/diffLineComments";
-import {
-  type CodeMentionReference,
-  formatAppMentionToken,
-  formatCodeMentionToken,
-  formatConversationMentionToken,
-  formatFileMentionToken,
-} from "@liveagent/ui/lib/chat/mentionReferences";
-import { buildComposerQuoteInsertion } from "@liveagent/ui/lib/chat/transcriptQuote";
+import type { CodeMentionReference } from "@liveagent/ui/lib/chat/mentionReferences";
 import { createUuid } from "@liveagent/ui/lib/shared/id";
 import { cn } from "@liveagent/ui/lib/shared/utils";
 import { invokeFs } from "@liveagent/ui/lib/tools/fsBackend";
@@ -71,6 +71,7 @@ import {
 } from "react";
 import { readSendShortcut, shouldSendOnEnter } from "../../lib/chat/sendShortcut";
 import { ComposerCommandPanel } from "./ComposerCommandPanel";
+import { ComposerCommentChips } from "./ComposerCommentChips";
 import {
   CARET_ANCHOR_TEXT,
   COMMIT_MENTION_SHA_ATTR,
@@ -87,6 +88,7 @@ import {
   createFileMentionChip,
   createGitFileMentionChip,
   createLargePasteChip,
+  createQuoteChip,
   createSkillMentionChip,
   deleteChipAfterCursor,
   deleteChipBeforeCursor,
@@ -101,9 +103,6 @@ import {
   enforceUniqueAppMentionsInEditor,
   ensureTrailingCaretAnchor,
   extractClipboardFiles,
-  formatCommitMentionToken,
-  formatGitFileMentionToken,
-  formatSkillMentionToken,
   hasLegacyImeKeyboardSignal,
   IME_COMPOSITION_END_ENTER_TAIL_MS,
   IME_ENTER_SUPPRESS_WINDOW_MS,
@@ -162,6 +161,7 @@ import {
   selectionContainsPoint,
   serializeChildren,
   serializeChildrenToSegments,
+  serializeDraftSegments,
   stepCaretOverChip,
   writeComposerClipboardSnapshot,
   writeTextToClipboard,
@@ -220,7 +220,7 @@ export const MentionComposer = memo(
     }: MentionComposerProps,
     ref,
   ) {
-    const { locale, t } = useLocale();
+    const { t } = useLocale();
     const editorRef = useRef<HTMLDivElement>(null);
     const wrapperRef = useRef<HTMLDivElement>(null);
     const commandOwnerRef = useRef(currentConversationId);
@@ -243,6 +243,10 @@ export const MentionComposer = memo(
     const commitTooltipCloseTimerRef = useRef<number | null>(null);
     const commitTooltipChipRef = useRef<HTMLElement | null>(null);
     const [isDomEmpty, setIsDomEmpty] = useState(true);
+    // Pending comments render as a chip row above the editor; the ref is the
+    // synchronous source for getDraft/empty-state reads between renders.
+    const [comments, setCommentsState] = useState<ComposerComment[]>([]);
+    const commentsRef = useRef<ComposerComment[]>([]);
     const lastIsEmptyRef = useRef(true);
     const lastIsDomEmptyRef = useRef(true);
     const isComposingRef = useRef(false);
@@ -772,8 +776,21 @@ export const MentionComposer = memo(
     const refreshEmptyState = useCallback(() => {
       const el = editorRef.current;
       if (!el) return;
-      applyEmptyState(editorTextIsEmpty(el), editorHasNoContent(el));
+      applyEmptyState(
+        editorTextIsEmpty(el) && commentsRef.current.length === 0,
+        editorHasNoContent(el),
+      );
     }, [applyEmptyState]);
+
+    const setComments = useCallback(
+      (next: ComposerComment[]) => {
+        if (next === commentsRef.current) return;
+        commentsRef.current = next;
+        setCommentsState(next);
+        refreshEmptyState();
+      },
+      [refreshEmptyState],
+    );
 
     const clearTransientText = useCallback(
       (preserveLastText: boolean) => {
@@ -831,7 +848,11 @@ export const MentionComposer = memo(
         };
       }
 
-      const segments = serializeChildrenToSegments(el, largePastesRef.current);
+      const pendingComments = commentsRef.current;
+      const segments: MentionComposerDraftSegment[] = [
+        ...serializeChildrenToSegments(el, largePastesRef.current),
+        ...pendingComments.map((comment) => ({ type: "comment" as const, comment })),
+      ];
       const largePastes: MentionComposerLargePaste[] = [];
       const skillMentions: MentionComposerSkillMention[] = [];
       const appMentions: MentionComposerAppMention[] = [];
@@ -839,54 +860,23 @@ export const MentionComposer = memo(
       const gitFileMentions: MentionComposerGitFileMention[] = [];
       const conversationMentions: MentionComposerConversationMention[] = [];
       const codeMentions: CodeMentionReference[] = [];
-      const textParts: string[] = [];
-      const textWithoutLargePastesParts: string[] = [];
       for (const segment of segments) {
-        if (segment.type === "text") {
-          textParts.push(segment.text);
-          textWithoutLargePastesParts.push(segment.text);
-        } else if (segment.type === "fileMention") {
-          const token = formatFileMentionToken(segment.reference);
-          textParts.push(token);
-          textWithoutLargePastesParts.push(token);
-        } else if (segment.type === "largePaste") {
-          largePastes.push(segment.paste);
-          textParts.push(segment.paste.text);
-        } else if (segment.type === "skillMention") {
-          skillMentions.push(segment.skill);
-          const token = formatSkillMentionToken(segment.skill);
-          textParts.push(token);
-          textWithoutLargePastesParts.push(token);
-        } else if (segment.type === "appMention") {
-          appMentions.push(segment.app);
-          const token = formatAppMentionToken(segment.app);
-          textParts.push(token);
-          textWithoutLargePastesParts.push(token);
-        } else if (segment.type === "commitMention") {
-          commitMentions.push(segment.commit);
-          const token = formatCommitMentionToken(segment.commit);
-          textParts.push(token);
-          textWithoutLargePastesParts.push(token);
-        } else if (segment.type === "gitFileMention") {
-          gitFileMentions.push(segment.file);
-          const token = formatGitFileMentionToken(segment.file);
-          textParts.push(token);
-          textWithoutLargePastesParts.push(token);
-        } else if (segment.type === "conversationMention") {
+        if (segment.type === "largePaste") largePastes.push(segment.paste);
+        else if (segment.type === "skillMention") skillMentions.push(segment.skill);
+        else if (segment.type === "appMention") appMentions.push(segment.app);
+        else if (segment.type === "commitMention") commitMentions.push(segment.commit);
+        else if (segment.type === "gitFileMention") gitFileMentions.push(segment.file);
+        else if (segment.type === "conversationMention")
           conversationMentions.push(segment.conversation);
-          const token = formatConversationMentionToken(segment.conversation);
-          textParts.push(token);
-          textWithoutLargePastesParts.push(token);
-        } else if (segment.type === "codeMention") {
-          codeMentions.push(segment.reference);
-          const token = formatCodeMentionToken(segment.reference);
-          textParts.push(token);
-          textWithoutLargePastesParts.push(token);
-        }
+        else if (segment.type === "codeMention") codeMentions.push(segment.reference);
       }
 
-      const text = normalizeSerializedText(textParts.join(""));
-      const textWithoutLargePastes = normalizeSerializedText(textWithoutLargePastesParts.join(""));
+      const text = normalizeSerializedText(serializeDraftSegments(segments));
+      const textWithoutLargePastes = largePastes.length
+        ? normalizeSerializedText(
+            serializeDraftSegments(segments.filter((segment) => segment.type !== "largePaste")),
+          )
+        : text;
       return {
         segments,
         text,
@@ -898,7 +888,8 @@ export const MentionComposer = memo(
         gitFileMentions,
         conversationMentions,
         codeMentions,
-        isEmpty: editorTextIsEmpty(el),
+        comments: pendingComments.slice(),
+        isEmpty: editorTextIsEmpty(el) && pendingComments.length === 0,
       };
     }, []);
 
@@ -1020,6 +1011,14 @@ export const MentionComposer = memo(
         closeCommitTooltip();
         closeComposerContextMenu();
 
+        const draftComments: ComposerComment[] = [];
+        for (const segment of draft.segments) {
+          if (segment.type !== "comment") continue;
+          const comment = createComposerComment(segment.comment);
+          if (comment) draftComments.push(comment);
+        }
+        commentsRef.current = draftComments;
+        setCommentsState(draftComments);
         const sanitizedSegments = sanitizeAppMentionSegments(
           el,
           sanitizeConversationMentionSegments(el, draft.segments, {
@@ -1036,6 +1035,9 @@ export const MentionComposer = memo(
           } else if (segment.type === "fileMention") {
             const chip = createFileMentionChip(segment.reference.path, segment.reference.kind);
             if (chip) el.appendChild(chip);
+          } else if (segment.type === "quote") {
+            const chip = createQuoteChip(segment.text);
+            if (chip) el.appendChild(chip);
           } else if (segment.type === "skillMention") {
             el.appendChild(createSkillMentionChip(segment.skill));
           } else if (segment.type === "appMention") {
@@ -1050,7 +1052,7 @@ export const MentionComposer = memo(
           } else if (segment.type === "codeMention") {
             const chip = createCodeMentionChip(segment.reference);
             if (chip) el.appendChild(chip);
-          } else if (segment.text) {
+          } else if (segment.type === "text" && segment.text) {
             el.appendChild(document.createTextNode(normalizeLogicalLineEndings(segment.text)));
           }
         }
@@ -1150,7 +1152,7 @@ export const MentionComposer = memo(
         getDraft: buildDraft,
         hasContent: () => {
           const el = editorRef.current;
-          return el != null && !editorTextIsEmpty(el);
+          return el != null && (!editorTextIsEmpty(el) || commentsRef.current.length > 0);
         },
         setText: setEditorText,
         runCommandDraft,
@@ -1229,24 +1231,31 @@ export const MentionComposer = memo(
         insertQuote: (text: string) => {
           const el = editorRef.current;
           if (!el || disabled) return false;
-          const existing = normalizeSerializedText(serializeChildren(el, largePastesRef.current));
-          const insertion = buildComposerQuoteInsertion(existing, text);
-          if (!insertion) return false;
+          const chip = createQuoteChip(text);
+          if (!chip) return false;
           resetPromptHistoryRecall();
           el.focus({ preventScroll: true });
           placeCaretAtEditorEnd();
-          insertComposerSegmentsAtSelection(
-            el,
-            // The trailing caret anchor gives the empty reply line a line box
-            // so the caret paints below the quote; serialization strips it.
-            [{ type: "text", text: `${insertion}${CARET_ANCHOR_TEXT}` }],
-            largePastesRef.current,
-          );
+          insertNodeAtCursor(el, chip);
           closeMentionSession();
           refreshEmptyState();
           scheduleComposerSelectionScroll(el);
           return true;
         },
+        upsertComment: (input: ComposerCommentInput) => {
+          if (!editorRef.current || disabled) return null;
+          const comment = createComposerComment(input);
+          if (!comment) return null;
+          const next = upsertComposerComment(commentsRef.current, comment);
+          if (next === commentsRef.current) return null;
+          resetPromptHistoryRecall();
+          setComments(next);
+          return comment.id;
+        },
+        removeComment: (id: string) => {
+          setComments(removeComposerComment(commentsRef.current, id));
+        },
+        getComments: () => commentsRef.current.slice(),
         beginTransientText: () => {
           const el = editorRef.current;
           if (!el || disabled) return false;
@@ -1317,15 +1326,33 @@ export const MentionComposer = memo(
           resetPromptHistoryRecall();
           el.innerHTML = "";
           largePastesRef.current.clear();
+          commentsRef.current = [];
+          setCommentsState([]);
           closeCommitTooltip();
           closeComposerContextMenu();
           closeMentionSession();
           refreshEmptyState();
         },
         focus: () => editorRef.current?.focus(),
-        appendSegments: (segments: MentionComposerDraftSegment[]) => {
+        appendSegments: (incoming: MentionComposerDraftSegment[]) => {
           const el = editorRef.current;
-          if (!el || disabled || segments.length === 0) return false;
+          if (!el || disabled || incoming.length === 0) return false;
+          let nextComments = commentsRef.current;
+          const segments: MentionComposerDraftSegment[] = [];
+          for (const segment of incoming) {
+            if (segment.type !== "comment") {
+              segments.push(segment);
+              continue;
+            }
+            const comment = createComposerComment(segment.comment);
+            if (comment) nextComments = upsertComposerComment(nextComments, comment);
+          }
+          const addedComments = nextComments !== commentsRef.current;
+          if (addedComments) setComments(nextComments);
+          if (!segments.some((segment) => segment.type !== "text" || segment.text.trim())) {
+            if (addedComments) el.focus({ preventScroll: true });
+            return addedComments;
+          }
           const existing = normalizeSerializedText(serializeChildren(el, largePastesRef.current));
           const separator = composerBlockSeparator(existing);
           const payload: MentionComposerDraftSegment[] = [
@@ -1355,6 +1382,7 @@ export const MentionComposer = memo(
         refreshEmptyState,
         resetPromptHistoryRecall,
         runCommandDraft,
+        setComments,
         setEditorText,
         disabled,
       ],
@@ -1483,20 +1511,12 @@ export const MentionComposer = memo(
       [],
     );
 
-    const contextMenuLabels =
-      locale === "en-US"
-        ? {
-            cut: "Cut",
-            copy: "Copy",
-            paste: "Paste",
-            selectAll: "Select all",
-          }
-        : {
-            cut: "剪切",
-            copy: "复制",
-            paste: "粘贴",
-            selectAll: "全选",
-          };
+    const contextMenuLabels = {
+      cut: t("workspaceEditor.context.cut"),
+      copy: t("workspaceEditor.context.copy"),
+      paste: t("workspaceEditor.context.paste"),
+      selectAll: t("workspaceEditor.context.selectAll"),
+    };
     const contextMenuHasSelection = Boolean(composerContextMenu?.selectedText.length);
     const contextMenuCanMutate = !disabled;
 
@@ -2358,6 +2378,17 @@ export const MentionComposer = memo(
               <span className="min-w-0 flex-1 truncate">{contextMenuLabels.selectAll}</span>
             </ContextMenuItem>
           </ContextMenuPopup>
+        ) : null}
+        {comments.length > 0 ? (
+          <ComposerCommentChips
+            comments={comments}
+            disabled={disabled}
+            onUpdate={(comment) => setComments(upsertComposerComment(commentsRef.current, comment))}
+            onRemove={(id) => {
+              setComments(removeComposerComment(commentsRef.current, id));
+              editorRef.current?.focus({ preventScroll: true });
+            }}
+          />
         ) : null}
         {/* biome-ignore lint/a11y/useSemanticElements: The composer is contenteditable so it can host inline mention chips. */}
         <div

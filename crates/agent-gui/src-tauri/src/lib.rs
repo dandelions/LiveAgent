@@ -65,6 +65,7 @@ macro_rules! app_invoke_handler {
             commands::chat_history::legacy_history_migration_signature,
             commands::planning::planning_migrate_legacy,
             commands::chat_history::pi_migration::pi_history_migration_page,
+            commands::chat_history::pi_migration::pi_history_migration_signature,
             // Trajectory (events ride the owning history segment)
             commands::chat_history::trajectory_append_events,
             commands::chat_history::trajectory_get_events,
@@ -92,6 +93,9 @@ macro_rules! app_invoke_handler {
             commands::fs::fs_edit_text,
             commands::fs::fs_delete,
             commands::fs::fs_open_workspace_path,
+            // Open in external code editor
+            commands::editors::editor_list,
+            commands::editors::editor_open_path,
             commands::fs::fs_create_dir,
             commands::fs::fs_rename,
             commands::fs::fs_roots,
@@ -216,6 +220,7 @@ macro_rules! app_invoke_handler {
             commands::data_dir::data_dir_status,
             commands::data_dir::data_dir_migrate,
             commands::app::app_runtime_platform,
+            commands::app::app_onboarding_auto_start,
             commands::app::app_frontend_ready,
             commands::app::app_set_close_window_behavior,
             commands::app::app_set_global_shortcuts,
@@ -342,6 +347,8 @@ macro_rules! app_invoke_handler {
             commands::system::system_pick_file,
             commands::system::system_sandbox_capability,
             commands::system::system_save_preview_file,
+            commands::diagnostics::diagnostics_collect_native,
+            commands::diagnostics::diagnostics_save_bundle,
             commands::image_export::image_export_asset,
             commands::system::system_create_project_folder,
             commands::system::system_import_pasted_texts,
@@ -900,6 +907,7 @@ pub fn run() {
     // 就在此建立受限令牌并运行真实命令,以其退出码退出——绝不继续初始化 Tauri。
     // 非 Windows 平台为空操作。
     runtime::windows_sandbox::run_sandbox_launcher_if_requested();
+    runtime::startup_timing::mark_launch();
 
     // 必须先于任何 tauri::async_runtime 调用:换成栈更大的 tokio 运行时,
     // 否则调试版处理 Gateway 消息时会撑爆默认 2 MiB 的 worker 栈。
@@ -1013,6 +1021,8 @@ pub fn run() {
             {
                 return;
             }
+            static FIRST_PAGE_LOAD: AtomicBool = AtomicBool::new(false);
+            runtime::startup_timing::log_once(&FIRST_PAGE_LOAD, "webview started loading");
             let app = webview.app_handle();
             if let Some(ready_state) = app.try_state::<Arc<commands::app::FrontendReadyState>>() {
                 ready_state.0.store(false, Ordering::SeqCst);
@@ -1033,6 +1043,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             let hide_after_fullscreen_exit = Arc::clone(&hide_after_fullscreen_exit);
             move |app| {
+                let setup_started = std::time::Instant::now();
                 commands::history_db::initialize_history_db()?;
                 configure_system_tray(app)?;
                 services::planning::notification::install(app.handle());
@@ -1113,6 +1124,20 @@ pub fn run() {
                         }
                     }
                 });
+                // Boot K-brain while the webview loads and parses the frontend, instead of
+                // when the frontend first asks for the connection. Every connection follower
+                // (SSH sync, host bridge, gateway) is subscribed above, and the proxy state
+                // the process inherits is initialised.
+                if let Some(kbrain) =
+                    app.try_state::<Arc<services::kbrain_backend::KBrainBackendState>>()
+                {
+                    kbrain.inner().prestart(app.handle());
+                }
+                eprintln!(
+                    "[startup] app setup finished at {} ms (setup took {} ms)",
+                    runtime::startup_timing::since_launch_ms(),
+                    setup_started.elapsed().as_millis()
+                );
                 Ok(())
             }
         })

@@ -1,4 +1,6 @@
 import { createHostTranslations, type Locale } from "@liveagent/ui/i18n/hostTranslations";
+import { CHAT_PAGE_TRANSLATIONS } from "./chatPageTranslations";
+import { PROVIDER_IMPORT_TRANSLATIONS } from "./providerImportTranslations";
 
 export type { Locale } from "@liveagent/ui/i18n/hostTranslations";
 export {
@@ -13,6 +15,8 @@ export {
  */
 export const GUI_TRANSLATION_OVERRIDES: Record<Locale, Record<string, string>> = {
   "zh-CN": {
+    ...CHAT_PAGE_TRANSLATIONS["zh-CN"],
+    ...PROVIDER_IMPORT_TRANSLATIONS["zh-CN"],
     "app.loadingStalled": "本地服务长时间没有响应，设置还没有加载完成。",
     "app.restartLocalService": "重启本地服务",
     "app.restartingLocalService": "正在重启本地服务…",
@@ -175,6 +179,12 @@ export const GUI_TRANSLATION_OVERRIDES: Record<Locale, Record<string, string>> =
     "settings.aboutPrereleaseDesc": "开启后也会检查 beta、rc 等预发布版本。",
     "settings.systemProxyDesc":
       "生效范围：本地命令环境变量（Bash / 后台任务 / 自动化脚本）、勾选“使用应用代理”的供应商请求、Hook / Cron HTTP 任务、聊天图片加载、更新检查与技能下载。",
+    "settings.editorGroup": "代码编辑器",
+    "settings.preferredEditor": "首选编辑器",
+    "settings.preferredEditorDesc":
+      "文件树、工作空间菜单和对话中的文件链接会用它打开文件。仅对本设备生效。",
+    "settings.preferredEditorNoneDetected": "未检测到受支持的代码编辑器。安装后点击刷新。",
+    "settings.preferredEditorRefresh": "重新检测编辑器",
     "settings.closeWindowBehavior": "关闭窗口",
     "settings.defaultCloseWindowBehavior": "点击关闭按钮时",
     "settings.closeWindowMinimize": "最小化到托盘",
@@ -378,6 +388,8 @@ export const GUI_TRANSLATION_OVERRIDES: Record<Locale, Record<string, string>> =
     "settings.remoteHeartbeatHint": "本地 Agent 向 Gateway 上报存活状态的间隔",
   },
   "en-US": {
+    ...CHAT_PAGE_TRANSLATIONS["en-US"],
+    ...PROVIDER_IMPORT_TRANSLATIONS["en-US"],
     "app.loadingStalled":
       "The local service has not answered for a while, so settings are still loading.",
     "app.restartLocalService": "Restart local service",
@@ -561,6 +573,13 @@ export const GUI_TRANSLATION_OVERRIDES: Record<Locale, Record<string, string>> =
     "settings.aboutPrereleaseDesc": "Also check beta, rc, and other pre-release versions.",
     "settings.systemProxyDesc":
       "Applies to: local command environment (Bash / background tasks / automation scripts), providers with “Use app proxy” checked, Hook / Cron HTTP tasks, chat image loading, update checks and skill downloads.",
+    "settings.editorGroup": "Code Editor",
+    "settings.preferredEditor": "Preferred editor",
+    "settings.preferredEditorDesc":
+      'Used by "Open in" in the file tree, workspace menu and chat file links. Applies to this device only.',
+    "settings.preferredEditorNoneDetected":
+      "No supported code editor was detected. Install one, then refresh.",
+    "settings.preferredEditorRefresh": "Detect editors again",
     "settings.closeWindowBehavior": "Close Window",
     "settings.defaultCloseWindowBehavior": "When clicking the close button",
     "settings.closeWindowMinimize": "Minimize to tray",

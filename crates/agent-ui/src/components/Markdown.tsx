@@ -37,6 +37,7 @@ import {
   encodeChatFileLink,
   parseChatFileLink,
 } from "../lib/chat/chatFileLinks";
+import { HTML_PREVIEW_FENCE_LANGUAGE, markHtmlPreviewFences } from "../lib/chat/htmlPreviews";
 import {
   rememberExternalLinkConfirmation,
   shouldSkipExternalLinkConfirmation,
@@ -64,6 +65,12 @@ import {
   RELEASE_NOTES_MARKDOWN_CLASS,
   THINKING_MARKDOWN_CLASS,
 } from "./markdown/markdownStyles";
+import {
+  createStreamingBlockFrame,
+  StreamingBlock,
+  StreamingBlocksProvider,
+} from "./markdown/streamingTailBlock";
+import { HtmlPreviewFence } from "./sandboxed-ui/HtmlPreviewFence";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
 import { CopyButton } from "./ui/copy-button";
@@ -374,9 +381,9 @@ export function MarkdownFileLink(props: MarkdownFileLinkProps) {
       className={cn(
         "inline max-w-full cursor-pointer appearance-none",
         "whitespace-normal rounded-sm border-0 bg-transparent p-0",
-        "text-left font-medium text-sky-600 no-underline",
-        "decoration-sky-500/45 underline-offset-2 outline-none",
-        "[overflow-wrap:anywhere] hover:underline focus-visible:ring-2 focus-visible:ring-ring/35 dark:text-sky-400",
+        "text-left font-medium text-info no-underline",
+        "decoration-info/45 underline-offset-2 outline-none",
+        "[overflow-wrap:anywhere] hover:underline focus-visible:ring-2 focus-visible:ring-ring/35 ",
       )}
       data-liveagent-file-link="true"
       title={label}
@@ -423,7 +430,7 @@ function MarkdownReadOnlyLink(props: MarkdownAnchorFallbackProps) {
         ? href.trim()
         : undefined;
   return (
-    <span className="text-sky-600 no-underline dark:text-sky-400" title={label}>
+    <span className="text-info no-underline " title={label}>
       {children}
     </span>
   );
@@ -447,8 +454,8 @@ function MarkdownExternalLink(props: MarkdownAnchorFallbackProps) {
         className={cn(
           "inline max-w-full cursor-pointer appearance-none",
           "whitespace-normal border-0 bg-transparent p-0",
-          "text-left font-medium text-sky-600 no-underline decoration-sky-500/45 underline-offset-2",
-          "[overflow-wrap:anywhere] hover:underline dark:text-sky-400",
+          "text-left font-medium text-info no-underline decoration-info/45 underline-offset-2",
+          "[overflow-wrap:anywhere] hover:underline ",
           className,
         )}
         data-incomplete={incomplete}
@@ -626,6 +633,26 @@ export function CollapsibleCodePre({
   const [expanded, setExpanded] = useState(false);
 
   if (!childElement) return children;
+
+  if (language === HTML_PREVIEW_FENCE_LANGUAGE) {
+    // An "html preview" fence: a preview card once K-brain saved it, else plain HTML.
+    const htmlChild = cloneElement(childElement, {
+      className: cn(
+        childElement.props.className?.replace(`language-${HTML_PREVIEW_FENCE_LANGUAGE}`, ""),
+        "language-html",
+      ),
+    });
+    return (
+      <HtmlPreviewFence
+        code={codeContent}
+        fallback={
+          <CollapsibleCodePre allowMermaidFullscreen={allowMermaidFullscreen}>
+            {htmlChild}
+          </CollapsibleCodePre>
+        }
+      />
+    );
+  }
 
   if (isRenderedMermaid) {
     return <MarkdownMermaidBlock chart={codeContent} readOnly={!allowMermaidFullscreen} />;
@@ -903,15 +930,17 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
   // Streaming text only grows: split it incrementally and repair just the
   // last block instead of letting Streamdown remend + re-lex all of it on
   // every update (see streamingMarkdownBlocks).
-  const streamingBlockParser = useMemo(
-    () => (streaming ? createStreamingBlockParser() : null),
+  const streamingBlockFrame = useMemo(
+    () => (streaming ? createStreamingBlockFrame(createStreamingBlockParser()) : null),
     [streaming],
   );
   const normalizedContent = useMemo(
     () =>
-      normalizeLatexDelimiters(
-        stripMarkdownCitationMarkers(content, citationAtDocumentEnd, streaming),
-        streaming && showCaret,
+      markHtmlPreviewFences(
+        normalizeLatexDelimiters(
+          stripMarkdownCitationMarkers(content, citationAtDocumentEnd, streaming),
+          streaming && showCaret,
+        ),
       ),
     [citationAtDocumentEnd, content, showCaret, streaming],
   );
@@ -934,42 +963,57 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
     : preserveRelativeUrls
       ? relativeUrlRehypePlugins
       : undefined;
+  // Only a completed block changes what Streamdown itself renders; the
+  // growing last block reads its text from context (see streamingTailBlock).
+  const streamingFrame = useMemo(
+    () => streamingBlockFrame?.update(normalizedContent) ?? null,
+    [streamingBlockFrame, normalizedContent],
+  );
   const profileClasses = new Set(className?.split(/\s+/));
+
+  const markdown = (
+    <Streamdown
+      className={cn(
+        "chat-markdown max-w-none break-words",
+        CHAT_MARKDOWN_CLASS,
+        profileClasses.has("thinking-markdown") && THINKING_MARKDOWN_CLASS,
+        profileClasses.has("document-markdown") && DOCUMENT_MARKDOWN_CLASS,
+        profileClasses.has("plan-markdown") && PLAN_MARKDOWN_CLASS,
+        profileClasses.has("release-notes-markdown") && RELEASE_NOTES_MARKDOWN_CLASS,
+        MARKDOWN_EMBED_CLASSNAME,
+        streaming ? "chat-markdown--streaming" : "chat-markdown--static",
+        showCaret ? "chat-markdown--caret-on" : "chat-markdown--caret-off",
+        className,
+      )}
+      plugins={streamdownPlugins}
+      remarkPlugins={onOpenFileLink ? chatRemarkPlugins : remarkPlugins}
+      {...(rehypePlugins ? { rehypePlugins } : {})}
+      components={components}
+      mode={streaming ? "streaming" : "static"}
+      dir="auto"
+      parseIncompleteMarkdown={streamingBlockFrame === null}
+      parseMarkdownIntoBlocksFn={streamingBlockFrame?.parse ?? parseChatMarkdownBlocks}
+      {...(streamingBlockFrame ? { BlockComponent: StreamingBlock } : {})}
+      normalizeHtmlIndentation
+      isAnimating={showCaret}
+      caret={streaming ? "block" : undefined}
+      animated={false}
+      linkSafety={readOnly ? readOnlyLinkSafety : interactiveLinkSafety}
+      shikiTheme={streamdownShikiThemes}
+      controls={readOnly ? readOnlyStreamdownControls : interactiveStreamdownControls}
+      translations={streamdownTranslations}
+    >
+      {streamingFrame ? streamingFrame.key : normalizedContent}
+    </Streamdown>
+  );
 
   return (
     <div>
-      <Streamdown
-        className={cn(
-          "chat-markdown max-w-none break-words",
-          CHAT_MARKDOWN_CLASS,
-          profileClasses.has("thinking-markdown") && THINKING_MARKDOWN_CLASS,
-          profileClasses.has("document-markdown") && DOCUMENT_MARKDOWN_CLASS,
-          profileClasses.has("plan-markdown") && PLAN_MARKDOWN_CLASS,
-          profileClasses.has("release-notes-markdown") && RELEASE_NOTES_MARKDOWN_CLASS,
-          MARKDOWN_EMBED_CLASSNAME,
-          streaming ? "chat-markdown--streaming" : "chat-markdown--static",
-          showCaret ? "chat-markdown--caret-on" : "chat-markdown--caret-off",
-          className,
-        )}
-        plugins={streamdownPlugins}
-        remarkPlugins={onOpenFileLink ? chatRemarkPlugins : remarkPlugins}
-        {...(rehypePlugins ? { rehypePlugins } : {})}
-        components={components}
-        mode={streaming ? "streaming" : "static"}
-        dir="auto"
-        parseIncompleteMarkdown={streamingBlockParser === null}
-        parseMarkdownIntoBlocksFn={streamingBlockParser ?? parseChatMarkdownBlocks}
-        normalizeHtmlIndentation
-        isAnimating={showCaret}
-        caret={streaming ? "block" : undefined}
-        animated={false}
-        linkSafety={readOnly ? readOnlyLinkSafety : interactiveLinkSafety}
-        shikiTheme={streamdownShikiThemes}
-        controls={readOnly ? readOnlyStreamdownControls : interactiveStreamdownControls}
-        translations={streamdownTranslations}
-      >
-        {normalizedContent}
-      </Streamdown>
+      {streamingFrame ? (
+        <StreamingBlocksProvider value={streamingFrame.blocks}>{markdown}</StreamingBlocksProvider>
+      ) : (
+        markdown
+      )}
     </div>
   );
 });

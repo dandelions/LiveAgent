@@ -1,4 +1,8 @@
 import type { ComposerCommand, ComposerCommandHost } from "@liveagent/ui/lib/chat/composerCommands";
+import type {
+  ComposerComment,
+  ComposerCommentInput,
+} from "@liveagent/ui/lib/chat/composerComments";
 import type { ConversationReferenceInsertResult } from "@liveagent/ui/lib/chat/conversationReferenceDrag";
 import type {
   CodeMentionReference,
@@ -143,11 +147,20 @@ export interface MentionComposerHandle {
   ) => ConversationReferenceInsertResult;
   insertCodeMention: (reference: CodeMentionReference) => void;
   /**
-   * Appends `text` to the end of the draft as a Markdown blockquote and parks
-   * the caret on a fresh line below it. Returns false when the composer is
+   * Appends a quote chip at the end of the draft. The chip serializes as a
+   * Markdown blockquote. Returns false when the composer is
    * unavailable/disabled or the text is blank.
    */
   insertQuote: (text: string) => boolean;
+  /**
+   * Adds a pending comment chip (or replaces the one with the same id). The
+   * comments are sent with the next message as one block after the text.
+   * Returns the comment id, or null when the composer is disabled or the
+   * comment is invalid/blank.
+   */
+  upsertComment: (comment: ComposerCommentInput) => string | null;
+  removeComment: (id: string) => void;
+  getComments: () => ComposerComment[];
   /**
    * Runs the draft as a registered action/prompt command instead of sending.
    * Returns false (send normally) when the draft is not a registered command.
@@ -185,7 +198,10 @@ export type MentionComposerDraftSegment =
   | { type: "commitMention"; commit: MentionComposerCommitMention }
   | { type: "gitFileMention"; file: MentionComposerGitFileMention }
   | { type: "conversationMention"; conversation: MentionComposerConversationMention }
-  | { type: "codeMention"; reference: CodeMentionReference };
+  | { type: "codeMention"; reference: CodeMentionReference }
+  | { type: "quote"; text: string }
+  /** Pending comment; always serialized after the rest of the draft. */
+  | { type: "comment"; comment: ComposerComment };
 
 export type MentionComposerDraft = {
   segments: MentionComposerDraftSegment[];
@@ -199,6 +215,8 @@ export type MentionComposerDraft = {
   /** Optional for backward compatibility with drafts persisted before conversation mentions. */
   conversationMentions?: MentionComposerConversationMention[];
   codeMentions: CodeMentionReference[];
+  /** Optional for backward compatibility with drafts persisted before comments. */
+  comments?: ComposerComment[];
   isEmpty: boolean;
 };
 
@@ -265,6 +283,7 @@ export const MENTION_INDEX_MAX_RESULTS = 5000;
 export const MENTION_REFETCH_DEBOUNCE_MS = 150;
 export const MENTION_TAG_ATTR = "data-mention-path";
 export const MENTION_KIND_ATTR = "data-mention-kind";
+export const QUOTE_TEXT_ATTR = "data-quote-text";
 export const SKILL_MENTION_NAME_ATTR = "data-skill-name";
 export const SKILL_MENTION_FILE_ATTR = "data-skill-file";
 export const SKILL_MENTION_BASE_DIR_ATTR = "data-skill-base-dir";

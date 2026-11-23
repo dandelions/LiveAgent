@@ -16,7 +16,9 @@ import {
   supportsPermissionMode,
   supportsRunSandbox,
 } from "@liveagent/ui/lib/kbrain/health";
+import { KBRAIN_HTML_PREVIEWS_CAPABILITY } from "@liveagent/ui/lib/plugins/types";
 import { createKBrainQueueClient } from "./queueClient";
+import { createSseRecordSplitter } from "./sseRecords";
 import { fetchKBrain, KBrainTransportError } from "./transport";
 import {
   KBRAIN_PROTOCOL_VERSION,
@@ -209,10 +211,22 @@ async function readError(response: Response) {
 }
 
 export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
-  async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  async function request<T>(
+    path: string,
+    init: RequestInit = {},
+    runAcknowledgement = false,
+  ): Promise<T> {
     const response = await fetchKBrain(path, init, inputOptions);
     if (!response.ok) throw await readError(response);
-    return (await response.json()) as T;
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      // A successful run submission with an unreadable body has an unknown
+      // outcome. Recover its identity even if the truncated body ends cleanly.
+      if (!runAcknowledgement) throw error;
+      if (init.signal?.aborted) throw init.signal.reason;
+      throw new KBrainTransportError(error);
+    }
   }
 
   async function requestMemory<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -405,11 +419,17 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
   }
 
   async function discoverMcpTools(
-    input: { cwd?: string; server_ids?: string[] } = {},
+    input: {
+      cwd?: string;
+      server_ids?: string[];
+      /** Only for backends with `mcp_tool_visibility`; the default is "model". */
+      audience?: "model" | "app";
+    } = {},
   ): Promise<unknown> {
     const query = new URLSearchParams();
     if (input.cwd) query.set("cwd", input.cwd);
     if (input.server_ids?.length) query.set("server_ids", input.server_ids.join(","));
+    if (input.audience) query.set("audience", input.audience);
     return request<unknown>(`/v1/mcp/tools?${query}`);
   }
 
@@ -681,7 +701,8 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
 
   /**
    * Run options with review_scope "per_run" when the backend reviews per permission mode, and
-   * without mcp_elicitation when the backend cannot relay form elicitations.
+   * without mcp_elicitation when the backend cannot relay form elicitations, and without
+   * html_previews when it cannot save previews.
    */
   async function scopedRunOptions<T extends KBrainRunOptions | undefined>(
     options: T,
@@ -698,6 +719,13 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
       !(health && hasFrozenCapability(health, MCP_ELICITATION_CAPABILITY))
     ) {
       const { mcp_elicitation: _unsupported, ...rest } = scoped;
+      scoped = rest;
+    }
+    if (
+      scoped.html_previews &&
+      !(health && hasFrozenCapability(health, KBRAIN_HTML_PREVIEWS_CAPABILITY))
+    ) {
+      const { html_previews: _unsupported, ...rest } = scoped;
       scoped = rest;
     }
     return scoped as T;
@@ -736,35 +764,50 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
     const path = `/v1/sessions/${encodeURIComponent(input.conversation_id)}/runs`;
     let accepted: KBrainRunAccepted;
     try {
-      accepted = await request<KBrainRunAccepted>(path, {
-        method: "POST",
-        body: JSON.stringify(body),
-        signal,
-      });
+      accepted = await request<KBrainRunAccepted>(
+        path,
+        {
+          method: "POST",
+          body: JSON.stringify(body),
+          signal,
+        },
+        true,
+      );
     } catch (error) {
-      if (
-        (!(error instanceof KBrainTransportError) && !signal?.aborted) ||
-        !input.client_request_id?.trim()
-      )
-        throw error;
-      // The backend run outlives the POST. Recover even after Stop so the caller
-      // can cancel the accepted run. Never resubmit the mutation, and keep the
-      // lookup independent of the user signal (which can abort during recovery).
-      try {
-        accepted = await request<KBrainRunAccepted>(
-          `${path}?client_request_id=${encodeURIComponent(input.client_request_id)}`,
-          { signal: AbortSignal.timeout(5_000) },
-        );
-      } catch {
-        if (signal?.aborted) throw signal.reason;
-        throw error;
-      }
+      return recoverRunAcceptance(error, input.conversation_id, input.client_request_id, signal);
     }
+    return validateRunAcceptance(input.conversation_id, accepted);
+  }
+
+  async function recoverRunAcceptance(
+    error: unknown,
+    conversationId: string,
+    clientRequestId: string,
+    signal?: AbortSignal,
+  ): Promise<KBrainRunAccepted> {
+    if (
+      (!(error instanceof KBrainTransportError) && !signal?.aborted) ||
+      !clientRequestId?.trim()
+    ) {
+      throw error;
+    }
+    // Stop still needs the receipt to cancel already-accepted work. Never
+    // replay the POST and never bind this bounded lookup to the user signal.
+    const accepted = await lookupRun(
+      conversationId,
+      clientRequestId,
+      AbortSignal.timeout(5_000),
+    ).catch(() => null);
+    if (!accepted) throw signal?.aborted ? signal.reason : error;
+    return validateRunAcceptance(conversationId, accepted);
+  }
+
+  function validateRunAcceptance(conversationId: string, accepted: KBrainRunAccepted) {
     if (accepted.version !== KBRAIN_PROTOCOL_VERSION) {
       throw new Error(`Unsupported K-brain protocol ${String(accepted.version)}`);
     }
     if (
-      accepted.conversation_id !== input.conversation_id ||
+      accepted.conversation_id !== conversationId ||
       !accepted.run_id ||
       !Number.isSafeInteger(accepted.accepted_seq) ||
       accepted.accepted_seq < 1
@@ -817,6 +860,7 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
     const state = await request<KBrainGoalState>(
       `/v1/sessions/${encodeURIComponent(conversationId)}/goal`,
       { method: "POST", body: JSON.stringify(body), signal },
+      input.action === "set" || input.action === "resume",
     );
     if (state.version !== KBRAIN_PROTOCOL_VERSION || state.conversation_id !== conversationId) {
       throw new Error("Malformed K-brain goal response");
@@ -1099,7 +1143,7 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
     if (!response.body) throw new Error("K-brain event stream has no body");
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
+    const records = createSseRecordSplitter();
     let lastSeq = afterSeq;
     const abortReader = () => {
       void reader.cancel().catch(() => undefined);
@@ -1139,13 +1183,13 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
       while (true) {
         const next = await reader.read();
         if (next.done) break;
-        buffer += decoder.decode(next.value, { stream: true });
-        const records = buffer.split(/\r?\n\r?\n/);
-        buffer = records.pop() ?? "";
-        for (const record of records) consume(record);
+        for (const record of records.push(decoder.decode(next.value, { stream: true }))) {
+          consume(record);
+        }
       }
-      buffer += decoder.decode();
-      if (buffer.trim()) throw new Error("K-brain event stream ended with an incomplete event");
+      for (const record of records.push(decoder.decode())) consume(record);
+      if (records.rest().trim())
+        throw new Error("K-brain event stream ended with an incomplete event");
     } finally {
       signal?.removeEventListener("abort", abortReader);
       await reader.cancel().catch(() => undefined);
@@ -1184,6 +1228,7 @@ export function createKBrainClient(inputOptions: KBrainClientOptions = {}) {
     getSession,
     updateSession,
     startRun,
+    recoverRunAcceptance,
     lookupRun,
     getGoal,
     postGoal,

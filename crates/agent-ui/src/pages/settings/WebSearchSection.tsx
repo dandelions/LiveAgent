@@ -10,6 +10,7 @@ import {
   SettingsSelectTrigger,
 } from "@liveagent/ui/components/settings/SettingsSelect";
 import { Button } from "@liveagent/ui/components/ui/button";
+import { useConfirmDialog } from "@liveagent/ui/components/ui/confirm-dialog";
 import { Input } from "@liveagent/ui/components/ui/input";
 import { Select, SelectItem, SelectValue } from "@liveagent/ui/components/ui/select";
 import { useLocale } from "@liveagent/ui/i18n";
@@ -62,6 +63,7 @@ function format(template: string, values: Record<string, string>): string {
  */
 export function WebSearchSection({ kbrain }: { kbrain: KBrainSettingsAdapter }) {
   const { t } = useLocale();
+  const { confirm, dialog } = useConfirmDialog();
   const fieldId = useId();
   const [settings, setSettings] = useState<KBrainWebSearchSettings | null>(null);
   const [supported, setSupported] = useState<boolean | null>(null);
@@ -219,6 +221,7 @@ export function WebSearchSection({ kbrain }: { kbrain: KBrainSettingsAdapter }) 
     <SettingsSection {...header} data-testid="web-search-settings" aria-busy={!!busy}>
       <SettingsCard>
         <SettingsRow
+          data-settings-anchor="web-search-provider"
           title={t("settings.webSearch.provider")}
           description={t("settings.webSearch.providerHint")}
           control={
@@ -251,6 +254,7 @@ export function WebSearchSection({ kbrain }: { kbrain: KBrainSettingsAdapter }) 
         />
         {usesKey && (
           <SettingsRow
+            data-settings-anchor="web-search-api-key"
             title={<label htmlFor={`${fieldId}-key`}>{t("settings.webSearch.apiKey")}</label>}
             description={
               <>
@@ -340,6 +344,7 @@ export function WebSearchSection({ kbrain }: { kbrain: KBrainSettingsAdapter }) 
         )}
         {provider !== "" && (
           <SettingsRow
+            data-settings-anchor="web-search-max-results"
             title={<label htmlFor={`${fieldId}-max`}>{t("settings.webSearch.maxResults")}</label>}
             description={t("settings.webSearch.maxResultsHint")}
             control={
@@ -383,7 +388,7 @@ export function WebSearchSection({ kbrain }: { kbrain: KBrainSettingsAdapter }) 
             aria-hidden="true"
             className={cn(
               "mt-1.5 size-1.5 shrink-0 rounded-full",
-              status?.kind === "available" ? "bg-emerald-500" : "bg-amber-500",
+              status?.kind === "available" ? "bg-success" : "bg-warning",
             )}
           />
           <span className="break-words">{statusText}</span>
@@ -420,8 +425,15 @@ export function WebSearchSection({ kbrain }: { kbrain: KBrainSettingsAdapter }) 
           size="sm"
           variant="outline"
           disabled={!!busy}
-          onClick={() => {
-            if (!dirty || window.confirm(t("settings.webSearch.discard"))) void refresh();
+          onClick={async () => {
+            const confirmed =
+              !dirty ||
+              (await confirm({
+                title: t("settings.webSearch.discard"),
+                confirmLabel: t("confirmDialog.discardAndReload"),
+                cancelLabel: t("confirmDialog.cancel"),
+              }));
+            if (confirmed) void refresh();
           }}
         >
           {t("settings.webSearch.reload")}
@@ -441,6 +453,7 @@ export function WebSearchSection({ kbrain }: { kbrain: KBrainSettingsAdapter }) 
           {error}
         </p>
       )}
+      {dialog}
     </SettingsSection>
   );
 }

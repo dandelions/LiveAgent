@@ -31,6 +31,8 @@ export type McpAuthConfig = {
 
 export type McpServerConfig = {
   id: string;
+  /** Display name; K-brain with `mcp_tool_server_ids` only. Tool names stay on `id`. */
+  name?: string;
   description?: string;
   docsUrl?: string;
   enabled: boolean;
@@ -95,6 +97,7 @@ export const RIGHT_DOCK_TOOL_KINDS = [
   "tunnel",
   "sshTunnel",
   "browser",
+  "plugins",
 ] as const;
 
 export type RightDockToolKind = (typeof RIGHT_DOCK_TOOL_KINDS)[number];
@@ -166,6 +169,17 @@ export type ChatTranscriptSettings = {
   width: number;
   /** Start thinking segments and tool-trace groups expanded (#1154). */
   expandProcessByDefault: boolean;
+  /**
+   * Detailed reply progress: name every backend stage with its timings and
+   * open live reasoning/tool output. Off (default) is the quiet view with a
+   * single status line per running turn.
+   */
+  showDetailedProgress: boolean;
+  /**
+   * Render "html preview" blocks and written .html files as sandboxed previews when
+   * K-brain supports it (capability html_previews). On by default.
+   */
+  htmlPreviews: boolean;
 };
 
 /**
@@ -195,6 +209,9 @@ export type CustomSettings = {
   // Desktop system notifications (and Dock badge) when a background run
   // finishes or blocks on approval / a question. Device-local, never synced.
   runNotifications: boolean;
+  // A short generated chime when a run finishes while the window is in the
+  // background. Off by default; device-local, never synced.
+  runCompletionSound: boolean;
   rightDock: RightDockSettings;
   composerContextDisplay: ComposerContextDisplayMode;
   // Empty strings select the built-in stacks for each typography role.

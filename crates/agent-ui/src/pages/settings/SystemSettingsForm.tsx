@@ -17,6 +17,8 @@ import {
   type Theme,
   updateCustomSettings,
   updateExpandProcessByDefault,
+  updateHtmlPreviews,
+  updateShowDetailedProgress,
   updateSystem,
 } from "@liveagent/app/lib/settings";
 import type { SettingsSectionProps } from "@liveagent/app/pages/settings/types";
@@ -126,8 +128,13 @@ function ProxySettingsRow({
   );
 }
 
-export function SystemSettingsForm(props: SettingsSectionProps) {
-  const { settings, setSettings } = props;
+export function SystemSettingsForm(
+  props: SettingsSectionProps & {
+    /** K-brain can save HTML previews (capability html_previews): show their switch. */
+    htmlPreviewsAvailable?: boolean;
+  },
+) {
+  const { settings, setSettings, htmlPreviewsAvailable = false } = props;
   const { t, locale } = useLocale();
 
   useEffect(() => preloadTimeZoneOptions(locale), [locale]);
@@ -392,6 +399,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
     <div className="settings-system-section space-y-8 pb-10">
       <SettingsGroup title={t("settings.executionMode")}>
         <SettingsRow
+          data-settings-anchor="execution-mode"
           title={t("settings.defaultExecutionMode")}
           description={activeExecutionMode.description}
           control={
@@ -418,6 +426,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
 
       <SettingsGroup title={t("settings.groupGeneral")}>
         <SettingsRow
+          data-settings-anchor="appearance"
           title={t("settings.appearance")}
           description={t("settings.appearanceDesc")}
           control={
@@ -439,6 +448,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
         />
 
         <SettingsRow
+          data-settings-anchor="language"
           title={t("settings.language")}
           description={t("settings.languageDesc")}
           control={
@@ -467,12 +477,14 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
         />
 
         <SettingsRow
+          data-settings-anchor="time-zone"
           title={t("settings.defaultTimeZone")}
           description={t("settings.defaultTimeZoneDesc")}
           control={<PlanningTimeZoneSetting />}
         />
 
         <SettingsRow
+          data-settings-anchor="expand-process"
           title={t("settings.expandProcessByDefault")}
           description={t("settings.expandProcessByDefaultDesc")}
           control={
@@ -490,11 +502,49 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
             />
           }
         />
+
+        <SettingsRow
+          title={t("settings.showDetailedProgress")}
+          description={t("settings.showDetailedProgressDesc")}
+          control={
+            <AgentActivationSwitch
+              checked={settings.customSettings.chatTranscript.showDetailedProgress}
+              title={t("settings.showDetailedProgress")}
+              onToggle={() =>
+                setSettings((prev) =>
+                  updateShowDetailedProgress(
+                    prev,
+                    !prev.customSettings.chatTranscript.showDetailedProgress,
+                  ),
+                )
+              }
+            />
+          }
+        />
+
+        {htmlPreviewsAvailable ? (
+          <SettingsRow
+            data-settings-anchor="html-previews"
+            title={t("settings.htmlPreviews")}
+            description={t("settings.htmlPreviewsDesc")}
+            control={
+              <AgentActivationSwitch
+                checked={settings.customSettings.chatTranscript.htmlPreviews}
+                title={t("settings.htmlPreviews")}
+                onToggle={() =>
+                  setSettings((prev) =>
+                    updateHtmlPreviews(prev, !prev.customSettings.chatTranscript.htmlPreviews),
+                  )
+                }
+              />
+            }
+          />
+        ) : null}
       </SettingsGroup>
 
       <SidebarShortcutsSection settings={settings} setSettings={setSettings} />
 
-      <SettingsGroup title={t("settings.systemProxy")}>
+      <SettingsGroup data-settings-anchor="system-proxy" title={t("settings.systemProxy")}>
         <div>
           <ProxySettingsRow
             title={t("settings.systemProxyEnable")}
@@ -685,7 +735,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
 
       <SystemSettingsExtensions settings={settings} setSettings={setSettings} />
 
-      <SettingsGroup title={t("settings.fontFamily")}>
+      <SettingsGroup data-settings-anchor="font-family" title={t("settings.fontFamily")}>
         {FONT_FAMILY_FIELDS.map(({ key, labelKey }) => {
           const currentValue = settings.customSettings[key];
           const selectValue = toFontFamilySelectValue(
@@ -741,7 +791,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
         })}
       </SettingsGroup>
 
-      <SettingsGroup title={t("settings.fontSize")}>
+      <SettingsGroup data-settings-anchor="font-size" title={t("settings.fontSize")}>
         {fontScaleZones.map((zone) => (
           <SettingsRow
             key={zone.key}

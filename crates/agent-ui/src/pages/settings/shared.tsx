@@ -3,7 +3,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "@liveagent/ui/components/settings/SettingsLayout";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { Switch } from "../../components/ui/switch";
 import { cn } from "../../lib/shared/utils";
 
@@ -12,9 +12,13 @@ export {
   ConfirmDeletePopover,
 } from "../../components/ui/confirm-action-popover";
 
-export function SettingsGroup({ title, children }: { title: string; children: ReactNode }) {
+export function SettingsGroup({
+  title,
+  children,
+  ...props
+}: Omit<ComponentProps<"section">, "title"> & { title: string; children: ReactNode }) {
   return (
-    <SettingsSection title={title}>
+    <SettingsSection {...props} title={title}>
       <SettingsCard>{children}</SettingsCard>
     </SettingsSection>
   );
@@ -43,9 +47,11 @@ export function AgentActivationSwitch(props: {
   title: string;
   disabled?: boolean;
   className?: string;
+  /** Stable hook for end-to-end tests. */
+  testId?: string;
   onToggle: () => void;
 }) {
-  const { checked, title, disabled = false, className, onToggle } = props;
+  const { checked, title, disabled = false, className, testId, onToggle } = props;
 
   return (
     <Switch
@@ -55,6 +61,7 @@ export function AgentActivationSwitch(props: {
       aria-label={title}
       onCheckedChange={onToggle}
       className={className}
+      data-testid={testId}
     />
   );
 }

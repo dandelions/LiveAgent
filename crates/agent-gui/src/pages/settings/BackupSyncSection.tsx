@@ -587,6 +587,7 @@ export function BackupSyncSection(props: SettingsSectionProps) {
       <SettingsSection title={t("settings.backupLocalTitle")}>
         <SettingsCard>
           <SettingsRow
+            data-settings-anchor="backup-export"
             title={t("settings.backupExport")}
             description={t("settings.backupExportHint")}
             control={
@@ -601,6 +602,7 @@ export function BackupSyncSection(props: SettingsSectionProps) {
             }
           />
           <SettingsRow
+            data-settings-anchor="backup-import"
             title={t("settings.backupImport")}
             description={
               <span>
@@ -627,7 +629,7 @@ export function BackupSyncSection(props: SettingsSectionProps) {
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title={t("settings.backupSyncTitle")}>
+      <SettingsSection data-settings-anchor="backup-sync" title={t("settings.backupSyncTitle")}>
         <SettingsCard>
           <SettingsRow
             title={
@@ -801,7 +803,7 @@ export function BackupSyncSection(props: SettingsSectionProps) {
                         </div>
 
                         {dirty && !syncLocked ? (
-                          <div className="flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-warning">
                             <AlertTriangle className="size-3.5 shrink-0" />
                             {t("settings.backupSyncDirtyHint")}
                           </div>
@@ -873,6 +875,7 @@ export function BackupSyncSection(props: SettingsSectionProps) {
       <SettingsSection title={t("settings.backupScopeTitle")}>
         <SettingsCard>
           <SettingsRow
+            data-settings-anchor="backup-scope"
             title={t("settings.backupScopeSummaryTitle")}
             description={t("settings.backupScopeSummary")}
             control={
