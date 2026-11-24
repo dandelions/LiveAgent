@@ -1,12 +1,17 @@
+import "@liveagent/ui/i18n/namespaces/settings";
 import type { UsagePlanDisplay, UsageRelativeTime } from "@liveagent/app/lib/providers/usageQuery";
 import type { PromptCacheHintMode, ProviderId } from "@liveagent/app/lib/settings";
 import {
+  AudioLines,
   ClaudeIcon,
   DeepseekIcon,
+  FileText,
   GeminiIcon,
   GrokIcon,
+  ImageIcon,
   Info,
   OpenaiChatgptIcon,
+  Video,
 } from "@liveagent/ui/components/IconSet";
 import { SwitchRoot, SwitchThumb } from "@liveagent/ui/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@liveagent/ui/components/ui/tooltip";
@@ -124,7 +129,7 @@ export function ProviderBrandIcon({ type }: { type: ProviderId }) {
   if (type === "gemini") return <GeminiIcon height="1em" />;
   if (type === "xai") return <GrokIcon height="1em" />;
   if (type === "deepseek") return <DeepseekIcon height="1em" />;
-  return <OpenaiChatgptIcon height="1em" className="fill-current dark:text-white" />;
+  return <OpenaiChatgptIcon height="1em" className="fill-current dark:text-foreground" />;
 }
 
 /**
@@ -279,3 +284,13 @@ export function itemsByIdOrder<T extends { id: string }>(
     return item ? [item] : [];
   });
 }
+
+// Input modality icons on the right of a model row. Text is common to every model
+// and is not marked; only the extra modalities (image/audio/video/PDF) are shown,
+// in the catalog's canonical order.
+export const MODEL_MODALITY_ICONS = [
+  { modality: "image", Icon: ImageIcon, labelKey: "settings.modelModalityImage" },
+  { modality: "audio", Icon: AudioLines, labelKey: "settings.modelModalityAudio" },
+  { modality: "video", Icon: Video, labelKey: "settings.modelModalityVideo" },
+  { modality: "pdf", Icon: FileText, labelKey: "settings.modelModalityPdf" },
+] as const;

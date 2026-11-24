@@ -1,3 +1,4 @@
+import "@liveagent/ui/i18n/namespaces/projectTools";
 import { getFileTypeIcon } from "@liveagent/ui/components/chat/fileTypeIcons";
 import {
   AlertTriangle,
@@ -43,7 +44,7 @@ import {
   entryIcon,
   formatBytes,
 } from "./workspaceSftpModel";
-import { joinPath, normalizePath, parentPath } from "./workspaceSftpPaths";
+import { absolutePathForCopy, joinPath, normalizePath, parentPath } from "./workspaceSftpPaths";
 
 export type SftpOpenFileRequest = {
   side: SftpSide;
@@ -117,49 +118,6 @@ function initialPane(path: string): PaneState {
     error: null,
     selectedPaths: [],
   };
-}
-
-function isAbsoluteLocalPath(path: string) {
-  const value = path.trim();
-  return (
-    value.startsWith("/") ||
-    /^[a-zA-Z]:[\\/]/.test(value) ||
-    /^\\\\/.test(value) ||
-    /^\/\/[^/\\]+[\\/][^/\\]+/.test(value)
-  );
-}
-
-function localPathSeparator(root: string) {
-  return root.includes("\\") && !root.includes("/") ? "\\" : "/";
-}
-
-function localAbsolutePathForCopy(workdir: string, path: string) {
-  const rawPath = path.trim();
-  if (isAbsoluteLocalPath(rawPath)) return rawPath;
-
-  const base = workdir.trim();
-  const relativePath = normalizePath(rawPath, "local");
-  if (!relativePath || relativePath === ".") return base;
-
-  const separator = localPathSeparator(base);
-  const normalizedRelativePath = relativePath.replace(/\//g, separator);
-  const trimmedBase = base.replace(/[\\/]+$/, "");
-  if (!trimmedBase) return `${separator}${normalizedRelativePath}`;
-
-  return `${trimmedBase}${separator}${normalizedRelativePath}`;
-}
-
-function remoteAbsolutePathForCopy(path: string) {
-  const normalized = normalizePath(path, "remote");
-  if (!normalized || normalized === ".") return "/";
-  if (normalized.startsWith("/")) return normalized;
-  return `/${normalized.replace(/^\/+/, "")}`;
-}
-
-function absolutePathForCopy(side: SftpSide, path: string, workdir: string) {
-  return side === "local"
-    ? localAbsolutePathForCopy(workdir, path)
-    : remoteAbsolutePathForCopy(path);
 }
 
 function entryTypeLabel(entry: SftpEntry, t: (key: string) => string) {
@@ -1180,7 +1138,7 @@ export function WorkspaceSftpPanel(props: WorkspaceSftpPanelProps) {
                               aria-pressed={isSelected}
                               className={cn(
                                 "grid w-full cursor-default grid-cols-composer-control items-center gap-3 rounded-md",
-                                "px-2 py-1.5 text-left text-xs hover:bg-muted",
+                                "px-row-x py-row-y text-left text-xs hover:bg-muted",
                                 !isMobileLayout && "touch-none",
                                 isSelected &&
                                   "bg-success/10 text-foreground ring-1 ring-success/20",

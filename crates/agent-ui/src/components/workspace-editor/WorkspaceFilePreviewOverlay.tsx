@@ -1,3 +1,4 @@
+import "@liveagent/ui/i18n/namespaces/projectTools";
 import {
   copyWorkspacePreviewImage,
   saveWorkspacePreviewImage,
@@ -60,6 +61,7 @@ import {
   type WorkspaceTextRangeSource,
 } from "@liveagent/ui/components/workspace-editor/workspaceTextRange";
 import { useLocale } from "@liveagent/ui/i18n/index";
+import { base64ToBytes } from "@liveagent/ui/lib/browser/embeddedBrowser";
 import type { SftpClient } from "@liveagent/ui/lib/sftp/types";
 import { copyTextToClipboard as copySharedTextToClipboard } from "@liveagent/ui/lib/shared/clipboard";
 import { cn } from "@liveagent/ui/lib/shared/utils";
@@ -133,15 +135,6 @@ function toMessage(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) return error.message;
   const text = String(error ?? "").trim();
   return text || fallback;
-}
-
-function base64ToBytes(data: string) {
-  const binary = window.atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
 }
 
 function bytesToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -918,7 +911,7 @@ function PreviewBody(props: {
 
   if (preview.kind === "document") {
     return (
-      <div className="h-full overflow-auto bg-neutral-200 p-4 dark:bg-neutral-950">
+      <div className="h-full overflow-auto bg-media-canvas p-4">
         <div ref={docxContainerRef} className="workspace-file-preview-docx min-h-full" />
       </div>
     );
@@ -1003,7 +996,7 @@ function PreviewBody(props: {
     return (
       <div className="flex h-full items-center justify-center overflow-auto p-4 sm:p-6">
         {/* biome-ignore lint/a11y/useMediaCaption: Workspace media previews do not have a separate caption track available. */}
-        <video className="max-h-full max-w-full bg-black" controls src={preview.blobUrl}>
+        <video className="max-h-full max-w-full bg-media-backdrop" controls src={preview.blobUrl}>
           {basename(preview.path)}
         </video>
       </div>

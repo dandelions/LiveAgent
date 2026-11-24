@@ -1,3 +1,4 @@
+import "@liveagent/ui/i18n/namespaces/usageStats";
 import { useLocale } from "@liveagent/ui/i18n";
 import { useMemo, useRef, useState } from "react";
 import { cn } from "../../../lib/shared/utils";
@@ -117,7 +118,7 @@ export function UsageHeatmap({ daily, today }: { daily: readonly UsageDay[]; tod
         <div className="flex min-w-0 gap-1.5">
           {/* Out of flow so the labels never make the column taller than the cells. */}
           <div className="relative w-6 shrink-0 text-tiny leading-none text-muted-foreground">
-            <div className="absolute inset-x-0 bottom-0 top-4 grid grid-rows-7 gap-[3px]">
+            <div className="absolute inset-x-0 bottom-0 top-4 grid grid-rows-7 gap-3px">
               {WEEKDAY_ROWS.map((key, row) => (
                 <span key={key || row} className="flex items-center justify-end pr-0.5">
                   {key ? t(key) : ""}
@@ -138,7 +139,7 @@ export function UsageHeatmap({ daily, today }: { daily: readonly UsageDay[]; tod
               ))}
             </div>
             <div
-              className="grid gap-[3px]"
+              className="grid gap-3px"
               style={COLUMNS}
               onMouseLeave={() => setHover(null)}
               aria-hidden="true"
@@ -147,7 +148,7 @@ export function UsageHeatmap({ daily, today }: { daily: readonly UsageDay[]; tod
                 <div
                   key={week.start}
                   className={cn(
-                    "grid grid-rows-7 gap-[3px] rounded-xs",
+                    "grid grid-rows-7 gap-3px rounded-xs",
                     byColumn &&
                       hover?.column === column &&
                       "outline outline-1 outline-offset-1 outline-foreground/50",

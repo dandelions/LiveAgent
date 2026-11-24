@@ -1,3 +1,4 @@
+import "@liveagent/ui/i18n/namespaces/settings";
 import {
   ProviderCopyConfigButton,
   ProviderSettingsExtension,
@@ -745,10 +746,7 @@ function ProviderCardRow(props: {
             {provider.name}
           </button>
           {provider.useSystemProxy ? (
-            <span
-              className="shrink-0 text-blue-500 dark:text-blue-400"
-              title={t("settings.providerUseSystemProxy")}
-            >
+            <span className="shrink-0 text-info" title={t("settings.providerUseSystemProxy")}>
               <Waypoints className="size-3" />
             </span>
           ) : null}

@@ -1,3 +1,4 @@
+import "@liveagent/ui/i18n/namespaces/settings";
 import {
   Check,
   ClaudeIcon,
@@ -86,7 +87,7 @@ function ProviderTypeIcon({ type }: { type: ProviderId }) {
   if (type === "gemini") return <GeminiIcon height="1em" />;
   if (type === "xai") return <GrokIcon height="1em" />;
   if (type === "deepseek") return <DeepseekIcon height="1em" />;
-  return <OpenaiChatgptIcon height="1em" className="fill-current dark:text-white" />;
+  return <OpenaiChatgptIcon height="1em" className="fill-current dark:text-foreground" />;
 }
 
 function itemKey(item: CherryProviderImportItem) {

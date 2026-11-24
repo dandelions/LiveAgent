@@ -1,3 +1,4 @@
+import "@liveagent/ui/i18n/namespaces/projectTools";
 import { getFileTypeIcon } from "@liveagent/ui/components/chat/fileTypeIcons";
 import { AlertTriangle, ChevronRight, FolderTree, Loader2 } from "@liveagent/ui/components/IconSet";
 import { KbdShortcut } from "@liveagent/ui/components/ui/kbd";
@@ -376,7 +377,7 @@ export function SftpPathNavigator(props: {
                     role="option"
                     aria-selected={activeIndex === index}
                     className={cn(
-                      "flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left",
+                      "flex w-full items-center gap-2.5 rounded-lg px-row-x py-row-y text-left",
                       "transition-colors",
                       activeIndex === index
                         ? "bg-primary/[0.08] text-foreground"
